@@ -1,0 +1,1349 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MediaFlow - 智能媒体库整理与归档工作台</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#eef2ff',
+              100: '#e0e7ff',
+              500: '#6366f1',
+              600: '#4f46e5',
+              700: '#4338ca',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap');
+    body {
+      font-family: 'Plus Jakarta Sans', 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+      transition: background-color 0.25s ease, color 0.25s ease;
+    }
+    .light .app-card {
+      background-color: #ffffff;
+      border: 1px solid #e2e8f0;
+      box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.04);
+    }
+    .light .app-card-active {
+      border-color: #6366f1;
+      background-color: #f8faff;
+      box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.15);
+    }
+    .dark .app-card {
+      background-color: #0f172a;
+      border: 1px solid #1e293b;
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
+    }
+    .dark .app-card-active {
+      border-color: #818cf8;
+      background-color: #172033;
+      box-shadow: 0 0 0 2px rgba(129, 140, 248, 0.25);
+    }
+
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    .light ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+    .dark ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-800 dark:bg-[#0b0f19] dark:text-slate-100 min-h-screen flex flex-col antialiased selection:bg-indigo-500 selection:text-white">
+
+  <!-- ================= 顶部全局导航栏 ================= -->
+  <header class="sticky top-0 z-40 w-full bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 transition-colors">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+      
+      <!-- 系统Logo与优化后的系统名称 -->
+      <div class="flex items-center space-x-6">
+        <div class="flex items-center space-x-3 cursor-pointer" onclick="showTaskDetailView()">
+          <div class="w-9 h-9 rounded-xl bg-gradient-to-tr from-indigo-600 to-indigo-400 flex items-center justify-center shadow-md shadow-indigo-500/20 text-white">
+            <i class="fa-solid fa-layer-group text-base"></i>
+          </div>
+          <div>
+            <div class="flex items-center gap-2">
+              <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
+              <span class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v1.3</span>
+            </div>
+            <!-- 完善后的命名 -->
+            <p class="text-[11px] text-slate-500 dark:text-slate-400">智能媒体库整理与归档工作台</p>
+          </div>
+        </div>
+
+        <!-- 外部连接状态指示 -->
+        <div class="hidden lg:flex items-center space-x-3 px-3 py-1 rounded-full bg-slate-100 dark:bg-slate-800/60 text-[11px] text-slate-600 dark:text-slate-300">
+          <div class="flex items-center space-x-1.5" title="CloudDrive2 挂载点正常">
+            <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+            <span>CD2 云盘</span>
+          </div>
+          <span class="text-slate-300 dark:text-slate-700">•</span>
+          <div class="flex items-center space-x-1.5" title="MoviePilot v2.15.6 正常">
+            <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+            <span>MP v2.15.6</span>
+          </div>
+          <span class="text-slate-300 dark:text-slate-700">•</span>
+          <div class="flex items-center space-x-1.5" title="TMDB 元数据通道就绪">
+            <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+            <span>TMDB</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 右侧控制：发起初检 + 主题切换 -->
+      <div class="flex items-center space-x-3">
+        <button onclick="openNewTaskModal()" class="flex items-center space-x-2 px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold shadow-sm shadow-indigo-600/30 transition transform active:scale-95">
+          <i class="fa-solid fa-plus text-xs"></i>
+          <span>新建初检任务</span>
+        </button>
+
+        <button id="themeToggle" onclick="toggleTheme()" class="w-9 h-9 rounded-lg border border-slate-200 dark:border-slate-700/80 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:text-indigo-600 dark:hover:text-indigo-400 flex items-center justify-center transition shadow-sm" title="切换浅色 / 暗黑主题">
+          <i id="themeIcon" class="fa-solid fa-moon text-sm"></i>
+        </button>
+      </div>
+
+    </div>
+  </header>
+
+  <!-- ================= 主内容布局 (左侧栏 + 右侧主工作区) ================= -->
+  <div class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 flex flex-col md:flex-row gap-6">
+
+    <!-- ================= 左侧导航侧边栏 (任务列表 + MoviePilot 运维模块) ================= -->
+    <aside class="w-full md:w-80 flex-shrink-0 space-y-6">
+      
+      <!-- 1. 初检任务列表模块 (支持大批量任务滚动、搜索、重新初检、删除) -->
+      <div class="space-y-3">
+        <div class="flex items-center justify-between">
+          <h2 class="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
+            <i class="fa-solid fa-list-check text-indigo-500"></i>
+            初检任务列表
+            <span class="px-1.5 py-0.2 rounded-full bg-slate-200 dark:bg-slate-800 text-[10px] text-slate-700 dark:text-slate-300 font-mono" id="taskCountBadge">6</span>
+          </h2>
+          <!-- 批量清理已完成任务 -->
+          <button onclick="clearCompletedTasks()" class="text-[11px] text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 transition" title="清理已完结任务">
+            <i class="fa-solid fa-broom mr-0.5"></i> 清理已完
+          </button>
+        </div>
+
+        <!-- 任务列表轻量搜索框 (轻松应对30+任务) -->
+        <div class="relative">
+          <i class="fa-solid fa-magnifying-glass absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 text-[11px]"></i>
+          <input type="text" id="taskSearchInput" oninput="filterTaskList()" placeholder="按目录名/剧名过滤任务..." class="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg pl-7 pr-2.5 py-1 text-xs text-slate-700 dark:text-slate-200 placeholder-slate-400 focus:outline-none focus:border-indigo-500 transition">
+        </div>
+
+        <!-- 任务项滚动列表 (限高可滚动，卡片自带重检与删除悬浮按钮) -->
+        <div class="space-y-2 max-h-[340px] overflow-y-auto pr-1" id="taskMenuList">
+          <!-- 动态注入任务卡片 -->
+        </div>
+      </div>
+
+      <!-- 2. MoviePilot 运维模块 (按需求追加：订阅清理、媒体整理修复、资源下载) -->
+      <div class="pt-4 border-t border-slate-200 dark:border-slate-800 space-y-2">
+        <h2 class="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 flex items-center justify-between">
+          <span class="flex items-center gap-1.5">
+            <i class="fa-solid fa-robot text-indigo-500"></i>
+            MoviePilot 运维
+          </span>
+          <span class="text-[10px] font-mono px-1.5 py-0.2 rounded bg-indigo-50 dark:bg-indigo-950/70 text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800">v2.15.6</span>
+        </h2>
+
+        <div class="space-y-1 text-xs font-medium">
+          <!-- 选项 1: 订阅清理 (电视剧和电影) -->
+          <button onclick="openMoviePilotView('subscriptions')" id="mp-nav-subscriptions" class="w-full flex items-center justify-between px-3 py-2 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition text-left group">
+            <span class="flex items-center gap-2">
+              <i class="fa-solid fa-tags text-slate-400 group-hover:text-indigo-500 text-xs"></i>
+              <span>订阅清理 (剧集 / 电影)</span>
+            </span>
+            <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950/70 text-amber-700 dark:text-amber-400 border border-amber-200 dark:border-amber-800 font-mono">3项已完结</span>
+          </button>
+
+          <!-- 选项 2: 媒体整理修复 -->
+          <button onclick="openMoviePilotView('transfer_repair')" id="mp-nav-transfer_repair" class="w-full flex items-center justify-between px-3 py-2 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition text-left group">
+            <span class="flex items-center gap-2">
+              <i class="fa-solid fa-wrench text-slate-400 group-hover:text-indigo-500 text-xs"></i>
+              <span>媒体整理修复</span>
+            </span>
+            <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-100 dark:bg-blue-950/70 text-blue-700 dark:text-blue-400 border border-blue-200 dark:border-blue-800 font-mono">1项卡滞</span>
+          </button>
+
+          <!-- 选项 3: 资源下载 -->
+          <button onclick="openMoviePilotView('download')" id="mp-nav-download" class="w-full flex items-center justify-between px-3 py-2 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition text-left group">
+            <span class="flex items-center gap-2">
+              <i class="fa-solid fa-cloud-arrow-down text-slate-400 group-hover:text-indigo-500 text-xs"></i>
+              <span>资源下载</span>
+            </span>
+            <span class="text-[10px] text-slate-400 font-normal">做种≥2 优选</span>
+          </button>
+        </div>
+      </div>
+
+    </aside>
+
+    <!-- ================= 右侧主工作区 (任务初检结果看板 / MoviePilot 运维视图) ================= -->
+    <main class="flex-1 min-w-0 space-y-6">
+
+      <!-- ================= 视图 A：初检任务结果看板 (默认主视图) ================= -->
+      <div id="taskDetailView" class="space-y-6">
+        
+        <!-- 任务头部信息栏 -->
+        <div class="app-card rounded-2xl p-5">
+          <div class="flex flex-wrap items-center justify-between gap-4">
+            <div>
+              <div class="flex items-center gap-2">
+                <span class="text-xs font-semibold px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">当前任务</span>
+                <h2 class="text-lg font-bold text-slate-900 dark:text-white tracking-tight" id="currentTaskTitle">
+                  奔跑吧！兄弟 (2014) [tmdbid=98031]
+                </h2>
+              </div>
+              <div class="flex flex-wrap items-center gap-y-1 gap-x-4 mt-1.5 text-xs text-slate-500 dark:text-slate-400">
+                <span class="flex items-center gap-1"><i class="fa-regular fa-folder text-indigo-500"></i> 初检目录: <code class="text-slate-700 dark:text-slate-300" id="currentTaskPath">/115/Library_incs/nas/电视剧/综艺/</code></span>
+                <span>• 绑定: TMDB (98031)</span>
+                <span>• 检查时间: 2026-10-27 15:10</span>
+              </div>
+            </div>
+
+            <!-- 当前任务操作按钮 -->
+            <div class="flex items-center space-x-2">
+              <button onclick="reInspectCurrentTask()" class="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-medium hover:bg-slate-100 dark:hover:bg-slate-700 transition flex items-center gap-1.5">
+                <i class="fa-solid fa-arrows-rotate text-xs"></i>
+                <span>重新初检</span>
+              </button>
+              <button onclick="deleteCurrentTask()" class="px-3 py-1.5 rounded-lg border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/30 text-red-600 dark:text-red-400 text-xs font-medium hover:bg-red-100 dark:hover:bg-red-900/50 transition flex items-center gap-1.5" title="删除此任务">
+                <i class="fa-solid fa-trash-can text-xs"></i>
+                <span>删除任务</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- 四大核心结果分类卡片 (点击即时钻取) -->
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-3.5 mt-5">
+            
+            <div onclick="filterResultCategory('archive')" id="cat-card-archive" class="cursor-pointer rounded-xl p-3.5 border-2 border-indigo-500 bg-indigo-50/70 dark:bg-indigo-950/30 transition relative group">
+              <div class="flex items-center justify-between text-xs font-medium text-emerald-800 dark:text-emerald-300 mb-1">
+                <span>齐全可归档</span>
+                <i class="fa-solid fa-box-archive text-emerald-600 dark:text-emerald-400"></i>
+              </div>
+              <div class="text-2xl font-bold text-emerald-700 dark:text-emerald-400" id="catCountArchive">1 <span class="text-xs font-normal">季已齐</span></div>
+              <p class="text-[11px] text-emerald-600/80 dark:text-emerald-400/80 mt-1">点击查看可归档清单 ➔</p>
+            </div>
+
+            <div onclick="filterResultCategory('review')" id="cat-card-review" class="cursor-pointer rounded-xl p-3.5 border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 hover:border-amber-400 transition relative group">
+              <div class="flex items-center justify-between text-xs font-medium text-amber-700 dark:text-amber-400 mb-1">
+                <span>待复核清理</span>
+                <i class="fa-solid fa-broom text-amber-500"></i>
+              </div>
+              <div class="text-2xl font-bold text-amber-600 dark:text-amber-400" id="catCountReview">1 <span class="text-xs font-normal">处需清理</span></div>
+              <p class="text-[11px] text-slate-500 dark:text-slate-400 mt-1">去重/纠偏处置 ➔</p>
+            </div>
+
+            <div onclick="filterResultCategory('download')" id="cat-card-download" class="cursor-pointer rounded-xl p-3.5 border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 hover:border-blue-400 transition relative group">
+              <div class="flex items-center justify-between text-xs font-medium text-blue-700 dark:text-blue-400 mb-1">
+                <span>真缺集待补</span>
+                <i class="fa-solid fa-cloud-arrow-down text-blue-500"></i>
+              </div>
+              <div class="text-2xl font-bold text-blue-600 dark:text-blue-400" id="catCountDownload">0 <span class="text-xs font-normal">季</span></div>
+              <p class="text-[11px] text-slate-500 dark:text-slate-400 mt-1">补缺/整理修复 ➔</p>
+            </div>
+
+            <div onclick="filterResultCategory('airing')" id="cat-card-airing" class="cursor-pointer rounded-xl p-3.5 border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 hover:border-indigo-400 transition relative group">
+              <div class="flex items-center justify-between text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
+                <span>连载留源</span>
+                <i class="fa-solid fa-clock text-slate-500"></i>
+              </div>
+              <div class="text-2xl font-bold text-slate-800 dark:text-slate-200" id="catCountAiring">0 <span class="text-xs font-normal">季</span></div>
+              <p class="text-[11px] text-slate-500 dark:text-slate-400 mt-1">追更留源清单 ➔</p>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- 钻取清单与专属操作区 (按分类严格隔离批量按钮) -->
+        <div class="app-card rounded-2xl p-5 space-y-4">
+          
+          <div class="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-200 dark:border-slate-800">
+            <div class="flex items-center space-x-3">
+              <div class="flex items-center space-x-2">
+                <input type="checkbox" id="selectAllCheckbox" onchange="toggleSelectAll(this)" class="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer">
+                <label for="selectAllCheckbox" class="text-xs font-semibold text-slate-700 dark:text-slate-300 cursor-pointer select-none" id="selectAllLabel">
+                  全选齐全剧集
+                </label>
+              </div>
+              <span class="text-xs text-slate-400">|</span>
+              <span class="text-xs text-slate-500 dark:text-slate-400" id="selectedCountText">已选择 <b class="text-indigo-600 dark:text-indigo-400">0</b> 项</span>
+            </div>
+
+            <!-- 专属批量按钮容器 -->
+            <div class="flex items-center space-x-2.5" id="batchActionContainer"></div>
+          </div>
+
+          <!-- 诊断浮条 -->
+          <div id="diagnosticBanner" class="p-3.5 rounded-xl text-xs flex items-start space-x-3"></div>
+
+          <!-- 剧集清单容器 -->
+          <div class="space-y-3" id="episodeItemContainer"></div>
+
+        </div>
+
+      </div>
+
+      <!-- ================= 视图 B：MoviePilot 订阅清理 (剧集 / 电影) ================= -->
+      <div id="mpSubscriptionsView" class="hidden space-y-6">
+        <div class="app-card rounded-2xl p-5 space-y-4">
+          <div class="flex items-center justify-between">
+            <div>
+              <h2 class="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                <i class="fa-solid fa-tags text-indigo-500"></i>
+                MoviePilot 订阅清理管理
+              </h2>
+              <p class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">识别已全季播完入库或放弃追更的订阅，一键退订以降低定时轮询负载</p>
+            </div>
+            <!-- 剧集 / 电影分类过滤 -->
+            <div class="flex items-center bg-slate-100 dark:bg-slate-800 rounded-lg p-1 text-xs">
+              <button onclick="switchSubFilter('all')" id="sub-filter-all" class="px-3 py-1 rounded-md bg-white dark:bg-slate-700 shadow-sm font-semibold text-indigo-600 dark:text-white">全部 (8)</button>
+              <button onclick="switchSubFilter('tv')" id="sub-filter-tv" class="px-3 py-1 rounded-md text-slate-600 dark:text-slate-300">电视剧 (5)</button>
+              <button onclick="switchSubFilter('movie')" id="sub-filter-movie" class="px-3 py-1 rounded-md text-slate-600 dark:text-slate-300">电影 (3)</button>
+            </div>
+          </div>
+
+          <!-- 快捷操作条 -->
+          <div class="flex items-center justify-between pt-2 border-t border-slate-100 dark:border-slate-800 text-xs">
+            <span class="text-slate-500">发现 <b class="text-amber-500">3</b> 个订阅已全部播完入库，建议清理</span>
+            <button onclick="executeBatchCleanSubs()" class="px-3.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold transition flex items-center gap-1.5 shadow-sm">
+              <i class="fa-solid fa-broom"></i>
+              <span>一键清理已完结订阅 (3项)</span>
+            </button>
+          </div>
+
+          <!-- 订阅项目清单 -->
+          <div class="space-y-2.5 pt-1" id="subListContainer">
+            <!-- 订阅项 1 (已完结电视剧) -->
+            <div class="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-900/40 flex items-center justify-between text-xs">
+              <div class="flex items-center space-x-3">
+                <span class="px-2 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950/70 text-indigo-600 dark:text-indigo-400 font-mono text-[10px]">电视剧</span>
+                <div>
+                  <div class="font-bold text-slate-900 dark:text-white">漫长的季节 (2023) - Season 1</div>
+                  <div class="text-slate-400 text-[11px] mt-0.5">状态: 全 12 集已齐并归档 • 订阅已无新增集数</div>
+                </div>
+              </div>
+              <button onclick="alert('已退订 [漫长的季节]，释放定时搜索任务')" class="px-2.5 py-1 rounded-md bg-amber-100 dark:bg-amber-950/70 text-amber-700 dark:text-amber-300 hover:bg-amber-200 text-[11px] font-semibold transition">
+                退订此剧
+              </button>
+            </div>
+
+            <!-- 订阅项 2 (连载电视剧) -->
+            <div class="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 flex items-center justify-between text-xs">
+              <div class="flex items-center space-x-3">
+                <span class="px-2 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950/70 text-indigo-600 dark:text-indigo-400 font-mono text-[10px]">电视剧</span>
+                <div>
+                  <div class="font-bold text-slate-900 dark:text-white">流人 (Slow Horses) - Season 4</div>
+                  <div class="text-slate-400 text-[11px] mt-0.5">状态: 连载中 (更新至 E04/06) • 正常监控中</div>
+                </div>
+              </div>
+              <span class="text-blue-500 font-medium text-[11px]">正常追更中</span>
+            </div>
+
+            <!-- 订阅项 3 (已下载电影) -->
+            <div class="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-900/40 flex items-center justify-between text-xs">
+              <div class="flex items-center space-x-3">
+                <span class="px-2 py-0.5 rounded bg-purple-50 dark:bg-purple-950/70 text-purple-600 dark:text-purple-400 font-mono text-[10px]">电影</span>
+                <div>
+                  <div class="font-bold text-slate-900 dark:text-white">沙丘2 (Dune: Part Two) (2024)</div>
+                  <div class="text-slate-400 text-[11px] mt-0.5">状态: 4K Remux 已成功入库 • 订阅完成</div>
+                </div>
+              </div>
+              <button onclick="alert('已清理电影订阅 [沙丘2]')" class="px-2.5 py-1 rounded-md bg-amber-100 dark:bg-amber-950/70 text-amber-700 dark:text-amber-300 hover:bg-amber-200 text-[11px] font-semibold transition">
+                清理订阅
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ================= 视图 C：MoviePilot 媒体整理修复 ================= -->
+      <div id="mpTransferRepairView" class="hidden space-y-6">
+        <div class="app-card rounded-2xl p-5 space-y-4">
+          <div class="flex items-center justify-between">
+            <div>
+              <h2 class="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                <i class="fa-solid fa-wrench text-indigo-500"></i>
+                MoviePilot 媒体整理修复队列
+              </h2>
+              <p class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">探测下载完成但因命名冲突、网盘锁死或整理历史中断的文件，一键触发定向重试</p>
+            </div>
+            <button onclick="alert('正在向 MoviePilot /api/v1/transfer/queue 发送刷新探针...')" class="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-100 transition">
+              <i class="fa-solid fa-rotate-right mr-1"></i> 刷新队列
+            </button>
+          </div>
+
+          <!-- 卡滞任务清单 -->
+          <div class="space-y-3 pt-2">
+            <div class="p-4 rounded-xl border border-amber-200 dark:border-amber-800/60 bg-amber-50/60 dark:bg-amber-950/20 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs">
+              <div class="space-y-1">
+                <div class="flex items-center gap-2">
+                  <span class="font-bold text-slate-900 dark:text-white">迷宫饭 (Dungeon Meshi) - S01E12.mkv</span>
+                  <span class="px-2 py-0.2 rounded bg-amber-100 text-amber-800 dark:bg-amber-900/60 dark:text-amber-300 font-mono text-[10px]">Transfer Stuck</span>
+                </div>
+                <div class="text-slate-500 dark:text-slate-400 font-mono text-[11px]">
+                  下载源: /downloads/Dungeon.Meshi.S01E12.1080p.mkv (下载已100%完成)
+                </div>
+                <div class="text-amber-700 dark:text-amber-400 text-[11px]">
+                  卡滞原因: 历史软链接存在同名排他锁，导致 MoviePilot 停止自动整理
+                </div>
+              </div>
+
+              <div class="flex items-center space-x-2">
+                <button onclick="alert('已解除 MP 排他锁，并向 /api/v1/transfer/manual 提交定向重发！无需重新下载。')" class="px-3.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold shadow-sm transition">
+                  <i class="fa-solid fa-play mr-1"></i> 一键整理修复
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ================= 视图 D：MoviePilot 资源下载 (手动/定向检索与做种优选) ================= -->
+      <div id="mpDownloadView" class="hidden space-y-6">
+        <div class="app-card rounded-2xl p-5 space-y-4">
+          <div>
+            <h2 class="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
+              <i class="fa-solid fa-cloud-arrow-down text-indigo-500"></i>
+              MoviePilot 资源站搜索与下载
+            </h2>
+            <p class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">直接通过 MP 站点索引检索资源，严格按「做种数≥2、中文优先、容量最优」排重下载</p>
+          </div>
+
+          <!-- 检索框 -->
+          <div class="flex gap-2">
+            <input type="text" id="resourceKeyword" placeholder="输入剧名、TMDB ID 或 种子关键词 (如: 漫长的季节 S01)..." class="flex-1 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500">
+            <button onclick="searchTorrentDemo()" class="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold transition">
+              <i class="fa-solid fa-magnifying-glass mr-1"></i> 搜索资源
+            </button>
+          </div>
+
+          <!-- 搜索结果演示 -->
+          <div class="space-y-2 pt-2" id="searchResultList">
+            <div class="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 flex items-center justify-between text-xs">
+              <div class="space-y-1">
+                <div class="flex items-center gap-2">
+                  <span class="font-bold text-slate-900 dark:text-white">[PT] 漫长的季节.The.Long.Season.2023.Complete.4K.WEB-DL.H265.AAC</span>
+                  <span class="px-2 py-0.2 rounded bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 text-[10px]">整季包</span>
+                  <span class="px-2 py-0.2 rounded bg-indigo-100 text-indigo-800 dark:bg-indigo-950 dark:text-indigo-300 text-[10px]">官译中字</span>
+                </div>
+                <div class="text-slate-400 text-[11px] flex gap-4">
+                  <span>体积: 28.5 GB</span>
+                  <span class="text-emerald-500 font-semibold">做种数: 48 (高健康度)</span>
+                  <span>站点: HDHome</span>
+                </div>
+              </div>
+              <button onclick="alert('已向 MoviePilot 提交下载任务，排重锁已生效！')" class="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-semibold transition">
+                一键推送下载
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </main>
+
+  </div>
+
+  <!-- ================= 弹窗 1：点击式目录选择器发起初检任务 (解决第3点) ================= -->
+  <div id="newTaskModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+    <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-2xl w-full p-6 space-y-5 border border-slate-200 dark:border-slate-800 shadow-2xl transition-all">
+      <div class="flex items-center justify-between">
+        <div class="flex items-center space-x-2.5">
+          <div class="w-8 h-8 rounded-lg bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 flex items-center justify-center font-bold">
+            <i class="fa-solid fa-folder-tree"></i>
+          </div>
+          <div>
+            <h3 class="text-sm font-bold text-slate-900 dark:text-white">自定义选择初检目录</h3>
+            <p class="text-xs text-slate-500 dark:text-slate-400">通过点击直观浏览选择网盘/NAS目录，避免手工输入错误</p>
+          </div>
+        </div>
+        <button onclick="closeNewTaskModal()" class="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200">
+          <i class="fa-solid fa-xmark text-base"></i>
+        </button>
+      </div>
+
+      <div class="space-y-4 text-xs">
+        
+        <!-- 常用快捷目录 (明确区分 nas 源盘 vs nas.finish 归档盘) -->
+        <div>
+          <label class="block font-semibold text-slate-700 dark:text-slate-300 mb-1.5">常用快捷目录 (已区分源库与归档库):</label>
+          <div class="grid grid-cols-2 gap-2">
+            <!-- 源盘库 -->
+            <button onclick="selectPresetPath('/115/Library_incs/nas/电视剧/国产剧/')" class="p-2 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 hover:border-indigo-500 text-left transition group">
+              <div class="flex items-center gap-1.5 text-indigo-600 dark:text-indigo-400 font-semibold text-[11px]">
+                <i class="fa-solid fa-folder"></i> [未整理源] nas / 电视剧 / 国产剧
+              </div>
+              <div class="text-[10px] text-slate-400 truncate mt-0.5">/115/Library_incs/nas/电视剧/国产剧/</div>
+            </button>
+
+            <!-- 归档库 (nas.finish) -->
+            <button onclick="selectPresetPath('/115/Library_incs/nas.finish/电视剧/国产剧/')" class="p-2 rounded-lg border border-purple-200 dark:border-purple-900/50 bg-purple-50/40 dark:bg-purple-950/20 hover:border-purple-500 text-left transition group">
+              <div class="flex items-center gap-1.5 text-purple-600 dark:text-purple-400 font-semibold text-[11px]">
+                <i class="fa-solid fa-box-archive"></i> [已归档库] nas.finish / 电视剧 / 国产剧
+              </div>
+              <div class="text-[10px] text-slate-400 truncate mt-0.5">/115/Library_incs/nas.finish/电视剧/国产剧/</div>
+            </button>
+
+            <!-- 热门综艺源 -->
+            <button onclick="selectPresetPath('/115/Library_incs/nas/电视剧/综艺/')" class="p-2 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 hover:border-indigo-500 text-left transition group">
+              <div class="flex items-center gap-1.5 text-indigo-600 dark:text-indigo-400 font-semibold text-[11px]">
+                <i class="fa-solid fa-folder"></i> [未整理源] nas / 电视剧 / 综艺
+              </div>
+              <div class="text-[10px] text-slate-400 truncate mt-0.5">/115/Library_incs/nas/电视剧/综艺/</div>
+            </button>
+
+            <!-- 动漫新番源 -->
+            <button onclick="selectPresetPath('/115/Library_incs/nas/动漫/2024秋/')" class="p-2 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 hover:border-indigo-500 text-left transition group">
+              <div class="flex items-center gap-1.5 text-indigo-600 dark:text-indigo-400 font-semibold text-[11px]">
+                <i class="fa-solid fa-folder"></i> [未整理源] nas / 动漫 / 2024秋
+              </div>
+              <div class="text-[10px] text-slate-400 truncate mt-0.5">/115/Library_incs/nas/动漫/2024秋/</div>
+            </button>
+          </div>
+        </div>
+
+        <!-- 交互式目录树浏览器 (纯点击导航，支持逐层展开) -->
+        <div class="border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden">
+          <!-- 当前路径面包屑导航 -->
+          <div class="bg-slate-100 dark:bg-slate-800/80 px-3 py-2 flex items-center justify-between text-xs border-b border-slate-200 dark:border-slate-800">
+            <div class="flex items-center space-x-1.5 text-slate-600 dark:text-slate-300 font-mono truncate" id="browserBreadcrumbs">
+              <!-- 面包屑由JS生成 -->
+            </div>
+            <button onclick="navigateUpFolder()" class="px-2 py-0.5 rounded bg-white dark:bg-slate-700 text-slate-700 dark:text-slate-200 text-[11px] shadow-sm hover:bg-slate-50">
+              <i class="fa-solid fa-level-up mr-1"></i>上一级
+            </button>
+          </div>
+
+          <!-- 目录列表选择区 -->
+          <div class="p-2 max-h-48 overflow-y-auto space-y-1 bg-white dark:bg-slate-950" id="browserFolderList">
+            <!-- 文件夹列表由 JS 动态生成 -->
+          </div>
+        </div>
+
+        <!-- 当前已选中的目标路径确认条 -->
+        <div class="p-3 rounded-lg bg-indigo-50/70 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800/60 flex items-center justify-between">
+          <div class="min-w-0 flex-1">
+            <span class="text-[11px] text-slate-500 dark:text-slate-400 block">当前已选定的初检目标路径:</span>
+            <span class="font-mono font-bold text-indigo-700 dark:text-indigo-300 text-xs truncate block" id="selectedTargetDisplay">
+              /115/Library_incs/nas/电视剧/国产剧/漫长的季节 (2023)
+            </span>
+          </div>
+          <span class="px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 font-medium text-[10px] ml-2">
+            有效目录
+          </span>
+        </div>
+
+        <!-- 媒体类型 (已删除对账政策及其相关内容) -->
+        <div>
+          <label class="block font-semibold text-slate-700 dark:text-slate-300 mb-1">媒体类型:</label>
+          <select id="taskMediaType" class="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-2.5 py-1.5 text-slate-800 dark:text-slate-200 text-xs">
+            <option value="auto">自动识别 (电视剧 / 动漫 / 综艺)</option>
+            <option value="tv">电视剧 (标准季集)</option>
+            <option value="anime">动漫 (优先S01E01命名)</option>
+          </select>
+        </div>
+
+      </div>
+
+      <div class="flex items-center justify-end space-x-3 pt-3 border-t border-slate-100 dark:border-slate-800">
+        <button onclick="closeNewTaskModal()" class="px-4 py-2 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 text-xs font-medium transition">
+          取消
+        </button>
+        <button onclick="confirmCreateNewTask()" class="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-md shadow-indigo-600/30 transition flex items-center space-x-1.5">
+          <i class="fa-solid fa-play text-xs"></i>
+          <span>选定此目录并开始初检</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 弹窗：归档预检确认框 -->
+  <div id="archiveModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+    <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-xl w-full p-6 space-y-4 border border-slate-200 dark:border-slate-800 shadow-2xl">
+      <div class="flex items-center justify-between">
+        <div class="flex items-center space-x-2">
+          <i class="fa-solid fa-box-archive text-emerald-600 text-base"></i>
+          <h3 class="text-sm font-bold text-slate-900 dark:text-white" id="archiveModalTitle">归档计划预检确认</h3>
+        </div>
+        <button onclick="closeModal('archiveModal')" class="text-slate-400 hover:text-slate-600"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      <div class="text-xs space-y-2 p-3 rounded-lg bg-slate-50 dark:bg-slate-950 font-mono text-slate-600 dark:text-slate-400">
+        <div>• 增量搬移所选季的视频文件至目标归档库</div>
+        <div>• 原件保留留源: tvshow.nfo 及剧根公共海报不移动</div>
+      </div>
+      <div class="flex justify-end gap-2 pt-2">
+        <button onclick="closeModal('archiveModal')" class="px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-xs">取消</button>
+        <button onclick="confirmArchiveDone()" class="px-4 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-bold">确认归档</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 弹窗：复核清理预检确认框 -->
+  <div id="reviewModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+    <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-xl w-full p-6 space-y-4 border border-slate-200 dark:border-slate-800 shadow-2xl">
+      <div class="flex items-center justify-between">
+        <div class="flex items-center space-x-2">
+          <i class="fa-solid fa-broom text-amber-600 text-base"></i>
+          <h3 class="text-sm font-bold text-slate-900 dark:text-white" id="reviewModalTitle">冗余清理确认</h3>
+        </div>
+        <button onclick="closeModal('reviewModal')" class="text-slate-400 hover:text-slate-600"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      <div class="text-xs space-y-2 p-3 rounded-lg bg-amber-50/50 dark:bg-amber-950/20 text-slate-600 dark:text-slate-400 font-mono">
+        <div>• 拟清理: 冗余副本视频 (释放约 3.2 GB)</div>
+        <div class="text-emerald-600 dark:text-emerald-400">✓ 严格保护: 外挂字幕 (.srt/.ass) 与公共海报不删除</div>
+      </div>
+      <div class="flex justify-end gap-2 pt-2">
+        <button onclick="closeModal('reviewModal')" class="px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-xs">取消</button>
+        <button onclick="confirmReviewDone()" class="px-4 py-1.5 rounded-lg bg-amber-600 text-white text-xs font-bold">确认清理</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 弹窗：补缺/修复确认框 -->
+  <div id="downloadModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+    <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-xl w-full p-6 space-y-4 border border-slate-200 dark:border-slate-800 shadow-2xl">
+      <div class="flex items-center justify-between">
+        <div class="flex items-center space-x-2">
+          <i class="fa-solid fa-cloud-arrow-down text-blue-600 text-base"></i>
+          <h3 class="text-sm font-bold text-slate-900 dark:text-white" id="downloadModalTitle">补缺/修复任务确认</h3>
+        </div>
+        <button onclick="closeModal('downloadModal')" class="text-slate-400 hover:text-slate-600"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      <div class="text-xs p-3 rounded-lg bg-blue-50/50 dark:bg-blue-950/20 text-slate-600 dark:text-slate-400 font-mono">
+        • 将任务推送到 MoviePilot 下载/转移队列，并加上排重锁。
+      </div>
+      <div class="flex justify-end gap-2 pt-2">
+        <button onclick="closeModal('downloadModal')" class="px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-xs">取消</button>
+        <button onclick="confirmDownloadDone()" class="px-4 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-bold">确认推送</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 交互逻辑脚本 ================= -->
+  <script>
+    // 1. 主题切换
+    function toggleTheme() {
+      const html = document.documentElement;
+      const themeIcon = document.getElementById('themeIcon');
+      if (html.classList.contains('dark')) {
+        html.classList.remove('dark');
+        html.classList.add('light');
+        themeIcon.classList.replace('fa-sun', 'fa-moon');
+        localStorage.setItem('mediaflow_theme', 'light');
+      } else {
+        html.classList.remove('light');
+        html.classList.add('dark');
+        themeIcon.classList.replace('fa-moon', 'fa-sun');
+        localStorage.setItem('mediaflow_theme', 'dark');
+      }
+    }
+    if (localStorage.getItem('mediaflow_theme') === 'dark') {
+      document.documentElement.classList.add('dark');
+      document.documentElement.classList.remove('light');
+      document.getElementById('themeIcon').classList.replace('fa-moon', 'fa-sun');
+    }
+
+    // 2. 模拟任务数据库 (设计支持海量任务)
+    let taskList = [
+      {
+        id: 1,
+        title: "奔跑吧！兄弟 (2014) [tmdbid=98031]",
+        path: "/115/Library_incs/nas/电视剧/综艺/",
+        tag: "单剧目录",
+        time: "10分钟前",
+        statusDot: "bg-amber-500",
+        summaryText: "1 处重叠待清理",
+        counts: { archive: 1, review: 1, download: 0, airing: 0 },
+        categories: {
+          archive: [{
+            id: 'item-101', show: '奔跑吧 (2014)', season: 'Season 13', statusText: 'E01-E13 齐全已播完 (互补聚合)',
+            pathA: '.../奔跑吧！兄弟 (2014)/Season 13 (E01-E10)', pathB: '.../奔跑吧兄弟 (2014)/Season 13 (E10-E13)',
+            dest: '/115/电视剧/综艺归档/奔跑吧 (2014)/Season 13/', tmdbId: '98031', note: 'E10 冗余在归档时自动去重',
+            actionType: 'archive', actionText: '单项一键归档'
+          }],
+          review: [{
+            id: 'item-102', show: '奔跑吧 (2014)', season: 'Season 13', statusText: '发现同集重复文件 (E10 重叠)',
+            pathA: '目录A: 奔跑吧！兄弟 (2014)/Season 13/E10.mkv (主副本，保留)', pathB: '目录B: 奔跑吧兄弟 (2014)/Season 13/奔跑吧兄弟.S13E10.1080p.mkv (冗余 3.2GB)',
+            dest: '保留主目录副本，保护全部字幕', tmdbId: '98031', note: '点击清理冗余，不伤保留项',
+            actionType: 'review_clean', actionText: '一键清理冗余 E10'
+          }],
+          download: [], airing: []
+        }
+      },
+      {
+        id: 2,
+        title: "国剧经典专区 (/nas/电视剧/国产剧/)",
+        path: "/115/Library_incs/nas/电视剧/国产剧/",
+        tag: "分类全量",
+        time: "35分钟前",
+        statusDot: "bg-emerald-500",
+        summaryText: "3 季可一键归档",
+        counts: { archive: 3, review: 2, download: 1, airing: 1 },
+        categories: {
+          archive: [
+            { id: 'item-201', show: '漫长的季节 (2023)', season: 'Season 1', statusText: 'E01-E12 完整已播完 (4K HDR)', pathA: '/电视剧/国产剧/漫长的季节 (2023)/Season 1', dest: '/归档库/电视剧/漫长的季节 (2023)/Season 1/', tmdbId: '223313', note: '单版本无冲突', actionType: 'archive', actionText: '单项一键归档' },
+            { id: 'item-202', show: '繁花 (2023)', season: 'Season 1', statusText: 'E01-E30 完整已播完 (沪语原声)', pathA: '/电视剧/国产剧/繁花 (2023)/Season 1', dest: '/归档库/电视剧/繁花 (2023)/Season 1/', tmdbId: '138502', note: '双语字幕受保护', actionType: 'archive', actionText: '单项一键归档' },
+            { id: 'item-203', show: '三体 (2023)', season: 'Season 1', statusText: 'E01-E30 完整已播完', pathA: '/电视剧/国产剧/三体 (2023)/Season 1', dest: '/归档库/电视剧/三体 (2023)/Season 1/', tmdbId: '113988', note: '周年纪念版已齐', actionType: 'archive', actionText: '单项一键归档' }
+          ],
+          review: [
+            { id: 'item-204', show: '某热播悬疑剧 (2024)', season: 'Season 1', statusText: '本地集数 (18集) 超出 TMDB 登记 (16集)', pathA: '/电视剧/国产剧/某悬疑剧/Season 1 (存在E17, E18)', dest: '豆瓣已核验: 豆瓣确认全18集', tmdbId: '204881', note: '避免误判为冗余', actionType: 'review_douban', actionText: '一键采纳豆瓣数据 (18集)' },
+            { id: 'item-205', show: '狂飙 (2023)', season: 'Season 1', statusText: '错季视频散落在 S01 目录', pathA: '狂飙.S02E01.mkv 误存于 Season 1', dest: '规范归位至 Season 2', tmdbId: '215003', note: '阻碍S01归档', actionType: 'review_relocate', actionText: '一键错季归位' }
+          ],
+          download: [
+            { id: 'item-206', show: '大江大河3 (2024)', season: 'Season 1', statusText: '已播 33 集，本地缺 E14、E22', pathA: '/电视剧/国产剧/大江大河3/Season 1', dest: '做种数 18 / 1080p', tmdbId: '201991', note: '锁定排重任务', actionType: 'download_missing', actionText: '一键优选补缺' }
+          ],
+          airing: [
+            { id: 'item-207', show: '凡人歌 (2024)', season: 'Season 1', statusText: '连载更新中 (已播 24/36 集)', pathA: '/电视剧/国产剧/凡人歌/Season 1', dest: '保持留源', tmdbId: '245601', note: '播齐自动转入可归档', actionType: 'airing_watch', actionText: '持续留源追更' }
+          ]
+        }
+      },
+      {
+        id: 3,
+        title: "2024秋季新番追更区 (/NAS/动漫/2024秋/)",
+        path: "/115/Library_incs/nas/动漫/2024秋/",
+        tag: "动漫追更",
+        time: "2小时前",
+        statusDot: "bg-blue-500",
+        summaryText: "2 季需补缺/修复",
+        counts: { archive: 1, review: 1, download: 2, airing: 2 },
+        categories: {
+          archive: [{ id: 'item-301', show: '葬送的芙莉莲', season: 'Season 1', statusText: 'E01-E28 完整已完结', pathA: '/动漫/葬送的芙莉莲/Season 1/', dest: '/归档/动漫/葬送的芙莉莲/Season 1/', tmdbId: '209867', note: 'S01E01模式规范', actionType: 'archive', actionText: '单项一键归档' }],
+          review: [{ id: 'item-302', show: '迷宫饭', season: 'Season 1', statusText: '日文原名目录待绑定', pathA: '原目录: /2024秋/ダンジョン飯/', dest: '匹配中文名: 迷宫饭', tmdbId: '206586', note: '生成标准中文规范', actionType: 'review_bind', actionText: '一键绑定标准中文名' }],
+          download: [{ id: 'item-303', show: '迷宫饭', season: 'Season 1', statusText: '缺 E12 (MP转移队列卡滞)', pathA: '下载器已完成文件，转移锁卡滞', dest: '无需重下！重发转移即可', tmdbId: '206586', note: '避免浪费流量', actionType: 'download_repair', actionText: '一键整理修复 (重发MP)' }],
+          airing: []
+        }
+      },
+      {
+        id: 4,
+        title: "欧美热播精选 (/nas/电视剧/欧美剧/)",
+        path: "/115/Library_incs/nas/电视剧/欧美剧/",
+        tag: "欧美剧集",
+        time: "昨天",
+        statusDot: "bg-emerald-500",
+        summaryText: "2 季已齐可归档",
+        counts: { archive: 2, review: 0, download: 0, airing: 1 },
+        categories: { archive: [], review: [], download: [], airing: [] }
+      },
+      {
+        id: 5,
+        title: "纪录片精选专栏 (/nas/电视剧/纪录片/)",
+        path: "/115/Library_incs/nas/电视剧/纪录片/",
+        tag: "纪录片",
+        time: "2天前",
+        statusDot: "bg-emerald-500",
+        summaryText: "全项已核验",
+        counts: { archive: 1, review: 0, download: 0, airing: 0 },
+        categories: { archive: [], review: [], download: [], airing: [] }
+      },
+      {
+        id: 6,
+        title: "漫长的季节 (2023) [tmdbid=223313]",
+        path: "/115/Library_incs/nas/电视剧/国产剧/漫长的季节 (2023)",
+        tag: "单剧目录",
+        time: "3天前",
+        statusDot: "bg-emerald-500",
+        summaryText: "已全季归档",
+        counts: { archive: 1, review: 0, download: 0, airing: 0 },
+        categories: { archive: [], review: [], download: [], airing: [] }
+      }
+    ];
+
+    let currentTaskId = 1;
+    let currentCategory = 'archive';
+
+    // 渲染任务侧边栏列表 (支持悬浮重检与删除)
+    function renderTaskList(filteredTasks = null) {
+      const tasks = filteredTasks || taskList;
+      const container = document.getElementById('taskMenuList');
+      document.getElementById('taskCountBadge').textContent = taskList.length;
+
+      if (tasks.length === 0) {
+        container.innerHTML = `
+          <div class="p-6 text-center text-xs text-slate-400">
+            <i class="fa-solid fa-inbox text-lg mb-1 block"></i>
+            没有找到匹配的任务
+          </div>
+        `;
+        return;
+      }
+
+      container.innerHTML = tasks.map(task => `
+        <div onclick="selectTask(${task.id})" id="task-card-${task.id}" class="app-card ${task.id === currentTaskId ? 'app-card-active' : ''} rounded-xl p-3 cursor-pointer hover:border-slate-300 dark:hover:border-slate-700 transition relative overflow-hidden group">
+          <div class="flex items-start justify-between gap-1.5">
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-1.5 mb-0.5">
+                <span class="text-xs px-1.5 py-0.2 rounded bg-indigo-50 dark:bg-indigo-950/70 text-indigo-600 dark:text-indigo-400 font-mono text-[10px]">${task.tag}</span>
+                <span class="text-slate-400 text-[10px]">${task.time}</span>
+              </div>
+              <h3 class="text-xs font-semibold text-slate-900 dark:text-white truncate">${task.title}</h3>
+              <p class="text-[10px] text-slate-500 dark:text-slate-400 font-mono truncate mt-0.5">${task.path}</p>
+            </div>
+            
+            <div class="flex items-center space-x-1 flex-shrink-0">
+              <span class="w-2 h-2 rounded-full ${task.statusDot} mt-1"></span>
+              <!-- 悬浮操作菜单 (重检与删除) -->
+              <div class="hidden group-hover:flex items-center space-x-1 pl-1">
+                <button onclick="event.stopPropagation(); triggerReInspect(${task.id})" class="w-5 h-5 rounded hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-500 flex items-center justify-center text-[10px]" title="重新初检">
+                  <i class="fa-solid fa-rotate-right"></i>
+                </button>
+                <button onclick="event.stopPropagation(); triggerDeleteTask(${task.id})" class="w-5 h-5 rounded hover:bg-red-100 dark:hover:bg-red-950 text-red-500 flex items-center justify-center text-[10px]" title="删除此任务">
+                  <i class="fa-solid fa-trash-can"></i>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="mt-2 pt-1.5 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between text-[10px]">
+            <span class="text-slate-400">已扫描事实记录</span>
+            <span class="text-slate-600 dark:text-slate-300 font-medium">${task.summaryText}</span>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    // 搜索任务过滤 (支持30+任务快速查找)
+    function filterTaskList() {
+      const q = document.getElementById('taskSearchInput').value.trim().toLowerCase();
+      if (!q) {
+        renderTaskList();
+        return;
+      }
+      const filtered = taskList.filter(t => t.title.toLowerCase().includes(q) || t.path.toLowerCase().includes(q));
+      renderTaskList(filtered);
+    }
+
+    // 选中任务
+    function selectTask(taskId) {
+      currentTaskId = taskId;
+      showTaskDetailView();
+      renderTaskList();
+
+      const task = taskList.find(t => t.id === taskId);
+      if (!task) return;
+
+      document.getElementById('currentTaskTitle').textContent = task.title;
+      document.getElementById('currentTaskPath').textContent = task.path;
+
+      // 更新分类指标
+      document.getElementById('catCountArchive').innerHTML = `${task.counts.archive} <span class="text-xs font-normal">季已齐</span>`;
+      document.getElementById('catCountReview').innerHTML = `${task.counts.review} <span class="text-xs font-normal">处需清理</span>`;
+      document.getElementById('catCountDownload').innerHTML = `${task.counts.download} <span class="text-xs font-normal">季需补</span>`;
+      document.getElementById('catCountAiring').innerHTML = `${task.counts.airing} <span class="text-xs font-normal">季连载</span>`;
+
+      filterResultCategory(currentCategory);
+    }
+
+    // 删除单项任务
+    function triggerDeleteTask(taskId) {
+      if (confirm('确认删除该初检任务吗？将清除此任务的本地检查点，不影响真实网盘文件。')) {
+        taskList = taskList.filter(t => t.id !== taskId);
+        if (taskList.length > 0) {
+          selectTask(taskList[0].id);
+        } else {
+          renderTaskList();
+        }
+      }
+    }
+
+    function deleteCurrentTask() {
+      triggerDeleteTask(currentTaskId);
+    }
+
+    // 重新初检任务
+    function triggerReInspect(taskId) {
+      const t = taskList.find(item => item.id === taskId);
+      alert(`已启动对任务 [${t.title}] 的重新初检！\n后台将重新获取最新文件快照并执行对账。`);
+    }
+
+    function reInspectCurrentTask() {
+      triggerReInspect(currentTaskId);
+    }
+
+    // 清理已完结任务
+    function clearCompletedTasks() {
+      const before = taskList.length;
+      taskList = taskList.filter(t => t.summaryText !== '已全季归档');
+      alert(`已清理 ${before - taskList.length} 个已完成归档的旧任务！`);
+      if (taskList.length > 0) selectTask(taskList[0].id);
+      renderTaskList();
+    }
+
+    // 3. 视图切换逻辑：初检看板 vs MoviePilot 模块视图
+    function showTaskDetailView() {
+      document.getElementById('taskDetailView').classList.remove('hidden');
+      document.getElementById('mpSubscriptionsView').classList.add('hidden');
+      document.getElementById('mpTransferRepairView').classList.add('hidden');
+      document.getElementById('mpDownloadView').classList.add('hidden');
+      resetMPNavHighlight();
+    }
+
+    function openMoviePilotView(viewName) {
+      document.getElementById('taskDetailView').classList.add('hidden');
+      document.getElementById('mpSubscriptionsView').classList.add('hidden');
+      document.getElementById('mpTransferRepairView').classList.add('hidden');
+      document.getElementById('mpDownloadView').classList.add('hidden');
+      resetMPNavHighlight();
+
+      // 取消任务卡片高亮
+      document.querySelectorAll('#taskMenuList .app-card').forEach(el => el.classList.remove('app-card-active'));
+
+      if (viewName === 'subscriptions') {
+        document.getElementById('mpSubscriptionsView').classList.remove('hidden');
+        document.getElementById('mp-nav-subscriptions').classList.add('bg-slate-100', 'dark:bg-slate-800', 'text-indigo-600', 'dark:text-indigo-400');
+      } else if (viewName === 'transfer_repair') {
+        document.getElementById('mpTransferRepairView').classList.remove('hidden');
+        document.getElementById('mp-nav-transfer_repair').classList.add('bg-slate-100', 'dark:bg-slate-800', 'text-indigo-600', 'dark:text-indigo-400');
+      } else if (viewName === 'download') {
+        document.getElementById('mpDownloadView').classList.remove('hidden');
+        document.getElementById('mp-nav-download').classList.add('bg-slate-100', 'dark:bg-slate-800', 'text-indigo-600', 'dark:text-indigo-400');
+      }
+    }
+
+    function resetMPNavHighlight() {
+      ['subscriptions', 'transfer_repair', 'download'].forEach(key => {
+        const el = document.getElementById(`mp-nav-${key}`);
+        if (el) el.classList.remove('bg-slate-100', 'dark:bg-slate-800', 'text-indigo-600', 'dark:text-indigo-400');
+      });
+    }
+
+    // 4. 初检结果卡片钻取与专属批量/单项按钮渲染
+    function filterResultCategory(cat) {
+      currentCategory = cat;
+      const cats = ['archive', 'review', 'download', 'airing'];
+      cats.forEach(c => {
+        const card = document.getElementById(`cat-card-${c}`);
+        if (!card) return;
+        if (c === cat) {
+          card.classList.add('border-2', 'border-indigo-500', 'bg-indigo-50/70', 'dark:bg-indigo-950/30');
+          card.classList.remove('border-slate-200', 'dark:border-slate-800');
+        } else {
+          card.classList.remove('border-2', 'border-indigo-500', 'bg-indigo-50/70', 'dark:bg-indigo-950/30');
+          card.classList.add('border-slate-200', 'dark:border-slate-800');
+        }
+      });
+      renderEpisodesList();
+    }
+
+    function renderEpisodesList() {
+      const task = taskList.find(t => t.id === currentTaskId);
+      if (!task || !task.categories) return;
+
+      const items = task.categories[currentCategory] || [];
+      const container = document.getElementById('episodeItemContainer');
+      const banner = document.getElementById('diagnosticBanner');
+      const batchContainer = document.getElementById('batchActionContainer');
+      const selectAll = document.getElementById('selectAllCheckbox');
+      const selectAllLabel = document.getElementById('selectAllLabel');
+      selectAll.checked = false;
+
+      // 动态生成对应的专属批量按钮
+      if (currentCategory === 'archive') {
+        selectAllLabel.textContent = "全选齐全剧集";
+        batchContainer.innerHTML = `
+          <button id="batchActionButton" onclick="executeBatchArchive()" disabled class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold shadow-md shadow-emerald-600/20 transition flex items-center space-x-1.5">
+            <i class="fa-solid fa-box-archive text-xs"></i>
+            <span id="batchActionBtnText">批量一键归档所选 (0)</span>
+          </button>
+        `;
+        banner.className = "p-3.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800/60 flex items-start space-x-3 text-xs";
+        banner.innerHTML = `
+          <i class="fa-solid fa-circle-check text-emerald-600 text-sm mt-0.5"></i>
+          <div class="flex-1 space-y-1">
+            <div class="font-bold text-emerald-900 dark:text-emerald-300">齐全可归档就绪清单：支持单季增量归档</div>
+            <div class="text-slate-600 dark:text-slate-300">勾选项目即可一键合入目标归档库，源目录未完结季与 tvshow.nfo 原件受严密保护留源。</div>
+          </div>
+        `;
+      } else if (currentCategory === 'review') {
+        selectAllLabel.textContent = "全选待复核项";
+        batchContainer.innerHTML = `
+          <button id="batchActionButton" onclick="executeBatchReview()" disabled class="px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold shadow-md shadow-amber-600/20 transition flex items-center space-x-1.5">
+            <i class="fa-solid fa-broom text-xs"></i>
+            <span id="batchActionBtnText">批量一键清理所选冗余 (0)</span>
+          </button>
+        `;
+        banner.className = "p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/60 flex items-start space-x-3 text-xs";
+        banner.innerHTML = `
+          <i class="fa-solid fa-triangle-exclamation text-amber-500 text-sm mt-0.5"></i>
+          <div class="flex-1 space-y-1">
+            <div class="font-bold text-amber-900 dark:text-amber-300">待复核与冗余清理：已锁定最佳保留版本</div>
+            <div class="text-slate-600 dark:text-slate-300">点击单项或批量一键清理冗余，<b>外挂字幕 (.srt/.ass) 与剧集海报 100% 保护不删</b>。</div>
+          </div>
+        `;
+      } else if (currentCategory === 'download') {
+        selectAllLabel.textContent = "全选待补缺项";
+        batchContainer.innerHTML = `
+          <button id="batchActionButton" onclick="executeBatchDownload()" disabled class="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold shadow-md shadow-blue-600/20 transition flex items-center space-x-1.5">
+            <i class="fa-solid fa-cloud-arrow-down text-xs"></i>
+            <span id="batchActionBtnText">批量一键推送 MP 补缺 (0)</span>
+          </button>
+        `;
+        banner.className = "p-3.5 rounded-xl bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800/60 flex items-start space-x-3 text-xs";
+        banner.innerHTML = `
+          <i class="fa-solid fa-cloud-arrow-down text-blue-500 text-sm mt-0.5"></i>
+          <div class="flex-1 space-y-1">
+            <div class="font-bold text-blue-900 dark:text-blue-300">真缺集补缺与整理修复：拒绝盲目重复下载</div>
+            <div class="text-slate-600 dark:text-slate-300">严格校验做种数≥2；对下载已完成但转移卡滞的项目，提供<b>定向整理修复</b>。</div>
+          </div>
+        `;
+      } else {
+        selectAllLabel.textContent = "全选连载项";
+        batchContainer.innerHTML = `
+          <button id="batchActionButton" disabled class="px-4 py-2 rounded-lg bg-slate-700 disabled:opacity-40 text-white text-xs font-medium transition">
+            <span id="batchActionBtnText">批量保持连载留源 (0)</span>
+          </button>
+        `;
+        banner.className = "p-3.5 rounded-xl bg-slate-100 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 flex items-start space-x-3 text-xs";
+        banner.innerHTML = `
+          <i class="fa-solid fa-circle-info text-slate-500 text-sm mt-0.5"></i>
+          <div class="flex-1 space-y-1">
+            <div class="font-bold text-slate-800 dark:text-slate-200">连载留源追踪区：剧集尚在更新，正常留源不归档半季</div>
+          </div>
+        `;
+      }
+
+      if (items.length === 0) {
+        container.innerHTML = `
+          <div class="p-8 text-center text-slate-400 dark:text-slate-500">
+            <i class="fa-solid fa-circle-check text-2xl mb-2 text-emerald-500"></i>
+            <p class="text-xs">该任务在此分类下暂无待处理项目</p>
+          </div>
+        `;
+        updateSelection();
+        return;
+      }
+
+      container.innerHTML = items.map(item => {
+        let badgeColor = 'emerald';
+        let actionBtnClass = 'bg-emerald-600 hover:bg-emerald-700 text-white';
+        let actionIcon = 'fa-box-archive';
+
+        if (currentCategory === 'review') {
+          badgeColor = 'amber';
+          actionBtnClass = 'bg-amber-600 hover:bg-amber-700 text-white';
+          actionIcon = 'fa-broom';
+        } else if (currentCategory === 'download') {
+          badgeColor = 'blue';
+          actionBtnClass = 'bg-blue-600 hover:bg-blue-700 text-white';
+          actionIcon = item.actionType === 'download_repair' ? 'fa-arrows-rotate' : 'fa-cloud-arrow-down';
+        }
+
+        return `
+          <div class="app-card rounded-xl p-4 transition flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-l-4 border-l-${badgeColor}-500">
+            <div class="flex items-start space-x-3.5 flex-1 min-w-0">
+              <input type="checkbox" name="itemCheck" value="${item.id}" onchange="updateSelection()" class="mt-1 w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer">
+              
+              <div class="w-10 h-14 rounded bg-slate-100 dark:bg-slate-800 flex-shrink-0 flex items-center justify-center text-slate-400 border border-slate-200 dark:border-slate-700">
+                <i class="fa-solid fa-film text-lg"></i>
+              </div>
+
+              <div class="min-w-0 space-y-1">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="text-sm font-bold text-slate-900 dark:text-white">${item.show}</span>
+                  <span class="text-xs px-2 py-0.5 rounded-full bg-${badgeColor}-100 dark:bg-${badgeColor}-950/70 text-${badgeColor}-700 dark:text-${badgeColor}-400 font-semibold border border-${badgeColor}-300 dark:border-${badgeColor}-800">
+                    ${item.season} (${item.statusText})
+                  </span>
+                  <span class="text-xs px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 font-mono">TMDB: ${item.tmdbId}</span>
+                </div>
+                
+                <div class="text-xs text-slate-500 dark:text-slate-400 font-mono flex flex-wrap gap-x-3">
+                  <span>${item.pathA}</span>
+                  ${item.pathB ? `<span>${item.pathB}</span>` : ''}
+                </div>
+
+                <div class="text-[11px] text-slate-600 dark:text-slate-400 flex items-center gap-2">
+                  <span class="text-${badgeColor}-600 dark:text-${badgeColor}-400 font-medium">👉 ${item.note}</span>
+                  ${item.dest ? `<span>• ${item.dest}</span>` : ''}
+                </div>
+              </div>
+            </div>
+
+            <div class="flex items-center space-x-2 flex-shrink-0 self-end sm:self-center">
+              <button onclick="handleSingleAction('${item.actionType}', '${item.show} - ${item.season}')" class="px-3 py-1.5 rounded-lg ${actionBtnClass} text-xs font-semibold shadow-sm transition flex items-center gap-1.5">
+                <i class="fa-solid ${actionIcon} text-xs"></i>
+                <span>${item.actionText}</span>
+              </button>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      updateSelection();
+    }
+
+    function toggleSelectAll(master) {
+      document.querySelectorAll('input[name="itemCheck"]').forEach(cb => cb.checked = master.checked);
+      updateSelection();
+    }
+
+    function updateSelection() {
+      const count = document.querySelectorAll('input[name="itemCheck"]:checked').length;
+      document.getElementById('selectedCountText').innerHTML = `已选择 <b class="text-indigo-600 dark:text-indigo-400">${count}</b> 项`;
+      
+      const batchBtn = document.getElementById('batchActionButton');
+      const batchBtnText = document.getElementById('batchActionBtnText');
+      if (!batchBtn || !batchBtnText) return;
+
+      if (count > 0) {
+        batchBtn.removeAttribute('disabled');
+        if (currentCategory === 'archive') batchBtnText.textContent = `批量一键归档所选 (${count} 季)`;
+        else if (currentCategory === 'review') batchBtnText.textContent = `批量一键清理所选冗余 (${count} 处)`;
+        else if (currentCategory === 'download') batchBtnText.textContent = `批量一键推送 MP 补缺 (${count} 季)`;
+      } else {
+        batchBtn.setAttribute('disabled', 'true');
+        if (currentCategory === 'archive') batchBtnText.textContent = `批量一键归档所选 (0)`;
+        else if (currentCategory === 'review') batchBtnText.textContent = `批量一键清理所选冗余 (0)`;
+        else if (currentCategory === 'download') batchBtnText.textContent = `批量一键推送 MP 补缺 (0)`;
+      }
+    }
+
+    function handleSingleAction(type, name) {
+      if (type === 'archive') {
+        openModal('archiveModal');
+        document.getElementById('archiveModalTitle').textContent = `单季归档预检确认: ${name}`;
+      } else if (type.startsWith('review')) {
+        openModal('reviewModal');
+        document.getElementById('reviewModalTitle').textContent = `复核清理确认: ${name}`;
+      } else if (type.startsWith('download')) {
+        openModal('downloadModal');
+        document.getElementById('downloadModalTitle').textContent = `补缺/修复确认: ${name}`;
+      }
+    }
+
+    function executeBatchArchive() { openModal('archiveModal'); }
+    function executeBatchReview() { openModal('reviewModal'); }
+    function executeBatchDownload() { openModal('downloadModal'); }
+
+    function openModal(id) { document.getElementById(id).classList.remove('hidden'); }
+    function closeModal(id) { document.getElementById(id).classList.add('hidden'); }
+
+    function confirmArchiveDone() {
+      closeModal('archiveModal');
+      alert('一键归档执行成功！增量搬移到位，字幕与源共用海报受保护留源。');
+    }
+    function confirmReviewDone() {
+      closeModal('reviewModal');
+      alert('一键复核清理成功！冗余副本已安全删除，字幕与共用海报完好保留。');
+    }
+    function confirmDownloadDone() {
+      closeModal('downloadModal');
+      alert('任务已推送到 MoviePilot！');
+    }
+
+    // 5. 点击式目录树选择器逻辑 (支持纯点击浏览，区分 nas vs nas.finish)
+    const mockDirectoryTree = {
+      path: "/115/Library_incs",
+      subfolders: ["nas", "nas.finish", "cloud_backup"],
+      children: {
+        "nas": {
+          path: "/115/Library_incs/nas",
+          subfolders: ["电视剧", "动漫", "综艺", "纪录片"],
+          children: {
+            "电视剧": {
+              path: "/115/Library_incs/nas/电视剧",
+              subfolders: ["国产剧", "欧美剧", "韩剧", "日剧", "综艺"],
+              children: {
+                "国产剧": {
+                  path: "/115/Library_incs/nas/电视剧/国产剧",
+                  subfolders: ["漫长的季节 (2023)", "繁花 (2023)", "狂飙 (2023)", "大江大河3 (2024)"]
+                },
+                "综艺": {
+                  path: "/115/Library_incs/nas/电视剧/综艺",
+                  subfolders: ["奔跑吧兄弟 (2014)", "奔跑吧！兄弟 (2014) [tmdbid=98031]"]
+                }
+              }
+            },
+            "动漫": {
+              path: "/115/Library_incs/nas/动漫",
+              subfolders: ["2024秋", "经典番剧", "剧场版"]
+            }
+          }
+        },
+        "nas.finish": {
+          path: "/115/Library_incs/nas.finish",
+          subfolders: ["电视剧", "动漫", "电影归档"],
+          children: {
+            "电视剧": {
+              path: "/115/Library_incs/nas.finish/电视剧",
+              subfolders: ["国产剧", "欧美剧", "日韩剧"],
+              children: {
+                "国产剧": {
+                  path: "/115/Library_incs/nas.finish/电视剧/国产剧",
+                  subfolders: ["漫长的季节 (2023) [归档完成]", "大明王朝1566"]
+                }
+              }
+            }
+          }
+        }
+      }
+    };
+
+    let currentNavPath = ["nas", "电视剧", "国产剧"];
+    let selectedTargetPath = "/115/Library_incs/nas/电视剧/国产剧/漫长的季节 (2023)";
+
+    function openNewTaskModal() {
+      renderFolderBrowser();
+      openModal('newTaskModal');
+    }
+    function closeNewTaskModal() { closeModal('newTaskModal'); }
+
+    function renderFolderBrowser() {
+      // 遍历得到当前层级节点
+      let node = mockDirectoryTree.children[currentNavPath[0]];
+      let fullPath = `/115/Library_incs/${currentNavPath[0]}`;
+      
+      for (let i = 1; i < currentNavPath.length; i++) {
+        if (node && node.children && node.children[currentNavPath[i]]) {
+          node = node.children[currentNavPath[i]];
+          fullPath += `/${currentNavPath[i]}`;
+        }
+      }
+
+      // 渲染面包屑
+      const bc = document.getElementById('browserBreadcrumbs');
+      bc.innerHTML = `
+        <span class="cursor-pointer hover:underline text-indigo-600 dark:text-indigo-400" onclick="navigateToBreadcrumb(-1)">根目录</span>
+        ${currentNavPath.map((seg, idx) => `
+          <span>/</span>
+          <span class="cursor-pointer hover:underline ${idx === currentNavPath.length - 1 ? 'font-bold text-slate-800 dark:text-white' : ''}" onclick="navigateToBreadcrumb(${idx})">${seg}</span>
+        `).join('')}
+      `;
+
+      // 渲染子文件夹列表
+      const folderList = document.getElementById('browserFolderList');
+      const subs = (node && node.subfolders) ? node.subfolders : [];
+      
+      folderList.innerHTML = `
+        <div class="px-2 py-1.5 mb-1 bg-slate-50 dark:bg-slate-900 text-slate-500 text-[11px] flex justify-between items-center rounded">
+          <span>点击文件夹进入下级，或点击右侧按钮直接选定为初检目标</span>
+          <button onclick="pickCurrentFolder('${fullPath}')" class="px-2 py-0.5 rounded bg-indigo-600 text-white text-[10px] font-semibold hover:bg-indigo-700">
+            选定当前整级目录
+          </button>
+        </div>
+        ${subs.map(f => {
+          const itemPath = `${fullPath}/${f}`;
+          return `
+            <div class="flex items-center justify-between p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer transition group">
+              <div class="flex items-center space-x-2 flex-1 min-w-0" onclick="drillDownFolder('${f}')">
+                <i class="fa-solid fa-folder text-amber-500 text-sm"></i>
+                <span class="text-xs text-slate-700 dark:text-slate-200 font-medium truncate">${f}</span>
+              </div>
+              <button onclick="pickCurrentFolder('${itemPath}')" class="px-2.5 py-1 rounded bg-slate-100 dark:bg-slate-800 hover:bg-indigo-500 hover:text-white text-[11px] text-slate-600 dark:text-slate-300 font-medium transition">
+                选定此项
+              </button>
+            </div>
+          `;
+        }).join('')}
+      `;
+    }
+
+    function drillDownFolder(name) {
+      currentNavPath.push(name);
+      renderFolderBrowser();
+    }
+
+    function navigateUpFolder() {
+      if (currentNavPath.length > 1) {
+        currentNavPath.pop();
+        renderFolderBrowser();
+      }
+    }
+
+    function navigateToBreadcrumb(idx) {
+      if (idx === -1) {
+        currentNavPath = ["nas"];
+      } else {
+        currentNavPath = currentNavPath.slice(0, idx + 1);
+      }
+      renderFolderBrowser();
+    }
+
+    function pickCurrentFolder(path) {
+      selectedTargetPath = path;
+      document.getElementById('selectedTargetDisplay').textContent = path;
+    }
+
+    function selectPresetPath(path) {
+      selectedTargetPath = path;
+      document.getElementById('selectedTargetDisplay').textContent = path;
+      if (path.includes('nas.finish')) {
+        currentNavPath = ["nas.finish", "电视剧", "国产剧"];
+      } else if (path.includes('综艺')) {
+        currentNavPath = ["nas", "电视剧", "综艺"];
+      } else if (path.includes('动漫')) {
+        currentNavPath = ["nas", "动漫", "2024秋"];
+      } else {
+        currentNavPath = ["nas", "电视剧", "国产剧"];
+      }
+      renderFolderBrowser();
+    }
+
+    function confirmCreateNewTask() {
+      const path = selectedTargetPath;
+      const type = document.getElementById('taskMediaType').value;
+      const parts = path.split('/').filter(Boolean);
+      const folderName = parts[parts.length - 1] || "自定义初检目录";
+
+      const newTask = {
+        id: Date.now(),
+        title: folderName,
+        path: path,
+        tag: type === 'anime' ? '动漫' : (path.includes('nas.finish') ? '归档库' : '自定义'),
+        time: "刚刚",
+        statusDot: "bg-emerald-500",
+        summaryText: "初检完成，就绪",
+        counts: { archive: 1, review: 0, download: 0, airing: 0 },
+        categories: {
+          archive: [{
+            id: 'item-new-1', show: folderName, season: 'Season 1', statusText: '已核查完成',
+            pathA: path, dest: '/归档库/', tmdbId: '自动匹配', note: '结构规范', actionType: 'archive', actionText: '单项归档'
+          }],
+          review: [], download: [], airing: []
+        }
+      };
+
+      taskList.unshift(newTask);
+      closeNewTaskModal();
+      selectTask(newTask.id);
+      alert(`已成功创建任务: [${folderName}]！\n正在按点击选择的目录路径执行初检。`);
+    }
+
+    // 6. MoviePilot 运维功能演示
+    function switchSubFilter(type) {
+      ['all', 'tv', 'movie'].forEach(k => {
+        const btn = document.getElementById(`sub-filter-${k}`);
+        if (k === type) {
+          btn.className = "px-3 py-1 rounded-md bg-white dark:bg-slate-700 shadow-sm font-semibold text-indigo-600 dark:text-white";
+        } else {
+          btn.className = "px-3 py-1 rounded-md text-slate-600 dark:text-slate-300";
+        }
+      });
+      alert(`已按 [${type === 'tv' ? '电视剧' : (type === 'movie' ? '电影' : '全部')}] 过滤订阅列表`);
+    }
+
+    function executeBatchCleanSubs() {
+      alert('已批量退订 3 项已完结入库的影视订阅！成功释放 MoviePilot 定时搜索开销。');
+    }
+
+    function searchTorrentDemo() {
+      const kw = document.getElementById('resourceKeyword').value.trim();
+      alert(`已向 MoviePilot 发送资源检索: [${kw || '漫长的季节'}]\n严格筛选「做种数≥2、中文优先」并展示在结果列表中。`);
+    }
+
+    // 页面初始化
+    renderTaskList();
+    selectTask(1);
+  </script>
+
+</body>
+</html>
