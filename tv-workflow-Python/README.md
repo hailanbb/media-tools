@@ -1,141 +1,200 @@
-# 🎬 剧集整理工作流 — Ubuntu/Linux 命令行后端程序 (Python 版)
+# 剧集整理 Python 版
 
-基于 CloudDrive2 / MoviePilot / TMDB API 的剧集整理、补缺与完结归档工具（纯原生 Python 3 实现）。
-针对 **Ubuntu 20.04 / 22.04 / 24.04 LTS** 及各类 Linux 服务器环境深度优化。
+面向 Ubuntu/Linux 的剧集与动漫整理工具，通过 CloudDrive2、MoviePilot 和 TMDB 执行初检、补缺、复核和归档。提供终端菜单、tv 命令和可选 systemd 后台服务。
 
----
+[返回项目列表](../README.md) · [需求与设计文档](../媒体整理需求/README.md)
 
-## 极简使用：两步完成部署
+## 使用前准备
 
-### 第一步：将代码上传到服务器并配置
-将本目录（`tv-workflow-Python`）上传至服务器任意位置（例如 `/opt/tv-workflow-Python` 或 `~/tv-workflow-Python`）。
-- **若为全新克隆/下载**：
-  ```bash
-  cd tv-workflow-Python
-  cp config.example.json config.json
-  # 使用 nano / vim 编辑 config.json 填入您的 CloudDrive2、MoviePilot 与 TMDB 凭据
-  ```
-- **若直接上传本地已配好的环境**：
-  若本地已在 `config.json` 中配置好参数，直接打包上传即可，服务器端无需再次编辑！
+- 能使用终端或 SSH 的 Ubuntu/Linux 主机。
+- 可访问的 CloudDrive2、MoviePilot，以及对应令牌和 TMDB API Key。
+- 已确定的云盘源目录、归档目录与 MoviePilot 下载/整理路径。
+- 执行安装脚本时所需的系统管理权限。
 
-### 第二步：一键初始化环境
-在服务器的项目目录中，执行一键初始化脚本：
-```bash
+安装脚本使用 apt 安装缺失的系统依赖，主要面向 Ubuntu/Debian。其他发行版需要自行准备 Python 和依赖；不据此承诺全部 Linux 环境可直接安装。
+
+## 安装与配置
+
+### 1. 下载并进入目录
+
+从[仓库首页](https://github.com/hailanbb/media-tools)下载 ZIP，解压后将 tv-workflow-Python 目录上传到服务器，例如：
+
+    /opt/tv-workflow-Python
+
+以下命令均以这个位置为例；使用其他目录时替换为实际路径。
+
+~~~bash
+cd /opt/tv-workflow-Python
+~~~
+
+确认当前目录中有 install.sh、config.example.json 和 requirements.txt。
+
+### 2. 填写连接配置
+
+首次安装时复制模板并编辑：
+
+~~~bash
+cp config.example.json config.json
+nano config.json
+~~~
+
+已有 config.json 时跳过复制，直接编辑原文件。
+
+| 配置项 | 填写内容 |
+| --- | --- |
+| clouddrive2.origin / token | CloudDrive2 地址与访问令牌 |
+| moviepilot.origin / token | MoviePilot 地址与访问令牌 |
+| tmdb.apiKey | TMDB API Key |
+| paths.source | CloudDrive2 中的待整理源根 |
+| paths.destination | CloudDrive2 中的归档目标根 |
+| paths.downloadPath | MoviePilot 下载目录 |
+| transferRepair.source / target | 整理修复的源、目标路径及存储映射 |
+| schedule.enabled / cron | 定时开关与计划，先核对是否需要开启 |
+
+配置文件必须是有效 UTF-8 JSON，不添加注释。服务地址应能从服务器访问；云盘路径和容器内路径按各自实际含义填写。完整字段见 [config.example.json](config.example.json)。
+
+在 nano 中按 Ctrl+O、回车保存，再按 Ctrl+X 退出。
+
+### 3. 运行安装脚本
+
+在项目目录执行：
+
+~~~bash
 sudo bash install.sh
-```
-该脚本会自动完成：
-1. 安装基础依赖包（`python3`、`pip3` 等）
-2. 安装所需 Python 库（`openpyxl`、`requests`、`croniter` 等，**免手动配置虚拟环境**）
-3. 授予所有程序执行权限
-4. 注册全局命令 `tv` 到系统路径 `/usr/local/bin/tv`
+~~~
 
----
+脚本会检查 Python/pip、安装 [requirements.txt](requirements.txt) 中的依赖、设置入口执行权限，并注册 /usr/local/bin/tv。它会尝试系统级依赖安装，必要时建立项目内的 .venv；安装完成后查看终端是否出现失败提示。
 
-## 在服务器上直接执行命令
+安装脚本不会替你填写服务信息。发现 config.json 也不代表其中的地址和令牌已经验证。
 
-初始化完成后，**无论在服务器的哪一个目录下**，均可直接使用快捷指令 `tv` 执行全部功能：
+### 4. 打开菜单
 
-| 想要执行的操作 | 直接运行的命令 | 说明 |
-| :--- | :--- | :--- |
-| **打开交互式控制台** | `tv` | 显示中文彩色菜单，支持按数字挂机或手动触发 |
-| **交互式分类选剧初检** | `tv inspect -i` 或 `tv inspect` | 浏览媒体库 (动漫/电视剧) -> 子分类 -> 剧集列表，支持数字选剧、多选、区间 `1-3` 或剧名过滤 |
-| **指定分类初检** | `tv inspect --category 日韩动漫` | 仅初检指定分类下的剧集（如 日韩动漫、国产剧） |
-| **指定剧名初检** | `tv inspect --show 凡人修仙传` | 仅初检名称包含关键字的剧集 |
-| **指定精确目录初检** | `tv inspect --path "/115/.../葬送的芙莉莲"` | 精确扫描指定网盘剧集或分类目录 |
-| **补缺下载** | `tv download` | 自动调取最新报表，优先执行 MoviePilot 受阻修复，再提交下载（含专属站点） |
-| **MoviePilot整理修复** | `tv repair` | 专项解除 MoviePilot 转移阻塞历史并重新触发整理（兼容电视剧与动漫） |
-| **复核清理 (预览)** | `tv review` | 预览待淘汰删除的冗余旧版本与对应刮削文件 |
-| **复核清理 (执行)** | `tv review --yes` | 实际删除冗余文件并自动刷新网盘季目录缓存 |
-| **完结归档 (预览)** | `tv archive` | 预览拟执行整剧移动或增量季合入的剧集 |
-| **完结归档 (执行并对账)** | `tv archive --yes` | 执行归档移动，并自动触发目标完整性核验与源存量对账 |
-| **归档后对账与空别名清理** | `tv verify` | 独立对账核验目标视频、源存量，并自动安全清理源端残留的空别名目录 |
-| **全自动流程** | `tv auto` | 依次自动执行：定向初检/指定待处理 → 补缺下载 → 复核清理 → 归档对账 |
+~~~bash
+tv
+~~~
 
-> 提示：如果您在项目目录内，也可以通过 `./tv-workflow.sh <命令>` 运行，效果完全一致。
+应看到数字菜单。若 tv 找不到，在项目目录尝试：
 
----
+~~~bash
+./tv-workflow.sh
+~~~
 
-## 交互式控制台菜单 (`tv`)
+这个启动器会选择项目内虚拟环境或系统 Python，无须手动 activate。
 
-在终端直接输入 `tv` 即可进入控制台：
-```text
-══════════════════════════════════════════════════
-  🎬 剧集整理工作流 (Python 版) — 后台运行中
-══════════════════════════════════════════════════
-  定时配置: [0 2 * * *] (每日自动执行)
+## 第一次使用
 
-  [1] 选剧/分类初检（浏览选择媒体库、分类与剧集，支持多选）
-  [2] 立即补缺下载（含自动整理修复）
-  [r] MoviePilot 整理历史专项修复
-  [3] 立即复核清理（预览模式）
-  [4] 立即执行归档（预览模式）
-  [5] 复核清理（执行删除）
-  [6] 执行归档（实际移动并自动对账复核）
-  [v] 归档后对账复核（验证目标完整性与清理残留空别名）
-  [7] 全自动流程 (初检→下载→复核→归档)
-  [8] 查看最新报表路径
-  [9] 查看最新运行日志
-  [0] 退出
-══════════════════════════════════════════════════
-```
+1. 输入 **1**，选择一部剧或一个小分类进行初检。
+2. 查看 reports 里的报告，先核对范围、路径、季号与缺集。
+3. 需要补缺时再执行下载，并等待实际下载与整理。
+4. 先预览复核/归档清单，再决定实际执行。
 
----
+| 菜单输入 | 操作 |
+| --- | --- |
+| 1 | 选择媒体库、分类与剧集初检 |
+| 2 | 补缺下载，包含整理修复 |
+| r | 整理历史专项修复 |
+| 3 / 5 | 复核预览 / 实际删除 |
+| 4 / 6 | 归档预览 / 实际移动 |
+| v | 归档对账及当前实现中的空别名清理 |
+| 7 | 全流程，包含实际清理和归档 |
+| 8 / 9 | 查看报表路径 / 运行日志 |
+| 0 | 退出 |
 
-## 已经安装旧版的服务器如何更新升级？
+下载、修复和执行选项会改变外部状态。verify 当前也包含清理行为；auto 会执行实际删除与移动。
 
-如果服务器上已安装了旧版 `tv-workflow-Python`，更新只需极简的 3 步：
+## 命令行使用
 
-### 1. 本地打包/上传新版代码
-将本地更新后的 `tv-workflow-Python` 目录文件上传并覆盖服务器上的项目目录（例如 `/opt/tv-workflow-Python` 或 `~/tv-workflow-Python`）。
-> **注意**：本地的 `config.json` 已经同步更新了新的网盘路径与站点配置，可直接一并覆盖。
+tv 注册成功后可从任意目录调用；也可在项目目录使用 ./tv-workflow.sh 加相同参数。
 
-### 2. 重新执行一键权限与依赖刷新
-通过 SSH 进入服务器上的项目目录，执行：
-```bash
-cd /opt/tv-workflow-Python   # 替换为您服务器上的实际安装路径
+~~~bash
+# 交互选择或定向初检
+tv inspect -i
+tv inspect --category 日韩动漫
+tv inspect --show 示例剧名
+tv inspect --path "/云盘/媒体库/动漫/示例剧名"
+
+# 补缺下载或专项修复
+tv download
+tv repair
+
+# 复核与归档预览
+tv review
+tv archive
+~~~
+
+需要明确输入报告时附加 --report "报告路径"。核对计划后，实际执行命令为：
+
+~~~bash
+tv review --report "报告.xlsx" --yes
+tv archive --report "报告.xlsx" --yes
+~~~
+
+| 其他命令 | 行为 |
+| --- | --- |
+| tv verify | 归档对账及空别名清理 |
+| tv auto | 初检、下载、实际清理、实际归档 |
+| tv --help | 查看参数 |
+
+## 报告与日志
+
+reports 保存各阶段报告，logs 保存日志，data 保存持久记录。下载提交成功与实际文件入库是不同状态，复核应以实际文件为准。
+
+目标规则、动漫差异和已有代码的审阅记录见[需求文档目录](../媒体整理需求/README.md)；其中的验收用例不表示当前 Python 版已经全部通过。
+
+## 更新已安装版本
+
+1. 记录实际安装路径；保留 config.json、data、reports 和 logs，先备份配置。
+2. 如启用了后台服务，先停止服务。
+3. 更新代码文件，保留服务器实际配置，不用示例配置覆盖它。
+4. 在安装目录重新运行安装脚本，然后先做小范围初检。
+5. 检查通过后，再启动需要的后台服务。
+
+已有 systemd 服务时可用：
+
+~~~bash
+sudo systemctl stop tv-workflow.service
+# 完成代码更新后，在项目目录执行：
 sudo bash install.sh
-```
-该脚本会：
-- 自动更新全部依赖；
-- 重新赋予执行权限；
-- 刷新全局 `tv` 命令指向。
+sudo systemctl start tv-workflow.service
+~~~
 
-### 3. 重启后台服务（如果开启了 systemd 常驻）
-若您先前启用了 `tv-workflow.service` 系统服务，重启使其生效：
-```bash
-sudo systemctl restart tv-workflow.service
-sudo systemctl status tv-workflow.service
-```
-若使用的是前台控制台交互，直接运行 `tv` 即可立即体验新版！
+## 后台与开机启动
 
----
+先完成手动检查，再考虑启用后台。项目提供 [systemd 示例](systemd/tv-workflow.service)，其默认安装路径是 /opt/tv-workflow-Python，并使用 /usr/bin/python3 启动。
 
-## 后台常驻与开机自启 (可选)
+安装前检查示例中的 User、WorkingDirectory、ExecStart 和日志路径。使用其他安装目录或项目 .venv 时，改为实际路径与 Python；为运行用户准备可写的日志目录。
 
-如果希望在 Ubuntu 服务器上开机自启并在每日 02:00 定时执行整理：
-```bash
-# 复制 systemd 服务配置
+确认配置后再安装并启用：
+
+~~~bash
 sudo cp systemd/tv-workflow.service /etc/systemd/system/
-
-# 启动并设置开机自启
 sudo systemctl daemon-reload
 sudo systemctl enable --now tv-workflow.service
+~~~
 
-# 查看运行状态与实时日志
+检查状态：
+
+~~~bash
 sudo systemctl status tv-workflow.service
 sudo journalctl -u tv-workflow.service -f
-```
+~~~
 
----
+定时是否执行由项目配置和当前实现共同决定。后台流程含实际操作，启用前核对源、目标与运行范围。
 
-## 核心流程架构
+## 常见问题
 
-```text
-① 初检 → ② 补缺下载 (含整理历史修复) → ③ 复核清理 → ④ 完结归档 (含对账复核)
-   │                    │                           │                 │
-   │  扫描网盘CD2       │ 检查MP转移阻塞优先修复    │ 闭环核验修复集  │ 整剧移动 / 季增量合入
-   │  核对TMDB集数      │ 搜索站点(追加观众/天空等) │ 保留唯一完整版  │ 目标完整性物理核查
-   │  识别缺失/连载     │ 优选做种并提交下载        │ 清理旧版与刮削  │ 别名残留排查与空别名清理
-   │                    │                           │                 │
-   └──→ .xlsx ──────────┴─────→ .xlsx ──────────────┴───→ .xlsx ──────┴───→ 最终对账报表
-```
+| 现象 | 检查方法 |
+| --- | --- |
+| tv 找不到 | 在项目目录用 ./tv-workflow.sh；检查安装脚本是否成功注册命令 |
+| Python 模块缺失 | 查看依赖安装结果，确认启动器使用的 Python 与安装依赖的环境一致 |
+| 前台正常、systemd 失败 | 检查服务的工作目录、Python 路径、运行用户和日志权限 |
+| 配置不存在或格式错误 | 检查 config.json 位置、UTF-8 编码、引号与逗号 |
+| 连接失败或 401/403 | 核对服务器到服务的网络、地址、端口与令牌 |
+| 没有找到剧集 | 检查源根和目录层级，先指定单剧路径 |
+| 报告或日志无法写入 | 检查运行用户对项目目录及输出目录的写权限 |
+
+## 工作流程
+
+    初检 → 补缺下载与整理修复 → 复核清理 → 归档与对账
+
+各阶段用报告衔接。页面/API 版本变化、编号与路径差异需要结合实际错误核实；本说明未替代真实 Linux 部署验证。

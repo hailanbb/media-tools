@@ -2,6 +2,8 @@
 
 日期：2026-10-27
 
+当前状态：油猴版保留于 [tv-season-workflow](tv-season-workflow/README.md)；订阅批量取消脚本已按后续要求移除。以下前几节记录首次迁移时的范围与验证，后续调整见文末。
+
 来源：[hailanbb/skill-selection](https://github.com/hailanbb/skill-selection/tree/155bd1e9b5640808abce797d2de8eafd6a44b0ba)，提交 155bd1e9b5640808abce797d2de8eafd6a44b0ba。
 
 ## 迁移范围
@@ -31,3 +33,11 @@
 ## 同期更新保留
 
 迁移期间目标仓库新增提交 99be9a20529ad2128a6e35bd668d9421cc1cbcd8；本次以该提交为父版本，完整保留 Win11/Python 版本和原有需求文档。首页仅增加迁入工具入口与目录项，并把需求文档的“生产环境已验证”表述还原为实际验证边界。
+
+## 后续仓库整理（2026-10-27）
+
+- 确认油猴版的 77 个迁移文件仍完整保留，业务文件与安装脚本未改动。
+- 按用户要求移除 media-tools 当前分支的 moviepilot-unsubscribe 目录（14 个文件）。
+- 从 skill-selection 当前分支移除“媒体工具”栏目及剩余 emby-tools 目录（含旧 Win11 副本），同步清理首页和脚本索引中的旧入口。Windows 版继续在 media-tools 维护。
+- 首页精简为三个项目及需求文档入口；安装、配置、命令等说明放在各项目 README，采用清晰的安装与使用说明。
+- 均使用普通提交，保留历史；此次不涉及真实媒体文件、下载任务或订阅操作。
