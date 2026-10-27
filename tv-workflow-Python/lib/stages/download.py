@@ -239,10 +239,11 @@ def run_download(
                 eligible.append(c)
 
             if not eligible:
+                logger.warn(f"  ⚠️ 检索到 {len(contexts)} 条资源，但做种数均不足 2 或季号不符，未选定有效资源")
                 session.updates[task] = {
                     "state": "无合格资源",
                     "color": "red",
-                    "note": f"检索到 {len(contexts)} 条，做种数均不足 2"
+                    "note": f"检索到 {len(contexts)} 条，做种数均不足 2 或季号不符"
                 }
                 summary["noResource"] += 1
                 continue
@@ -278,10 +279,11 @@ def run_download(
             best_eps = best_meta.get("episode_list") or []
             is_full_desc = "整季" if len(best_eps) == total else "零散"
 
-            logger.debug(f"  选中: {best_title} (做种: {best_seeds}, {is_full_desc})")
+            logger.info(f"  🎯 选定最佳资源: [{best_site}] {best_title} (做种: {best_seeds}, {is_full_desc})")
 
             # 提交下载
             try:
+                logger.info(f"  🚀 正在向 MoviePilot 提交下载请求...")
                 reply = mp.submit_download(best_c.get("media_info") or {}, best_t)
                 is_success = bool(reply.get("success", False)) if isinstance(reply, dict) else False
 
@@ -299,6 +301,7 @@ def run_download(
                 store.put(store_key, records)
 
                 if is_success:
+                    logger.info(f"  ✅ MoviePilot 已接受下载任务: {best_title}")
                     session.updates[task] = {
                         "state": "已提交下载，待复核",
                         "color": "yellow",
@@ -311,6 +314,7 @@ def run_download(
                     summary["submitted"] += 1
                 else:
                     msg = reply.get("message", "未知原因") if isinstance(reply, dict) else "未知原因"
+                    logger.error(f"  ❌ MoviePilot 拒绝添加下载: {msg}")
                     session.updates[task] = {
                         "state": "下载提交失败",
                         "color": None,
@@ -319,6 +323,7 @@ def run_download(
                     }
                     summary["errors"] += 1
             except Exception as e:
+                logger.error(f"  💥 提交下载异常: {e}")
                 session.updates[task] = {"state": "提交异常", "color": None, "note": str(e)}
                 summary["errors"] += 1
 

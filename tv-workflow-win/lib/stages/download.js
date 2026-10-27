@@ -203,7 +203,8 @@ export async function runDownload(config, logger, reportPath, options = {}) {
       });
 
       if (!eligible.length) {
-        session.updates.set(task, { state: '无合格资源', color: 'red', note: `检索到 ${contexts.length} 条，做种数均不足 2` });
+        logger.warn(`  ⚠️ 检索到 ${contexts.length} 条资源，但做种数均不足 2 或季号不符，未选定有效资源`);
+        session.updates.set(task, { state: '无合格资源', color: 'red', note: `检索到 ${contexts.length} 条，做种数均不足 2 或季号不符` });
         summary.noResource++;
         continue;
       }
@@ -226,14 +227,17 @@ export async function runDownload(config, logger, reportPath, options = {}) {
       );
 
       const best = scored[0];
-      logger.debug(`  选中: ${best.title} (做种: ${best.seeds}, ${best.isFull ? '整季' : '零散'})`);
+      const isFullDesc = best.isFull ? '整季' : '零散';
+      logger.info(`  🎯 选定最佳资源: [${best.site}] ${best.title} (做种: ${best.seeds}, ${isFullDesc})`);
 
       // 提交下载任务
       try {
+        logger.info(`  🚀 正在向 MoviePilot 提交下载请求...`);
         const reply = await mp.submitDownload(best.context.media_info, best.context.torrent_info);
+        const isSuccess = !!reply?.success;
         const record = {
           key: `${best.site}:${best.title}:${best.size}`,
-          state: reply?.success ? 'accepted' : 'rejected',
+          state: isSuccess ? 'accepted' : 'rejected',
           id: reply?.data?.download_id || '',
           title: best.title,
           site: best.site,
@@ -244,7 +248,8 @@ export async function runDownload(config, logger, reportPath, options = {}) {
         records.push(record);
         store.put(storeKey, records);
 
-        if (reply?.success) {
+        if (isSuccess) {
+          logger.info(`  ✅ MoviePilot 已接受下载任务: ${best.title}`);
           session.updates.set(task, {
             state: '已提交下载，待复核',
             color: 'yellow',
@@ -256,15 +261,18 @@ export async function runDownload(config, logger, reportPath, options = {}) {
           });
           summary.submitted++;
         } else {
+          const msg = reply?.message || '未知原因';
+          logger.error(`  ❌ MoviePilot 拒绝添加下载: ${msg}`);
           session.updates.set(task, {
             state: '下载提交失败',
             color: null,
-            note: `MoviePilot 拒绝: ${reply?.message || '未知原因'}`,
+            note: `MoviePilot 拒绝: ${msg}`,
             records: [record],
           });
           summary.errors++;
         }
       } catch (e) {
+        logger.error(`  💥 提交下载异常: ${e.message}`);
         session.updates.set(task, { state: '提交异常', color: null, note: e.message });
         summary.errors++;
       }
