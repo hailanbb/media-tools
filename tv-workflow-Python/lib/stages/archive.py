@@ -262,7 +262,7 @@ def run_archive(
             else:
                 # ── 整剧全新移动模式 ──
                 if dry_run:
-                    logger.info(f"  📋 计划: 整剧移至 {targetCatPath if 'targetCatPath' in locals() else target_cat_path}")
+                    logger.info(f"  📋 计划: 整剧移至 {target_cat_path}")
                     for r in rows:
                         session.updates[r] = {
                             "state": "待归档（整剧预览）",

@@ -113,7 +113,7 @@ echo -e "${CYAN}═════════════════════�
 echo -e "🚀 ${GREEN}常用命令指南 (可在任意目录直接运行):${NC}"
 echo -e "  • 启动交互控制台 (菜单挂机):   ${CYAN}tv${NC} 或 ${CYAN}./tv-workflow.sh${NC}"
 echo -e "  • 交互式分类选剧初检:          ${CYAN}tv inspect -i${NC}"
-echo -e "  • 执行全库初检:                ${CYAN}tv inspect${NC}"
+echo -e "  • 定向初检 (指定分类/剧名):    ${CYAN}tv inspect --category 日韩动漫${NC}"
 echo -e "  • 补缺下载 (含自动整理修复):   ${CYAN}tv download${NC}"
 echo -e "  • 复核清理冗余版本:            ${CYAN}tv review --yes${NC}"
 echo -e "  • 执行完结归档与对账复核:      ${CYAN}tv archive --yes${NC}"

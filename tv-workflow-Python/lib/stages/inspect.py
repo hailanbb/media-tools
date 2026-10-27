@@ -8,7 +8,7 @@
 from datetime import datetime
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 import urllib.parse
 
 from ..clients.clouddrive2 import CloudDriveClient

@@ -11,7 +11,7 @@
 from datetime import datetime
 import json
 import re
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ..clients.moviepilot import MoviePilotClient
 from ..config import PROJECT_ROOT
