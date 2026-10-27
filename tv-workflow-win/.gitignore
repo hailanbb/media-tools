@@ -1,0 +1,33 @@
+# 依赖
+node_modules/
+
+# 运行时配置（含敏感凭据）
+config.json
+
+# 日志
+logs/
+
+# 报告产出
+reports/
+
+# 运行时数据
+data/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDE / 编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 环境变量
+.env
+.env.*
+
+# npm 调试日志
+npm-debug.log*

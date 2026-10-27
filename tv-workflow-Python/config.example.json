@@ -1,0 +1,38 @@
+{
+  "clouddrive2": {
+    "origin": "http://localhost:19798",
+    "token": "YOUR_CD2_API_TOKEN"
+  },
+  "moviepilot": {
+    "origin": "http://localhost:3000",
+    "token": "YOUR_MOVIEPILOT_API_TOKEN",
+    "extraSearchSites": ["观众", "天空"]
+  },
+  "tmdb": {
+    "apiKey": "YOUR_TMDB_API_KEY",
+    "language": "zh-CN"
+  },
+  "paths": {
+    "source": "/115/Library_incs/nas",
+    "destination": "/115/Library_incs/nas.finish",
+    "downloadPath": "/video/downloads"
+  },
+  "transferRepair": {
+    "enabled": true,
+    "source": "/video/downloads",
+    "target": "/115/Library_incs/nas"
+  },
+  "schedule": {
+    "enabled": false,
+    "cron": "0 2 * * *",
+    "stages": ["inspect", "download", "review", "archive"]
+  },
+  "notifications": {
+    "enabled": true,
+    "sound": false
+  },
+  "log": {
+    "directory": "./logs",
+    "level": "info"
+  }
+}

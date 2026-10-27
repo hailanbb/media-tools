@@ -1,0 +1,39 @@
+# Python 编译缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# 运行时配置（含敏感凭据）
+config.json
+
+# 日志
+logs/
+*.log
+
+# 报告产出
+reports/
+*.xlsx
+
+# 运行时持久化数据
+data/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDE / 编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 环境变量
+.env
+.env.*

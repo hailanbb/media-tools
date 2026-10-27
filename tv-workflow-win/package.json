@@ -1,0 +1,20 @@
+{
+  "name": "tv-workflow-win",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "剧集整理工作流 - Win11 后台版本（基于 CloudDrive2 / MoviePilot API）",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node bin/tray.js",
+    "inspect": "node bin/tv-workflow.js inspect",
+    "download": "node bin/tv-workflow.js download",
+    "review": "node bin/tv-workflow.js review",
+    "archive": "node bin/tv-workflow.js archive",
+    "auto": "node bin/tv-workflow.js auto"
+  },
+  "dependencies": {
+    "xlsx-js-style": "^1.2.0",
+    "opencc-js": "^1.0.5"
+  }
+}

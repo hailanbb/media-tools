@@ -1,0 +1,38 @@
+# 配置文件与凭据（绝不提交任何真实令牌/地址）
+config.json
+*/config.json
+**/*.env*
+
+# 运行时临时数据与产出
+logs/
+*/logs/
+reports/
+*/reports/
+data/
+*/data/
+*.log
+*.xlsx
+~$*.xlsx
+
+# Python 缓存
+__pycache__/
+*/__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# Node 依赖与构建
+node_modules/
+*/node_modules/
+npm-debug.log*
+
+# 系统与编辑器缓存
+.DS_Store
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+*.swp
+*~
