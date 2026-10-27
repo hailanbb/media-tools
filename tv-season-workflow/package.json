@@ -1,0 +1,16 @@
+{
+  "name": "tv-season-workflow",
+  "version": "1.2.2",
+  "private": true,
+  "description": "剧集整理工作流：初检、下载、复核清理与归档",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node build.cjs",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "@xmldom/xmldom": "0.9.12"
+  }
+}

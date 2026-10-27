@@ -11,6 +11,17 @@
 
 ---
 
+## 媒体脚本工具
+
+| 项目 | 入口 |
+| --- | --- |
+| 剧集整理工作流（油猴版） | [项目与四个安装脚本](tv-season-workflow/README.md) · [安装](tv-season-workflow/INSTALL.md) · [报告与追溯](tv-season-workflow/REPORT.md) |
+| MoviePilot 订阅批量取消脚本 · v2.4.0 | [配置与使用](moviepilot-unsubscribe/README.md) · [安装脚本](moviepilot-unsubscribe/moviepilot-unsubscribe.user.js) |
+
+两个项目完整迁自 [skill-selection](https://github.com/hailanbb/skill-selection)，包含源码、安装文件、文档、测试和第三方许可；业务逻辑及脚本版本保持不变。[迁移来源与验证记录](MIGRATION.md)。
+
+---
+
 ## 📌 项目背景与解决的核心痛点
 
 在基于 **NAS / 115网盘 + CloudDrive2 + MoviePilot + Emby/Plex/Jellyfin** 搭建的现代私有媒体库体系中，影视资源的收集与整理常常面临以下深层困境：
@@ -78,9 +89,11 @@ flowchart TD
 
 ```text
 media-tools/
+├── tv-season-workflow/     # 剧集整理工作流（油猴版）
+├── moviepilot-unsubscribe/ # MoviePilot 订阅批量取消脚本 v2.4.0
 ├── tv-workflow-win/        # 💻 Windows 桌面/后台版 (Node.js ESM 实现)
 ├── tv-workflow-Python/     # 🐧 Ubuntu / Linux 服务器版 (纯原生 Python 3 实现)
-├── 媒体整理需求/            # 📚 完整技术设计文档、数据契约与接口研究资料 (15篇深度文档)
+├── 媒体整理需求/            # 📚 完整技术设计文档、数据契约与接口研究资料
 └── README.md               # 📖 仓库总览指南
 ```
 
@@ -232,7 +245,7 @@ sudo journalctl -u tv-workflow.service -f
 
 ## 📚 详细设计规范与二次开发资料
 
-仓库中的 `媒体整理需求/` 目录完整收录了经过实际生产环境验证的 15 篇详细规格说明书，适合二次开发与架构推演参考：
+仓库中的 `媒体整理需求/` 目录保留了 12 份核心需求文档及发布辅助索引，适合二次开发与架构推演参考；其中验收用例是待实现的验证规范，不表示已经通过真实生产环境验证：
 
 - 📑 [01-核心需求基线.md](媒体整理需求/01-核心需求基线.md) — 77 条核心业务规则基线
 - 📑 [02-剧集初检详细需求.md](媒体整理需求/02-剧集初检详细需求.md) — 目录自适应识别与集数核验
@@ -240,9 +253,9 @@ sudo journalctl -u tv-workflow.service -f
 - 📑 [04-复核清理详细需求.md](媒体整理需求/04-复核清理详细需求.md) — 冗余版本识别与刮削文件安全清理
 - 📑 [05-剧集归档详细需求.md](媒体整理需求/05-剧集归档详细需求.md) — 增量季合入与归档对账规范
 - 📑 [06-技术方案与数据契约.md](媒体整理需求/06-技术方案与数据契约.md) — Excel 报表结构与状态机字段定义
-- 📑 [10-MoviePilot接口研究与接入方案.md](媒体整理需求/10-MoviePilot接口研究与接入方案.md) — MoviePilot v2 REST API 实测与避坑要点
+- 📑 [10-MoviePilot接口研究与接入方案.md](媒体整理需求/10-MoviePilot接口研究与接入方案.md) — MoviePilot v2 接口契约核查与接入边界
 - 📑 [11-动漫整理专项需求与命名规范.md](媒体整理需求/11-动漫整理专项需求与命名规范.md) — 动漫特典过滤与压制组命名深度规则
-- 📑 [08-验收用例与追踪.md](媒体整理需求/08-验收用例与追踪.md) — 87 个真实场景验证集
+- 📑 [08-验收用例与追踪.md](媒体整理需求/08-验收用例与追踪.md) — 87 个验收场景与需求追踪
 
 ---
 
