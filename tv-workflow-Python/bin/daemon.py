@@ -135,6 +135,9 @@ def main() -> None:
 
     signal.signal(signal.SIGINT, handle_exit)
     signal.signal(signal.SIGTERM, handle_exit)
+    if hasattr(signal, "SIGHUP"):
+        # 忽略终端挂断信号，防止 SSH 意外断开波及后台调度进程
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
 
     # 1. 非 TTY 模式（后台守护进程 / systemd / nohup）
     if not sys.stdin.isatty():
