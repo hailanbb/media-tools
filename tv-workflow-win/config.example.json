@@ -6,7 +6,11 @@
   "moviepilot": {
     "origin": "http://localhost:3000",
     "token": "YOUR_MOVIEPILOT_API_TOKEN",
-    "extraSearchSites": ["观众", "天空"]
+    "extraSearchSites": [
+      "观众",
+      "天空",
+      "馒头"
+    ]
   },
   "tmdb": {
     "apiKey": "YOUR_TMDB_API_KEY",
@@ -25,7 +29,12 @@
   "schedule": {
     "enabled": false,
     "cron": "0 2 * * *",
-    "stages": ["inspect", "download", "review", "archive"]
+    "stages": [
+      "inspect",
+      "download",
+      "review",
+      "archive"
+    ]
   },
   "notifications": {
     "enabled": true,
