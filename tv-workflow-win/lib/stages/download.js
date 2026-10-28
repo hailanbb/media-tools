@@ -1,11 +1,15 @@
 /**
- * 阶段二：补缺下载（含 MoviePilot 整理修复联动 v1.5.0）
+ * 阶段二：补缺下载（含 MoviePilot 整理历史修复联动、活跃下载队列实时对齐与多维精准选种）
  *
  * 核心流程：
  * 1. 读取初检报告中的缺失项
- * 2. 【新增整理修复】优先检查 MoviePilot 整理历史：若已下载但转移失败/受阻，先执行单集历史解除与重转，避免重复下载
- * 3. 对无历史或未修复项，搜索资源站资源，按规则筛选（整季优先、中文优先、做种≥5优先）并提交下载
- * 4. 写回更新报告并保存防重复记录
+ * 2. 【整理修复优先】检查 MoviePilot 整理历史：若已下载但转移受阻，自动解除单条历史并重新触发转移
+ * 3. 【实时下载队列对齐】查询 MoviePilot 活跃下载任务，若缺集已在下载中则避免重复提交，仅补齐剩余缺集
+ * 4. 对需下载项，搜索默认站点并追加专属站点（如“观众”、“天空”、“馒头”），按多维规则打分优选：
+ *    - 整季包能效比决策（Yield Ratio）：缺集少且散集可100%覆盖时优先散集，避免下几十G大包
+ *    - 散集贪心多候选覆盖：清晰度梯队（优先1080p/2160p，惩罚720p/SD）、单集健康码率（200MB~3.5GB）、冗余惩罚、发布组一致性
+ *    - 频控与提交熔断：连续提交间隔 0.5s，单季上限 15 个任务
+ * 5. 写回更新报告并保存防重复记录到持久化存储
  */
 import { MoviePilotClient } from '../clients/moviepilot.js';
 import { readReport, writeReport } from '../core/report-adapter.js';
@@ -20,7 +24,7 @@ const norm = createNormalizer();
 /**
  * 精准判断是否为整季资源包
  */
-function isSeasonPack(meta, t, taskSeason, total) {
+export function isSeasonPack(meta, t, taskSeason, total) {
   const eps = meta?.episode_list || [];
   if (total > 0 && eps.length === total) return true;
   const totalEp = meta?.total_episode;
@@ -47,6 +51,122 @@ function isSeasonPack(meta, t, taskSeason, total) {
     }
   }
   return false;
+}
+
+/**
+ * 将数字列表折叠成紧凑格式，如 [10, 12, 13, 14, 15] -> '10、12-15'
+ */
+export function formatRanges(eps) {
+  if (!eps || !eps.length) return '';
+  const sorted = Array.from(new Set(eps)).sort((a, b) => a - b);
+  const ranges = [];
+  let start = sorted[0];
+  let prev = sorted[0];
+  for (let i = 1; i < sorted.length; i++) {
+    const n = sorted[i];
+    if (n === prev + 1) {
+      prev = n;
+    } else {
+      ranges.push(start === prev ? `${start}` : `${start}-${prev}`);
+      start = n;
+      prev = n;
+    }
+  }
+  ranges.push(start === prev ? `${start}` : `${start}-${prev}`);
+  return ranges.join('、');
+}
+
+/**
+ * 解析 MoviePilot active download 中的集数字符串（如 'E01-E06', 'E12', ''）
+ */
+export function parseActiveEpisodes(epStr, total = 0) {
+  const s = String(epStr || '').trim();
+  if (!s) {
+    return total > 0 ? new Set(Array.from({ length: total }, (_, i) => i + 1)) : new Set();
+  }
+  const eps = new Set();
+  const re = /(?:E|EP)?(\d+)(?:\s*[-~～至到_\ufffd]\s*(?:E|EP)?(\d+))?/gi;
+  let m;
+  while ((m = re.exec(s)) !== null) {
+    const start = parseInt(m[1], 10);
+    if (m[2]) {
+      const end = parseInt(m[2], 10);
+      const [from, to] = start <= end ? [start, end] : [end, start];
+      for (let i = from; i <= to; i++) eps.add(i);
+    } else {
+      eps.add(start);
+    }
+  }
+  return eps;
+}
+
+/**
+ * 解析清晰度并计算画质梯队得分（优先 1080p/2160p，惩罚 720p/480p）
+ */
+export function getResolutionScore(t = {}, meta = {}) {
+  const text = `${t.title || ''} ${meta.resource_pix || ''} ${(t.labels || []).join(' ')}`.toLowerCase();
+  if (/2160p|4k|uhd/.test(text)) return 900;
+  if (/1080p|1080i|fhd/.test(text)) return 1000;
+  if (/720p|hd(?![a-z0-9])/.test(text)) return -500;
+  if (/480p|576p|sd(?![a-z0-9])/.test(text)) return -1000;
+  return 0;
+}
+
+/**
+ * 健康码率区间奖励：单集 200MB~3.5GB 属于标准画质甜点区间
+ */
+export function getBitrateHealthScore(sizeBytes, epCount) {
+  if (!epCount || epCount <= 0 || !sizeBytes || sizeBytes <= 0 || !Number.isFinite(sizeBytes)) return 0;
+  const sizeMb = (sizeBytes / epCount) / (1024 * 1024);
+  if (sizeMb >= 200 && sizeMb <= 3500) return 200;
+  if (sizeMb < 80) return -600;
+  if (sizeMb > 15000) return -150;
+  return 0;
+}
+
+/**
+ * 提取发布组名称，如 CHDWEB, ADWeb, FLUX
+ */
+export function extractReleaseGroup(title) {
+  const m = /[-@]([A-Za-z0-9_]+)(?:\s*\[.*?\])?(?:\.mkv|\.mp4)?$/i.exec(String(title || '').trim());
+  return m ? m[1].toLowerCase() : '';
+}
+
+/**
+ * 综合计算候选资源的选取加权得分（清晰度、码率、做种、多候选净增益与发布组一致性）
+ */
+export function calculateCandidateScore(cand, hits, allCandEps, preferredGroup = null) {
+  const t = cand?.torrent_info || {};
+  const meta = cand?.meta_info || {};
+  const title = String(t.title || '');
+  const hitsCount = hits.length;
+  const epCount = allCandEps && allCandEps.length ? allCandEps.length : 1;
+  const redundantCount = Math.max(0, epCount - hitsCount);
+
+  // 1. 命中集数净增益 (命中+350，冗余集扣120以避免为了1集下整季大包)
+  const netGain = hitsCount * 350 - redundantCount * 120;
+
+  // 2. 清晰度梯队分 (1080p: +1000, 2160p: +900, 720p: -500, SD: -1000)
+  const resScore = getResolutionScore(t, meta);
+
+  // 3. 单集健康码率分
+  const sizeBytes = Number(t.size) || 0;
+  const bitrateScore = getBitrateHealthScore(sizeBytes, epCount);
+
+  // 4. 中文与字幕偏好
+  const labelsText = JSON.stringify(t.labels || []) + title;
+  const hasChinese = /中文|中字|简中|繁中|国语|chs|cht|简日|繁日|双语|baha|巴哈|简繁|内封|mikan/i.test(labelsText);
+  const chineseScore = hasChinese ? 400 : 0;
+
+  // 5. 做种数偏好 (做种>=5加200，并微量累加健康种)
+  const seeds = Number(t.seeders) || 0;
+  const seedsScore = seeds >= 5 ? (200 + Math.min(seeds, 50)) : (seeds * 20);
+
+  // 6. 发布组连续性偏好 (后续分集尽量与已选中的首选发布组一致)
+  const group = extractReleaseGroup(title);
+  const groupScore = (preferredGroup && group && group === preferredGroup) ? 250 : 0;
+
+  return netGain + resScore + bitrateScore + chineseScore + seedsScore + groupScore;
 }
 
 /**
@@ -93,6 +213,20 @@ export async function runDownload(config, logger, reportPath, options = {}) {
     source: config.paths.downloadPath || '/video/downloads/电视剧',
     target: config.paths.source || '/115/Library_incs/nas/电视剧'
   };
+
+  // ── 预取 MoviePilot 实时活跃下载队列（用于防重与排队对齐） ──
+  let activeDownloads = [];
+  try {
+    const rawActive = await mp.getActiveDownloads();
+    if (Array.isArray(rawActive)) {
+      activeDownloads = rawActive;
+    } else if (rawActive && typeof rawActive === 'object') {
+      activeDownloads = rawActive.data || rawActive.items || [];
+    }
+    logger.info(`📡 MoviePilot 活跃下载队列: 共有 ${activeDownloads.length} 个下载任务`);
+  } catch (actErr) {
+    logger.warn(`⚠️ 查询 MoviePilot 活跃下载队列跳过: ${actErr.message}`);
+  }
 
   // 逐项处理
   for (let i = 0; i < session.tasks.length; i++) {
@@ -158,18 +292,94 @@ export async function runDownload(config, logger, reportPath, options = {}) {
         continue;
       }
 
-      // ── 正常搜索与下载流程 ──
-      const storeKey = `dl:${norm(task.name)}:${task.season}`;
-      const records = store.get(storeKey, []);
-      const accepted = records.filter(r => ['accepted', 'existing'].includes(r.state));
+      // ──【实时下载队列核对与动态去重】──
+      const activeEpisodesInQueue = new Set();
+      for (const item of activeDownloads) {
+        const media = item?.media || {};
+        const itTmdb = String(media.tmdbid || item.tmdbid || '').trim();
+        const itSeasonStr = String(media.season || item.season_episode || '').trim();
+        const sMatch = /\d+/.exec(itSeasonStr);
+        const itSeason = sMatch ? parseInt(sMatch[0], 10) : null;
 
-      // 若历史下载记录已覆盖全部缺集
-      if (needed !== null && needed.every(n => accepted.some(r => r.episodes?.includes(n)))) {
+        let isMatch = false;
+        if (tmdb && itTmdb && itTmdb === String(tmdb)) {
+          isMatch = (itSeason === task.season);
+        } else if (!tmdb || !itTmdb) {
+          const itName = media.title || item.name || item.title || '';
+          if (norm(itName) === norm(task.title)) {
+            isMatch = itSeason != null ? (itSeason === task.season) : true;
+          }
+        }
+
+        if (isMatch) {
+          const epsFound = parseActiveEpisodes(media.episode, total);
+          for (const ep of epsFound) activeEpisodesInQueue.add(ep);
+        }
+      }
+
+      // 若活跃下载队列已完全覆盖所需缺失集
+      if (needed && needed.length > 0 && needed.every(ep => activeEpisodesInQueue.has(ep))) {
+        const coveredStr = formatRanges(needed);
+        logger.info(`  📥 下载队列正在下载全部缺失集 (覆盖: ${coveredStr})，跳过重复提交`);
         session.updates.set(task, {
           state: '已提交下载，待复核',
           color: 'yellow',
-          note: '防重复记录已覆盖缺集',
-          records: accepted,
+          note: `下载队列正在下载缺集 (覆盖: ${coveredStr})`,
+          repair: readRepairState(task.data) || undefined,
+          at: new Date().toISOString(),
+        });
+        summary.existing++;
+        continue;
+      }
+
+      // 若活跃下载队列覆盖了部分缺失集，剔除已在下载中的集数，仅需补齐剩余缺失
+      if (needed && activeEpisodesInQueue.size > 0) {
+        const overlap = needed.filter(ep => activeEpisodesInQueue.has(ep));
+        if (overlap.length > 0) {
+          const remainingNeeded = needed.filter(ep => !activeEpisodesInQueue.has(ep));
+          logger.info(`  📥 下载队列已在下载集数: ${formatRanges(overlap)}，本次仅需补齐剩余: ${formatRanges(remainingNeeded)}`);
+          task.needed = remainingNeeded;
+          if (remainingNeeded.length === 0) {
+            session.updates.set(task, {
+              state: '已提交下载，待复核',
+              color: 'yellow',
+              note: `下载队列正在下载缺集 (覆盖: ${formatRanges(overlap)})`,
+              repair: readRepairState(task.data) || undefined,
+              at: new Date().toISOString(),
+            });
+            summary.existing++;
+            continue;
+          }
+        }
+      }
+
+      // ── 检查本地持久化防重记录 ──
+      const storeKey = `dl:${norm(task.name)}:${task.season}`;
+      const records = store.get(storeKey, []);
+      const nowTs = Date.now();
+      const validAccepted = [];
+      for (const r of records) {
+        if (['accepted', 'existing'].includes(r.state)) {
+          let isRecent = false;
+          if (r.at) {
+            const tRecord = new Date(r.at).getTime();
+            if (nowTs - tRecord < 1800000) { // 30 分钟内
+              isRecent = true;
+            }
+          }
+          const rEps = r.episodes || [];
+          if (isRecent || (rEps.length > 0 && rEps.some(ep => activeEpisodesInQueue.has(ep)))) {
+            validAccepted.push(r);
+          }
+        }
+      }
+
+      if (task.needed && task.needed.every(n => validAccepted.some(r => r.episodes?.includes(n)))) {
+        session.updates.set(task, {
+          state: '已提交下载，待复核',
+          color: 'yellow',
+          note: '近期下载记录已覆盖缺集',
+          records: validAccepted,
           repair: readRepairState(task.data) || undefined
         });
         summary.existing++;
@@ -224,6 +434,7 @@ export async function runDownload(config, logger, reportPath, options = {}) {
       }
 
       // 筛选做种数 >= 2、季号匹配且能有效补缺的候选
+      const currentNeeded = task.needed || [];
       const eligible = contexts.filter(c => {
         const m = c.media_info, meta = c.meta_info, t = c.torrent_info;
         if (!t || !m) return false;
@@ -236,10 +447,10 @@ export async function runDownload(config, logger, reportPath, options = {}) {
         const isFull = isSeasonPack(meta, t, task.season, total);
 
         // 核心缺集过滤规则：
-        if (needed && needed.length > 0) {
+        if (currentNeeded && currentNeeded.length > 0) {
           if (!isFull) {
             if (eps.length > 0) {
-              const hitNeeded = eps.some(ep => needed.includes(ep));
+              const hitNeeded = eps.some(ep => currentNeeded.includes(ep));
               if (!hitNeeded) return false;
             } else {
               return false;
@@ -247,9 +458,9 @@ export async function runDownload(config, logger, reportPath, options = {}) {
           }
         }
 
-        // 排除已成功提交过的相同种子
+        // 排除近期已成功提交过的相同种子
         const tKey = `${t.site_name || ''}:${t.title || ''}:${t.size || ''}`;
-        if (records.some(r => r.key === tKey && r.state === 'accepted')) {
+        if (validAccepted.some(r => r.key === tKey && r.state === 'accepted')) {
           return false;
         }
 
@@ -263,60 +474,78 @@ export async function runDownload(config, logger, reportPath, options = {}) {
         continue;
       }
 
-      // 区分整季包与散集多候选选取：
+      // 区分整季包与散集
       const seasonPacks = eligible.filter(c => isSeasonPack(c.meta_info, c.torrent_info, task.season, total));
+      const standaloneCandidates = eligible.filter(c => !isSeasonPack(c.meta_info, c.torrent_info, task.season, total));
       const selectedCandidates = []; // Array of { context, hits, isFull }
 
-      if (seasonPacks.length > 0) {
-        seasonPacks.sort((a, b) => {
-          const ta = a.torrent_info, tb = b.torrent_info;
-          const sa = Number(ta.seeders) || 0, sb = Number(tb.seeders) || 0;
-          const sza = Number(ta.size) || Infinity, szb = Number(tb.size) || Infinity;
-          const cha = /中文|中字|简中|繁中|国语|chs|cht|简日|繁日|双语|baha|巴哈|简繁|内封|mikan/i.test(JSON.stringify(ta.labels || []) + (ta.title || ''));
-          const chb = /中文|中字|简中|繁中|国语|chs|cht|简日|繁日|双语|baha|巴哈|简繁|内封|mikan/i.test(JSON.stringify(tb.labels || []) + (tb.title || ''));
-          return (chb - cha) || ((sb >= 5 ? 1 : 0) - (sa >= 5 ? 1 : 0)) || (sza - szb) || (sb - sa);
-        });
+      // ── 整季包能效比决策 (Season Pack Yield Ratio) ──
+      let preferStandalone = false;
+      if (seasonPacks.length > 0 && currentNeeded.length > 0 && total > 0) {
+        const missingCount = currentNeeded.length;
+        const missingRatio = missingCount / total;
+        if (missingCount <= 3 && missingRatio < 0.35) {
+          const standaloneCovered = new Set();
+          for (const sc of standaloneCandidates) {
+            const scEps = sc.meta_info?.episode_list || [];
+            for (const ep of scEps) standaloneCovered.add(ep);
+          }
+          if (currentNeeded.every(ep => standaloneCovered.has(ep))) {
+            preferStandalone = true;
+            logger.info(`  💡 缺失 ${missingCount} 集 (占比 ${(missingRatio * 100).toFixed(1)}%)，且散集可 100% 覆盖，优先采用散集精准补缺（避免下整季大包）`);
+          }
+        }
+      }
+
+      if (seasonPacks.length > 0 && !preferStandalone) {
+        const allEps = Array.from({ length: total }, (_, idx) => idx + 1);
+        let bestSp = seasonPacks[0];
+        let bestScore = calculateCandidateScore(bestSp, allEps, allEps);
+        for (let idx = 1; idx < seasonPacks.length; idx++) {
+          const score = calculateCandidateScore(seasonPacks[idx], allEps, allEps);
+          if (score > bestScore) {
+            bestScore = score;
+            bestSp = seasonPacks[idx];
+          }
+        }
         selectedCandidates.push({
-          context: seasonPacks[0],
-          hits: Array.from({ length: total }, (_, i) => i + 1),
+          context: bestSp,
+          hits: allEps,
           isFull: true,
         });
       } else {
-        const remainingNeeded = new Set(needed || []);
-        while (remainingNeeded.size > 0) {
+        // 散集贪心多候选覆盖算法（含画质梯队、健康码率、冗余惩罚、发布组一致性与单季15个上限熔断）
+        const remainingNeeded = new Set(currentNeeded);
+        let preferredGroup = null;
+        const maxSubmissions = 15;
+
+        while (remainingNeeded.size > 0 && selectedCandidates.length < maxSubmissions) {
           const candidatesForRemaining = [];
           for (const c of eligible) {
             const eps = c.meta_info?.episode_list || [];
             const hits = eps.filter(ep => remainingNeeded.has(ep));
             if (hits.length > 0) {
-              candidatesForRemaining.push({ context: c, hits });
+              const score = calculateCandidateScore(c, hits, eps, preferredGroup);
+              candidatesForRemaining.push({ context: c, hits, score });
             }
           }
           if (!candidatesForRemaining.length) break;
 
-          candidatesForRemaining.sort((a, b) => {
-            const ta = a.context.torrent_info, tb = b.context.torrent_info;
-            const sa = Number(ta.seeders) || 0, sb = Number(tb.seeders) || 0;
-            const sza = Number(ta.size) || Infinity, szb = Number(tb.size) || Infinity;
-            const cha = /中文|中字|简中|繁中|国语|chs|cht|简日|繁日|双语|baha|巴哈|简繁|内封|mikan/i.test(JSON.stringify(ta.labels || []) + (ta.title || ''));
-            const chb = /中文|中字|简中|繁中|国语|chs|cht|简日|繁日|双语|baha|巴哈|简繁|内封|mikan/i.test(JSON.stringify(tb.labels || []) + (tb.title || ''));
-            return (
-              (b.hits.length - a.hits.length) ||
-              (chb - cha) ||
-              ((sb >= 5 ? 1 : 0) - (sa >= 5 ? 1 : 0)) ||
-              (sza - szb) ||
-              (sb - sa)
-            );
-          });
-
+          candidatesForRemaining.sort((a, b) => b.score - a.score);
           const bestCand = candidatesForRemaining[0];
+
           selectedCandidates.push({
             context: bestCand.context,
             hits: bestCand.hits,
             isFull: false,
           });
+
           for (const ep of bestCand.hits) {
             remainingNeeded.delete(ep);
+          }
+
+          if (!preferredGroup) {
+            preferredGroup = extractReleaseGroup(bestCand.context?.torrent_info?.title);
           }
         }
       }
@@ -332,27 +561,29 @@ export async function runDownload(config, logger, reportPath, options = {}) {
       const submittedRecs = [];
       const allCoveredEps = new Set();
 
-      for (const item of selectedCandidates) {
+      for (let candIdx = 0; candIdx < selectedCandidates.length; candIdx++) {
+        const item = selectedCandidates[candIdx];
         const { context: cand, hits, isFull } = item;
         const candT = cand.torrent_info;
         const candMeta = cand.meta_info || {};
         const title = String(candT.title || '');
         const site = String(candT.site_name || '');
         const seeds = Number(candT.seeders) || 0;
-        const descType = isFull ? '整季' : `缺集 [${hits.join('、')}]`;
+        const descType = isFull ? '整季' : `缺集 ${formatRanges(hits)}`;
 
         const tKey = `${site}:${title}:${candT.size || ''}`;
-        if (records.some(r => r.key === tKey && r.state === 'accepted')) {
-          logger.debug(`  ⏭ 排除已提交过相同种子: ${title}`);
-          continue;
+        logger.info(`  🎯 选定最佳资源 [${candIdx + 1}/${selectedCandidates.length}]: [${site}] ${title} (做种: ${seeds}, ${descType})`);
+
+        // 请求节流：连续提交之间暂停 0.5s，保护 MoviePilot / 下载器客户端稳定
+        if (candIdx > 0) {
+          await new Promise(resolve => setTimeout(resolve, 500));
         }
 
-        logger.info(`  🎯 选定最佳资源: [${site}] ${title} (做种: ${seeds}, ${descType})`);
         try {
           logger.info(`  🚀 正在向 MoviePilot 提交下载请求: ${title}...`);
           const reply = await mp.submitDownload(cand.media_info, candT);
           const isSuccess = !!reply?.success;
-          const cCovered = isFull ? Array.from({ length: total }, (_, i) => i + 1) : (candMeta.episode_list || hits);
+          const cCovered = isFull ? Array.from({ length: total }, (_, idx) => idx + 1) : (candMeta.episode_list || hits);
           const record = {
             key: tKey,
             state: isSuccess ? 'accepted' : 'rejected',
@@ -383,12 +614,24 @@ export async function runDownload(config, logger, reportPath, options = {}) {
       }
 
       if (submittedRecs.length > 0) {
-        const first = submittedRecs[0];
-        const isSp = selectedCandidates[0]?.isFull;
-        const desc = isSp ? '整季' : '零散';
-        const noteStr = submittedRecs.length === 1
-          ? `${first.title} (做种 ${first.seeds}, ${desc})`
-          : `已提交 ${submittedRecs.length} 个资源补缺，共覆盖 ${allCoveredEps.size} 集`;
+        let noteStr = '';
+        if (submittedRecs.length === 1 && selectedCandidates[0]?.isFull) {
+          const first = submittedRecs[0];
+          noteStr = `[${first.site}] ${first.title} (做种 ${first.seeds}, 整季覆盖)`;
+        } else if (submittedRecs.length === 1) {
+          const first = submittedRecs[0];
+          const covStr = formatRanges(Array.from(allCoveredEps));
+          noteStr = `[${first.site}] ${first.title} (覆盖: ${covStr})`;
+        } else {
+          const covStr = formatRanges(Array.from(allCoveredEps));
+          const uncovered = currentNeeded.filter(ep => !allCoveredEps.has(ep));
+          if (uncovered.length > 0) {
+            const uncovStr = formatRanges(uncovered);
+            noteStr = `已提交 ${submittedRecs.length} 个资源补缺 (覆盖: ${covStr}，仍缺(无源): ${uncovStr})`;
+          } else {
+            noteStr = `已提交 ${submittedRecs.length} 个资源补缺 (完整覆盖缺集: ${covStr})`;
+          }
+        }
 
         session.updates.set(task, {
           state: '已提交下载，待复核',
