@@ -18,6 +18,38 @@ import { readRepairState } from '../core/repair-state.js';
 const norm = createNormalizer();
 
 /**
+ * 精准判断是否为整季资源包
+ */
+function isSeasonPack(meta, t, taskSeason, total) {
+  const eps = meta?.episode_list || [];
+  if (total > 0 && eps.length === total) return true;
+  const totalEp = meta?.total_episode;
+  if (total > 0 && totalEp === total && eps.length === 0) return true;
+
+  const beginSeason = meta?.begin_season;
+  const seasonList = meta?.season_list || (beginSeason ? [beginSeason] : []);
+  if (seasonList.length === 1 && seasonList[0] === taskSeason) {
+    const beginEp = meta?.begin_episode;
+    const endEp = meta?.end_episode;
+    const seasonEp = String(meta?.season_episode || '').toUpperCase().trim();
+    const isSeasonOnly = /^S\d{1,2}$/.test(seasonEp);
+
+    if ((beginEp == null || beginEp === 0) && (endEp == null || endEp === 0) && eps.length === 0) {
+      const title = String(t?.title || '');
+      const sub = String(meta?.subtitle || t?.description || '');
+      const combined = `${title} ${sub}`;
+      if (!/(?:[Ee][Pp]?\s*\d+|第\s*\d+\s*集|\b\d+\s*集\b)/.test(combined)) {
+        return true;
+      }
+      if (isSeasonOnly && !/[Ee][Pp]?\s*\d+/.test(title)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
  * 执行补缺下载与整理修复
  * @param {object} config
  * @param {object} logger
@@ -154,8 +186,8 @@ export async function runDownload(config, logger, reportPath, options = {}) {
         logger.warn(`  ⚠️ 默认站点搜索异常: ${e.message}`);
       }
 
-      // 追加专属站点搜索（默认包含: 观众、天空）
-      const extraSiteNames = config.moviepilot?.extraSearchSites ?? ['观众', '天空'];
+      // 追加专属站点搜索（默认包含: 观众、天空、馒头）
+      const extraSiteNames = config.moviepilot?.extraSearchSites ?? ['观众', '天空', '馒头'];
       if (Array.isArray(extraSiteNames) && extraSiteNames.length > 0) {
         try {
           const extraSiteIds = await mp.resolveSiteIds(extraSiteNames);
@@ -201,7 +233,7 @@ export async function runDownload(config, logger, reportPath, options = {}) {
         if (!Number.isFinite(seeds) || seeds < 2) return false;
 
         const eps = meta?.episode_list || [];
-        const isFull = (eps.length === total) || (meta?.total_episode === total && eps.length === 0);
+        const isFull = isSeasonPack(meta, t, task.season, total);
 
         // 核心缺集过滤规则：
         if (needed && needed.length > 0) {
@@ -237,7 +269,7 @@ export async function runDownload(config, logger, reportPath, options = {}) {
         const seeds = Number(t.seeders) || 0;
         const size = Number(t.size) || Infinity;
         const eps = c.meta_info?.episode_list || [];
-        const isFull = (eps.length === total) || (c.meta_info?.total_episode === total && eps.length === 0);
+        const isFull = isSeasonPack(c.meta_info, t, task.season, total);
         const hitCount = (needed && eps.length) ? eps.filter(ep => needed.includes(ep)).length : (isFull ? total : 0);
         const hasChinese = /中文|中字|简中|繁中|国语|chs|cht|简日|繁日|双语|baha|巴哈|简繁|内封|mikan/i.test(JSON.stringify(t.labels || []) + (t.title || ''));
         return { context: c, seeds, size, isFull, hitCount, hasChinese, eps, title: t.title, site: t.site_name || '' };
@@ -259,13 +291,14 @@ export async function runDownload(config, logger, reportPath, options = {}) {
         logger.info(`  🚀 正在向 MoviePilot 提交下载请求...`);
         const reply = await mp.submitDownload(best.context.media_info, best.context.torrent_info);
         const isSuccess = !!reply?.success;
+        const coveredEps = best.isFull ? Array.from({ length: total }, (_, i) => i + 1) : best.eps;
         const record = {
           key: `${best.site}:${best.title}:${best.size}`,
           state: isSuccess ? 'accepted' : 'rejected',
           id: reply?.data?.download_id || '',
           title: best.title,
           site: best.site,
-          episodes: best.eps,
+          episodes: coveredEps,
           seeds: best.seeds,
           at: new Date().toISOString(),
         };
@@ -277,7 +310,13 @@ export async function runDownload(config, logger, reportPath, options = {}) {
           session.updates.set(task, {
             state: '已提交下载，待复核',
             color: 'yellow',
-            note: `${best.title} (做种 ${best.seeds})`,
+            note: `${best.title} (做种 ${best.seeds}, ${isFullDesc})`,
+            records: [record],
+            covered: coveredEps,
+            repair: readRepairState(task.data) || undefined,
+            at: record.at,
+          });
+          summary.submitted++;
             records: [record],
             covered: best.eps,
             repair: readRepairState(task.data) || undefined,

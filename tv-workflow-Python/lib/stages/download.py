@@ -25,6 +25,40 @@ from ..platform_support.data_store import create_data_store
 norm = create_normalizer()
 
 
+def is_season_pack(meta: Dict[str, Any], t: Dict[str, Any], task_season: int, total: int) -> bool:
+    """精准判断是否为整季资源包"""
+    eps = meta.get("episode_list") or []
+    # 1. 明确包含所有集数
+    if total > 0 and len(eps) == total:
+        return True
+    # 2. MoviePilot 明确标明总集数等于该季总集数且无特定单集
+    total_ep = meta.get("total_episode")
+    if total > 0 and total_ep == total and len(eps) == 0:
+        return True
+
+    # 3. 整季特征：季号匹配，且无任何单集/起止集标记
+    begin_season = meta.get("begin_season")
+    season_list = meta.get("season_list") or ([begin_season] if begin_season else [])
+    if len(season_list) == 1 and season_list[0] == task_season:
+        begin_ep = meta.get("begin_episode")
+        end_ep = meta.get("end_episode")
+        season_ep = str(meta.get("season_episode") or "").upper().strip()
+
+        # season_episode 仅为 S02 / S2 等季标识，无 E 部分
+        is_season_only = bool(re.match(r"^S\d{1,2}$", season_ep))
+
+        if (begin_ep is None or begin_ep == 0) and (end_ep is None or end_ep == 0) and len(eps) == 0:
+            title = str(t.get("title") or "")
+            sub = str(meta.get("subtitle") or t.get("description") or "")
+            combined = f"{title} {sub}"
+            if not re.search(r"(?:[Ee][Pp]?\s*\d+|第\s*\d+\s*集|\b\d+\s*集\b)", combined):
+                return True
+            if is_season_only and not re.search(r"[Ee][Pp]?\s*\d+", title):
+                return True
+
+    return False
+
+
 def run_download(
     config: Any,
     logger: Any,
@@ -179,8 +213,8 @@ def run_download(
             except Exception as e:
                 logger.warn(f"  ⚠️ 默认站点搜索异常: {e}")
 
-            # 2. 追加专属站点搜索（默认包含: 观众、天空）
-            extra_site_names = mp_cfg.get("extraSearchSites", ["观众", "天空"])
+            # 2. 追加专属站点搜索（默认包含: 观众、天空、馒头）
+            extra_site_names = mp_cfg.get("extraSearchSites", ["观众", "天空", "馒头"])
             if isinstance(extra_site_names, list) and extra_site_names:
                 try:
                     extra_site_ids = mp.resolve_site_ids(extra_site_names)
@@ -238,7 +272,7 @@ def run_download(
 
                 # 提取集号与整季属性
                 eps = meta.get("episode_list") or []
-                is_full = (len(eps) == total) or (meta.get("total_episode") == total and len(eps) == 0)
+                is_full = is_season_pack(meta, t, task.season, total)
 
                 # 核心缺集过滤规则：
                 # 1) 如果是整季包，允许整季替换以补全缺集；
@@ -288,7 +322,7 @@ def run_download(
                     size = float("inf")
 
                 eps = meta.get("episode_list") or []
-                is_full = 1 if (len(eps) == total or (meta.get("total_episode") == total and len(eps) == 0)) else 0
+                is_full = 1 if is_season_pack(meta, t, task.season, total) else 0
                 hit_count = len([ep for ep in eps if ep in needed]) if (needed and eps) else (total if is_full else 0)
                 has_chinese = 1 if re.search(r"中文|中字|简中|繁中|国语|chs|cht|简日|繁日|双语|baha|巴哈|简繁|内封|mikan", json.dumps(t.get("labels") or [], ensure_ascii=False) + str(t.get("title") or ""), re.I) else 0
                 seeds_ge_5 = 1 if seeds >= 5 else 0
@@ -304,7 +338,8 @@ def run_download(
             best_site = str(best_t.get("site_name") or "")
             best_seeds = int(best_t.get("seeders", 0))
             best_eps = best_meta.get("episode_list") or []
-            is_full_desc = "整季" if len(best_eps) == total else "零散"
+            best_is_full = is_season_pack(best_meta, best_t, task.season, total)
+            is_full_desc = "整季" if best_is_full else "零散"
 
             logger.info(f"  🎯 选定最佳资源: [{best_site}] {best_title} (做种: {best_seeds}, {is_full_desc})")
 
@@ -314,13 +349,14 @@ def run_download(
                 reply = mp.submit_download(best_c.get("media_info") or {}, best_t)
                 is_success = bool(reply.get("success", False)) if isinstance(reply, dict) else False
 
+                covered_eps = list(range(1, total + 1)) if best_is_full else best_eps
                 rec = {
                     "key": f"{best_site}:{best_title}:{best_t.get('size')}",
                     "state": "accepted" if is_success else "rejected",
                     "id": (reply.get("data") or {}).get("download_id", "") if isinstance(reply, dict) else "",
                     "title": best_title,
                     "site": best_site,
-                    "episodes": best_eps,
+                    "episodes": covered_eps,
                     "seeds": best_seeds,
                     "at": datetime.now().isoformat(),
                 }
@@ -332,9 +368,9 @@ def run_download(
                     session.updates[task] = {
                         "state": "已提交下载，待复核",
                         "color": "yellow",
-                        "note": f"{best_title} (做种 {best_seeds})",
+                        "note": f"{best_title} (做种 {best_seeds}, {is_full_desc})",
                         "records": [rec],
-                        "covered": best_eps,
+                        "covered": covered_eps,
                         "repair": read_repair_state(task.data) or None,
                         "at": rec["at"],
                     }
