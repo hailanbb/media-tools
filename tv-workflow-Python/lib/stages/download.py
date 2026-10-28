@@ -215,7 +215,7 @@ def run_download(
                 summary["noResource"] += 1
                 continue
 
-            # 筛选做种数 >= 2 且季号匹配的候选
+            # 筛选做种数 >= 2、季号匹配且能有效补缺的候选
             eligible: List[Dict[str, Any]] = []
             for c in contexts:
                 m = c.get("media_info")
@@ -236,20 +236,46 @@ def run_download(
                 if seeders < 2:
                     continue
 
+                # 提取集号与整季属性
+                eps = meta.get("episode_list") or []
+                is_full = (len(eps) == total) or (meta.get("total_episode") == total and len(eps) == 0)
+
+                # 核心缺集过滤规则：
+                # 1) 如果是整季包，允许整季替换以补全缺集；
+                # 2) 如果是散集/单集，必须至少命中 1 集 needed 中的缺集！
+                #    若该种子只包含本地已有的集数（如本地已有第 9 集且缺 3/4/8，种子仅包含第 9 集），坚决剔除！
+                if needed is not None and len(needed) > 0:
+                    if not is_full:
+                        if eps:
+                            hit_needed = [ep for ep in eps if ep in needed]
+                            if not hit_needed:
+                                logger.debug(f"  ⏭ 排除无用散集: {t.get('title')} (包含集号 {eps} 均不属于缺集 {needed})")
+                                continue
+                        else:
+                            # 既不是整季包，又无法识别出集号的未知资源，防止盲目下载非缺失集
+                            logger.debug(f"  ⏭ 排除未知集号散集: {t.get('title')}")
+                            continue
+
+                # 排除历史防重记录中已成功提交过的完全相同种子
+                t_key = f"{t.get('site_name')}:{t.get('title')}:{t.get('size')}"
+                if any(r.get("key") == t_key and r.get("state") == "accepted" for r in records):
+                    logger.debug(f"  ⏭ 排除已提交过相同种子: {t.get('title')}")
+                    continue
+
                 eligible.append(c)
 
             if not eligible:
-                logger.warn(f"  ⚠️ 检索到 {len(contexts)} 条资源，但做种数均不足 2 或季号不符，未选定有效资源")
+                logger.warn(f"  ⚠️ 检索到 {len(contexts)} 条资源，但做种数不足 2、季号不符或均不包含缺集，未选定有效资源")
                 session.updates[task] = {
                     "state": "无合格资源",
                     "color": "red",
-                    "note": f"检索到 {len(contexts)} 条，做种数均不足 2 或季号不符"
+                    "note": f"检索到 {len(contexts)} 条，做种不足 2、季号不符或均不包含缺集"
                 }
                 summary["noResource"] += 1
                 continue
 
-            # 打分排序（整季优先、中文优先、做种≥5优先、小容量优先、做种数多优先）
-            def score_candidate(c: Dict[str, Any]) -> Tuple[int, int, int, float, int]:
+            # 打分排序（整季优先、命中缺集数多优先、中文优先、做种≥5优先、小容量优先、做种数多优先）
+            def score_candidate(c: Dict[str, Any]) -> Tuple[int, int, int, int, float, int]:
                 t = c.get("torrent_info") or {}
                 meta = c.get("meta_info") or {}
                 try:
@@ -262,12 +288,13 @@ def run_download(
                     size = float("inf")
 
                 eps = meta.get("episode_list") or []
-                is_full = 1 if len(eps) == total else 0
+                is_full = 1 if (len(eps) == total or (meta.get("total_episode") == total and len(eps) == 0)) else 0
+                hit_count = len([ep for ep in eps if ep in needed]) if (needed and eps) else (total if is_full else 0)
                 has_chinese = 1 if re.search(r"中文|中字|简中|繁中|国语|chs|cht|简日|繁日|双语|baha|巴哈|简繁|内封|mikan", json.dumps(t.get("labels") or [], ensure_ascii=False) + str(t.get("title") or ""), re.I) else 0
                 seeds_ge_5 = 1 if seeds >= 5 else 0
 
                 # Python sort 升序：取负数使其排在前面
-                return (-is_full, -has_chinese, -seeds_ge_5, size, -seeds)
+                return (-is_full, -hit_count, -has_chinese, -seeds_ge_5, size, -seeds)
 
             eligible.sort(key=score_candidate)
             best_c = eligible[0]

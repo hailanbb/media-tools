@@ -191,7 +191,7 @@ export async function runDownload(config, logger, reportPath, options = {}) {
         continue;
       }
 
-      // 筛选做种数 >= 2 且季号匹配的候选
+      // 筛选做种数 >= 2、季号匹配且能有效补缺的候选
       const eligible = contexts.filter(c => {
         const m = c.media_info, meta = c.meta_info, t = c.torrent_info;
         if (!t || !m) return false;
@@ -199,27 +199,51 @@ export async function runDownload(config, logger, reportPath, options = {}) {
         if (seasons.length !== 1 || seasons[0] !== task.season) return false;
         const seeds = typeof t.seeders === 'number' ? t.seeders : parseInt(t.seeders, 10);
         if (!Number.isFinite(seeds) || seeds < 2) return false;
+
+        const eps = meta?.episode_list || [];
+        const isFull = (eps.length === total) || (meta?.total_episode === total && eps.length === 0);
+
+        // 核心缺集过滤规则：
+        if (needed && needed.length > 0) {
+          if (!isFull) {
+            if (eps.length > 0) {
+              const hitNeeded = eps.some(ep => needed.includes(ep));
+              if (!hitNeeded) return false;
+            } else {
+              return false;
+            }
+          }
+        }
+
+        // 排除已成功提交过的相同种子
+        const tKey = `${t.site_name || ''}:${t.title || ''}:${t.size || ''}`;
+        if (records.some(r => r.key === tKey && r.state === 'accepted')) {
+          return false;
+        }
+
         return true;
       });
 
       if (!eligible.length) {
-        logger.warn(`  ⚠️ 检索到 ${contexts.length} 条资源，但做种数均不足 2 或季号不符，未选定有效资源`);
-        session.updates.set(task, { state: '无合格资源', color: 'red', note: `检索到 ${contexts.length} 条，做种数均不足 2 或季号不符` });
+        logger.warn(`  ⚠️ 检索到 ${contexts.length} 条资源，但做种数不足 2、季号不符或均不包含缺集，未选定有效资源`);
+        session.updates.set(task, { state: '无合格资源', color: 'red', note: `检索到 ${contexts.length} 条，做种不足 2、季号不符或均不包含缺集` });
         summary.noResource++;
         continue;
       }
 
-      // 打分排序（整季优先、中文优先、做种≥5优先、小容量优先）
+      // 打分排序（整季优先、命中缺集数多优先、中文优先、做种≥5优先、小容量优先）
       const scored = eligible.map(c => {
         const t = c.torrent_info;
         const seeds = Number(t.seeders) || 0;
         const size = Number(t.size) || Infinity;
         const eps = c.meta_info?.episode_list || [];
-        const isFull = eps.length === total;
+        const isFull = (eps.length === total) || (c.meta_info?.total_episode === total && eps.length === 0);
+        const hitCount = (needed && eps.length) ? eps.filter(ep => needed.includes(ep)).length : (isFull ? total : 0);
         const hasChinese = /中文|中字|简中|繁中|国语|chs|cht|简日|繁日|双语|baha|巴哈|简繁|内封|mikan/i.test(JSON.stringify(t.labels || []) + (t.title || ''));
-        return { context: c, seeds, size, isFull, hasChinese, eps, title: t.title, site: t.site_name || '' };
+        return { context: c, seeds, size, isFull, hitCount, hasChinese, eps, title: t.title, site: t.site_name || '' };
       }).sort((a, b) =>
         (b.isFull - a.isFull) ||
+        (b.hitCount - a.hitCount) ||
         (b.hasChinese - a.hasChinese) ||
         (b.seeds >= 5 ? 1 : 0) - (a.seeds >= 5 ? 1 : 0) ||
         (a.size - b.size) ||
