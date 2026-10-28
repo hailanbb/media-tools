@@ -308,87 +308,151 @@ def run_download(
                 summary["noResource"] += 1
                 continue
 
-            # 打分排序（整季优先、命中缺集数多优先、中文优先、做种≥5优先、小容量优先、做种数多优先）
-            def score_candidate(c: Dict[str, Any]) -> Tuple[int, int, int, int, float, int]:
-                t = c.get("torrent_info") or {}
-                meta = c.get("meta_info") or {}
-                try:
-                    seeds = int(t.get("seeders", 0))
-                except (ValueError, TypeError):
-                    seeds = 0
-                try:
-                    size = float(t.get("size", float("inf")))
-                except (ValueError, TypeError):
-                    size = float("inf")
+            # 区分整季包与散集多候选选取：
+            season_packs = [c for c in eligible if is_season_pack(c.get("meta_info") or {}, c.get("torrent_info") or {}, task.season, total)]
+            selected_candidates: List[Tuple[Dict[str, Any], List[int], bool]] = []  # (candidate, hits, is_full)
 
-                eps = meta.get("episode_list") or []
-                is_full = 1 if is_season_pack(meta, t, task.season, total) else 0
-                hit_count = len([ep for ep in eps if ep in needed]) if (needed and eps) else (total if is_full else 0)
-                has_chinese = 1 if re.search(r"中文|中字|简中|繁中|国语|chs|cht|简日|繁日|双语|baha|巴哈|简繁|内封|mikan", json.dumps(t.get("labels") or [], ensure_ascii=False) + str(t.get("title") or ""), re.I) else 0
-                seeds_ge_5 = 1 if seeds >= 5 else 0
+            if season_packs:
+                # 存在整季包时，按整季规则优选最佳整季包
+                def score_season_pack(c: Dict[str, Any]) -> Tuple[int, int, float, int]:
+                    t = c.get("torrent_info") or {}
+                    try:
+                        seeds = int(t.get("seeders", 0))
+                    except (ValueError, TypeError):
+                        seeds = 0
+                    try:
+                        size = float(t.get("size", float("inf")))
+                    except (ValueError, TypeError):
+                        size = float("inf")
+                    has_chinese = 1 if re.search(r"中文|中字|简中|繁中|国语|chs|cht|简日|繁日|双语|baha|巴哈|简繁|内封|mikan", json.dumps(t.get("labels") or [], ensure_ascii=False) + str(t.get("title") or ""), re.I) else 0
+                    seeds_ge_5 = 1 if seeds >= 5 else 0
+                    return (-has_chinese, -seeds_ge_5, size, -seeds)
 
-                # Python sort 升序：取负数使其排在前面
-                return (-is_full, -hit_count, -has_chinese, -seeds_ge_5, size, -seeds)
+                season_packs.sort(key=score_season_pack)
+                best_sp = season_packs[0]
+                selected_candidates.append((best_sp, list(range(1, total + 1)), True))
+            else:
+                # 无整季包时：贪心多候选组合算法，完整覆盖所有可获取的缺失单集/分卷包
+                remaining_needed = set(needed) if needed else set()
+                while remaining_needed:
+                    candidates_for_remaining: List[Tuple[Dict[str, Any], List[int]]] = []
+                    for c in eligible:
+                        meta = c.get("meta_info") or {}
+                        eps = meta.get("episode_list") or []
+                        hits = [ep for ep in eps if ep in remaining_needed]
+                        if hits:
+                            candidates_for_remaining.append((c, hits))
 
-            eligible.sort(key=score_candidate)
-            best_c = eligible[0]
-            best_t = best_c.get("torrent_info") or {}
-            best_meta = best_c.get("meta_info") or {}
-            best_title = str(best_t.get("title") or "")
-            best_site = str(best_t.get("site_name") or "")
-            best_seeds = int(best_t.get("seeders", 0))
-            best_eps = best_meta.get("episode_list") or []
-            best_is_full = is_season_pack(best_meta, best_t, task.season, total)
-            is_full_desc = "整季" if best_is_full else "零散"
+                    if not candidates_for_remaining:
+                        break
 
-            logger.info(f"  🎯 选定最佳资源: [{best_site}] {best_title} (做种: {best_seeds}, {is_full_desc})")
+                    def score_rem(item: Tuple[Dict[str, Any], List[int]]) -> Tuple[int, int, int, float, int]:
+                        cand, hits = item
+                        t = cand.get("torrent_info") or {}
+                        try:
+                            seeds = int(t.get("seeders", 0))
+                        except (ValueError, TypeError):
+                            seeds = 0
+                        try:
+                            size = float(t.get("size", float("inf")))
+                        except (ValueError, TypeError):
+                            size = float("inf")
+                        has_chinese = 1 if re.search(r"中文|中字|简中|繁中|国语|chs|cht|简日|繁日|双语|baha|巴哈|简繁|内封|mikan", json.dumps(t.get("labels") or [], ensure_ascii=False) + str(t.get("title") or ""), re.I) else 0
+                        seeds_ge_5 = 1 if seeds >= 5 else 0
+                        # 命中缺失集数多优先，中文优先，做种>=5优先，小容量优先，做种多优先
+                        return (-len(hits), -has_chinese, -seeds_ge_5, size, -seeds)
 
-            # 提交下载
-            try:
-                logger.info(f"  🚀 正在向 MoviePilot 提交下载请求...")
-                reply = mp.submit_download(best_c.get("media_info") or {}, best_t)
-                is_success = bool(reply.get("success", False)) if isinstance(reply, dict) else False
+                    candidates_for_remaining.sort(key=score_rem)
+                    best_cand, best_hits = candidates_for_remaining[0]
+                    selected_candidates.append((best_cand, best_hits, False))
+                    remaining_needed -= set(best_hits)
 
-                covered_eps = list(range(1, total + 1)) if best_is_full else best_eps
-                rec = {
-                    "key": f"{best_site}:{best_title}:{best_t.get('size')}",
-                    "state": "accepted" if is_success else "rejected",
-                    "id": (reply.get("data") or {}).get("download_id", "") if isinstance(reply, dict) else "",
-                    "title": best_title,
-                    "site": best_site,
-                    "episodes": covered_eps,
-                    "seeds": best_seeds,
-                    "at": datetime.now().isoformat(),
+            if not selected_candidates:
+                logger.warn(f"  ⚠️ 未能匹配到可覆盖缺集的资源")
+                session.updates[task] = {
+                    "state": "无合格资源",
+                    "color": "red",
+                    "note": f"检索到 {len(contexts)} 条，但无资源能覆盖缺失集号",
                 }
-                records.append(rec)
-                store.put(store_key, records)
+                summary["noResource"] += 1
+                continue
 
-                if is_success:
-                    logger.info(f"  ✅ MoviePilot 已接受下载任务: {best_title}")
-                    session.updates[task] = {
-                        "state": "已提交下载，待复核",
-                        "color": "yellow",
-                        "note": f"{best_title} (做种 {best_seeds}, {is_full_desc})",
-                        "records": [rec],
-                        "covered": covered_eps,
-                        "repair": read_repair_state(task.data) or None,
-                        "at": rec["at"],
+            # 批量或逐个向 MoviePilot 提交下载
+            submitted_recs: List[Dict[str, Any]] = []
+            all_covered_eps: Set[int] = set()
+
+            for cand, hits, is_sp in selected_candidates:
+                cand_t = cand.get("torrent_info") or {}
+                cand_meta = cand.get("meta_info") or {}
+                title = str(cand_t.get("title") or "")
+                site = str(cand_t.get("site_name") or "")
+                seeds = int(cand_t.get("seeders", 0))
+                desc_type = "整季" if is_sp else f"缺集 {hits}"
+
+                # 排除历史已接受的相同种子
+                t_key = f"{site}:{title}:{cand_t.get('size')}"
+                if any(r.get("key") == t_key and r.get("state") == "accepted" for r in records):
+                    logger.debug(f"  ⏭ 排除已提交过相同种子: {title}")
+                    continue
+
+                logger.info(f"  🎯 选定最佳资源: [{site}] {title} (做种: {seeds}, {desc_type})")
+                try:
+                    logger.info(f"  🚀 正在向 MoviePilot 提交下载请求: {title}...")
+                    reply = mp.submit_download(cand.get("media_info") or {}, cand_t)
+                    is_success = bool(reply.get("success", False)) if isinstance(reply, dict) else False
+
+                    c_covered = list(range(1, total + 1)) if is_sp else (cand_meta.get("episode_list") or hits)
+                    rec = {
+                        "key": t_key,
+                        "state": "accepted" if is_success else "rejected",
+                        "id": (reply.get("data") or {}).get("download_id", "") if isinstance(reply, dict) else "",
+                        "title": title,
+                        "site": site,
+                        "episodes": c_covered,
+                        "seeds": seeds,
+                        "at": datetime.now().isoformat(),
                     }
-                    summary["submitted"] += 1
-                else:
-                    msg = reply.get("message", "未知原因") if isinstance(reply, dict) else "未知原因"
-                    logger.error(f"  ❌ MoviePilot 拒绝添加下载: {msg}")
-                    session.updates[task] = {
-                        "state": "下载提交失败",
-                        "color": None,
-                        "note": f"MoviePilot 拒绝: {msg}",
-                        "records": [rec],
-                    }
+                    records.append(rec)
+                    store.put(store_key, records)
+
+                    if is_success:
+                        logger.info(f"  ✅ MoviePilot 已接受下载任务: {title}")
+                        submitted_recs.append(rec)
+                        all_covered_eps.update(c_covered)
+                        summary["submitted"] += 1
+                    else:
+                        msg = reply.get("message", "未知原因") if isinstance(reply, dict) else "未知原因"
+                        logger.error(f"  ❌ MoviePilot 拒绝添加下载: {msg}")
+                        summary["errors"] += 1
+                except Exception as sub_err:
+                    logger.error(f"  💥 提交下载异常 [{title}]: {sub_err}")
                     summary["errors"] += 1
-            except Exception as e:
-                logger.error(f"  💥 提交下载异常: {e}")
-                session.updates[task] = {"state": "提交异常", "color": None, "note": str(e)}
-                summary["errors"] += 1
+
+            if submitted_recs:
+                if len(submitted_recs) == 1:
+                    first = submitted_recs[0]
+                    first_is_sp = selected_candidates[0][2]
+                    desc = "整季" if first_is_sp else "零散"
+                    note_str = f"{first['title']} (做种 {first['seeds']}, {desc})"
+                else:
+                    note_str = f"已提交 {len(submitted_recs)} 个资源补缺，共覆盖 {len(all_covered_eps)} 集"
+
+                session.updates[task] = {
+                    "state": "已提交下载，待复核",
+                    "color": "yellow",
+                    "note": note_str,
+                    "records": submitted_recs,
+                    "covered": sorted(list(all_covered_eps)),
+                    "repair": read_repair_state(task.data) or None,
+                    "at": submitted_recs[0]["at"],
+                }
+            elif not submitted_recs and any(c for c in selected_candidates):
+                session.updates[task] = {
+                    "state": "下载提交失败",
+                    "color": None,
+                    "note": "MoviePilot 拒绝添加下载任务",
+                    "records": records[-len(selected_candidates):],
+                }
 
         except Exception as e:
             session.updates[task] = {"state": "处理失败", "color": None, "note": str(e)}

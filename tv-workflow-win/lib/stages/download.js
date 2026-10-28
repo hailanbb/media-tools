@@ -263,81 +263,149 @@ export async function runDownload(config, logger, reportPath, options = {}) {
         continue;
       }
 
-      // 打分排序（整季优先、命中缺集数多优先、中文优先、做种≥5优先、小容量优先）
-      const scored = eligible.map(c => {
-        const t = c.torrent_info;
-        const seeds = Number(t.seeders) || 0;
-        const size = Number(t.size) || Infinity;
-        const eps = c.meta_info?.episode_list || [];
-        const isFull = isSeasonPack(c.meta_info, t, task.season, total);
-        const hitCount = (needed && eps.length) ? eps.filter(ep => needed.includes(ep)).length : (isFull ? total : 0);
-        const hasChinese = /中文|中字|简中|繁中|国语|chs|cht|简日|繁日|双语|baha|巴哈|简繁|内封|mikan/i.test(JSON.stringify(t.labels || []) + (t.title || ''));
-        return { context: c, seeds, size, isFull, hitCount, hasChinese, eps, title: t.title, site: t.site_name || '' };
-      }).sort((a, b) =>
-        (b.isFull - a.isFull) ||
-        (b.hitCount - a.hitCount) ||
-        (b.hasChinese - a.hasChinese) ||
-        (b.seeds >= 5 ? 1 : 0) - (a.seeds >= 5 ? 1 : 0) ||
-        (a.size - b.size) ||
-        (b.seeds - a.seeds)
-      );
+      // 区分整季包与散集多候选选取：
+      const seasonPacks = eligible.filter(c => isSeasonPack(c.meta_info, c.torrent_info, task.season, total));
+      const selectedCandidates = []; // Array of { context, hits, isFull }
 
-      const best = scored[0];
-      const isFullDesc = best.isFull ? '整季' : '零散';
-      logger.info(`  🎯 选定最佳资源: [${best.site}] ${best.title} (做种: ${best.seeds}, ${isFullDesc})`);
+      if (seasonPacks.length > 0) {
+        seasonPacks.sort((a, b) => {
+          const ta = a.torrent_info, tb = b.torrent_info;
+          const sa = Number(ta.seeders) || 0, sb = Number(tb.seeders) || 0;
+          const sza = Number(ta.size) || Infinity, szb = Number(tb.size) || Infinity;
+          const cha = /中文|中字|简中|繁中|国语|chs|cht|简日|繁日|双语|baha|巴哈|简繁|内封|mikan/i.test(JSON.stringify(ta.labels || []) + (ta.title || ''));
+          const chb = /中文|中字|简中|繁中|国语|chs|cht|简日|繁日|双语|baha|巴哈|简繁|内封|mikan/i.test(JSON.stringify(tb.labels || []) + (tb.title || ''));
+          return (chb - cha) || ((sb >= 5 ? 1 : 0) - (sa >= 5 ? 1 : 0)) || (sza - szb) || (sb - sa);
+        });
+        selectedCandidates.push({
+          context: seasonPacks[0],
+          hits: Array.from({ length: total }, (_, i) => i + 1),
+          isFull: true,
+        });
+      } else {
+        const remainingNeeded = new Set(needed || []);
+        while (remainingNeeded.size > 0) {
+          const candidatesForRemaining = [];
+          for (const c of eligible) {
+            const eps = c.meta_info?.episode_list || [];
+            const hits = eps.filter(ep => remainingNeeded.has(ep));
+            if (hits.length > 0) {
+              candidatesForRemaining.push({ context: c, hits });
+            }
+          }
+          if (!candidatesForRemaining.length) break;
 
-      // 提交下载任务
-      try {
-        logger.info(`  🚀 正在向 MoviePilot 提交下载请求...`);
-        const reply = await mp.submitDownload(best.context.media_info, best.context.torrent_info);
-        const isSuccess = !!reply?.success;
-        const coveredEps = best.isFull ? Array.from({ length: total }, (_, i) => i + 1) : best.eps;
-        const record = {
-          key: `${best.site}:${best.title}:${best.size}`,
-          state: isSuccess ? 'accepted' : 'rejected',
-          id: reply?.data?.download_id || '',
-          title: best.title,
-          site: best.site,
-          episodes: coveredEps,
-          seeds: best.seeds,
-          at: new Date().toISOString(),
-        };
-        records.push(record);
-        store.put(storeKey, records);
+          candidatesForRemaining.sort((a, b) => {
+            const ta = a.context.torrent_info, tb = b.context.torrent_info;
+            const sa = Number(ta.seeders) || 0, sb = Number(tb.seeders) || 0;
+            const sza = Number(ta.size) || Infinity, szb = Number(tb.size) || Infinity;
+            const cha = /中文|中字|简中|繁中|国语|chs|cht|简日|繁日|双语|baha|巴哈|简繁|内封|mikan/i.test(JSON.stringify(ta.labels || []) + (ta.title || ''));
+            const chb = /中文|中字|简中|繁中|国语|chs|cht|简日|繁日|双语|baha|巴哈|简繁|内封|mikan/i.test(JSON.stringify(tb.labels || []) + (tb.title || ''));
+            return (
+              (b.hits.length - a.hits.length) ||
+              (chb - cha) ||
+              ((sb >= 5 ? 1 : 0) - (sa >= 5 ? 1 : 0)) ||
+              (sza - szb) ||
+              (sb - sa)
+            );
+          });
 
-        if (isSuccess) {
-          logger.info(`  ✅ MoviePilot 已接受下载任务: ${best.title}`);
-          session.updates.set(task, {
-            state: '已提交下载，待复核',
-            color: 'yellow',
-            note: `${best.title} (做种 ${best.seeds}, ${isFullDesc})`,
-            records: [record],
-            covered: coveredEps,
-            repair: readRepairState(task.data) || undefined,
-            at: record.at,
+          const bestCand = candidatesForRemaining[0];
+          selectedCandidates.push({
+            context: bestCand.context,
+            hits: bestCand.hits,
+            isFull: false,
           });
-          summary.submitted++;
-            records: [record],
-            covered: best.eps,
-            repair: readRepairState(task.data) || undefined,
-            at: record.at,
-          });
-          summary.submitted++;
-        } else {
-          const msg = reply?.message || '未知原因';
-          logger.error(`  ❌ MoviePilot 拒绝添加下载: ${msg}`);
-          session.updates.set(task, {
-            state: '下载提交失败',
-            color: null,
-            note: `MoviePilot 拒绝: ${msg}`,
-            records: [record],
-          });
+          for (const ep of bestCand.hits) {
+            remainingNeeded.delete(ep);
+          }
+        }
+      }
+
+      if (!selectedCandidates.length) {
+        logger.warn(`  ⚠️ 未能匹配到可覆盖缺集的资源`);
+        session.updates.set(task, { state: '无合格资源', color: 'red', note: `检索到 ${contexts.length} 条，但无资源能覆盖缺失集号` });
+        summary.noResource++;
+        continue;
+      }
+
+      // 批量向 MoviePilot 提交下载
+      const submittedRecs = [];
+      const allCoveredEps = new Set();
+
+      for (const item of selectedCandidates) {
+        const { context: cand, hits, isFull } = item;
+        const candT = cand.torrent_info;
+        const candMeta = cand.meta_info || {};
+        const title = String(candT.title || '');
+        const site = String(candT.site_name || '');
+        const seeds = Number(candT.seeders) || 0;
+        const descType = isFull ? '整季' : `缺集 [${hits.join('、')}]`;
+
+        const tKey = `${site}:${title}:${candT.size || ''}`;
+        if (records.some(r => r.key === tKey && r.state === 'accepted')) {
+          logger.debug(`  ⏭ 排除已提交过相同种子: ${title}`);
+          continue;
+        }
+
+        logger.info(`  🎯 选定最佳资源: [${site}] ${title} (做种: ${seeds}, ${descType})`);
+        try {
+          logger.info(`  🚀 正在向 MoviePilot 提交下载请求: ${title}...`);
+          const reply = await mp.submitDownload(cand.media_info, candT);
+          const isSuccess = !!reply?.success;
+          const cCovered = isFull ? Array.from({ length: total }, (_, i) => i + 1) : (candMeta.episode_list || hits);
+          const record = {
+            key: tKey,
+            state: isSuccess ? 'accepted' : 'rejected',
+            id: reply?.data?.download_id || '',
+            title,
+            site,
+            episodes: cCovered,
+            seeds,
+            at: new Date().toISOString(),
+          };
+          records.push(record);
+          store.put(storeKey, records);
+
+          if (isSuccess) {
+            logger.info(`  ✅ MoviePilot 已接受下载任务: ${title}`);
+            submittedRecs.push(record);
+            for (const ep of cCovered) allCoveredEps.add(ep);
+            summary.submitted++;
+          } else {
+            const msg = reply?.message || '未知原因';
+            logger.error(`  ❌ MoviePilot 拒绝添加下载: ${msg}`);
+            summary.errors++;
+          }
+        } catch (subErr) {
+          logger.error(`  💥 提交下载异常 [${title}]: ${subErr.message}`);
           summary.errors++;
         }
-      } catch (e) {
-        logger.error(`  💥 提交下载异常: ${e.message}`);
-        session.updates.set(task, { state: '提交异常', color: null, note: e.message });
-        summary.errors++;
+      }
+
+      if (submittedRecs.length > 0) {
+        const first = submittedRecs[0];
+        const isSp = selectedCandidates[0]?.isFull;
+        const desc = isSp ? '整季' : '零散';
+        const noteStr = submittedRecs.length === 1
+          ? `${first.title} (做种 ${first.seeds}, ${desc})`
+          : `已提交 ${submittedRecs.length} 个资源补缺，共覆盖 ${allCoveredEps.size} 集`;
+
+        session.updates.set(task, {
+          state: '已提交下载，待复核',
+          color: 'yellow',
+          note: noteStr,
+          records: submittedRecs,
+          covered: Array.from(allCoveredEps).sort((a, b) => a - b),
+          repair: readRepairState(task.data) || undefined,
+          at: submittedRecs[0].at,
+        });
+      } else if (!submittedRecs.length && selectedCandidates.length > 0) {
+        session.updates.set(task, {
+          state: '下载提交失败',
+          color: null,
+          note: 'MoviePilot 拒绝添加下载任务',
+          records: records.slice(-selectedCandidates.length),
+        });
       }
     } catch (e) {
       session.updates.set(task, { state: '处理失败', color: null, note: e.message });
