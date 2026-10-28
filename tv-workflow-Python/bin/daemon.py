@@ -52,6 +52,7 @@ MENU = f"""
   [7] 全自动流程 (初检→下载→复核→归档)
   [8] 查看最新报表路径
   [9] 查看最新运行日志
+  [u] 一键在线更新程序（同步最新代码并保留配置）
   [0] 退出
 {'═' * 50}"""
 
@@ -196,6 +197,15 @@ def main() -> None:
                     show_latest_report(logger)
                 elif choice == "9":
                     show_latest_log(logger)
+                elif choice in ("u", "update"):
+                    update_script = ROOT_DIR / "update.sh"
+                    if update_script.exists():
+                        subprocess.run(["bash", str(update_script)], check=False)
+                    else:
+                        subprocess.run([
+                            "bash", "-c",
+                            "curl -sSL https://ghfast.top/https://raw.githubusercontent.com/hailanbb/media-tools/main/tv-workflow-Python/update.sh -o update.sh && chmod +x update.sh && bash update.sh"
+                        ], check=False)
                 else:
                     print("  ❓ 无效选择，请输入菜单中的序号或指令")
             except Exception as e:

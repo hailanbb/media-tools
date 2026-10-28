@@ -49,6 +49,7 @@ USAGE_TEXT = """
   review [--report]    ③ 复核清理（核验修复闭环，清理冗余版本）
   archive [--report]   ④ 归档（移动完结剧集到目标目录，含自动对账复核）
   verify [--report]    🔍 归档后对账复核（验证目标完整性、源存量并清理残留空别名）
+  update               🔄 一键在线更新程序（同步最新代码并保留配置）
   auto                 🤖 全自动流程（依次执行全流程）
 
 选项:
@@ -96,11 +97,23 @@ def main() -> None:
         print(USAGE_TEXT.strip())
         sys.exit(0 if args.help else 1)
 
-    valid_commands = {"inspect", "download", "repair", "review", "archive", "verify", "audit", "auto"}
+    valid_commands = {"inspect", "download", "repair", "review", "archive", "verify", "audit", "auto", "update", "upgrade"}
     if args.command not in valid_commands:
         sys.stderr.write(f"❌ 未知命令: {args.command}\n\n")
         print(USAGE_TEXT.strip())
         sys.exit(1)
+
+    if args.command in ("update", "upgrade"):
+        import subprocess
+        update_script = ROOT_DIR / "update.sh"
+        if update_script.exists():
+            subprocess.run(["bash", str(update_script)], check=False)
+        else:
+            subprocess.run([
+                "bash", "-c",
+                "curl -sSL https://ghfast.top/https://raw.githubusercontent.com/hailanbb/media-tools/main/tv-workflow-Python/update.sh -o update.sh && chmod +x update.sh && bash update.sh"
+            ], check=False)
+        sys.exit(0)
 
     # 加载配置
     try:
