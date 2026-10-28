@@ -69,7 +69,7 @@ if [ "$PIP_INSTALLED" = false ]; then
     .venv/bin/pip install -r requirements.txt
     USE_SYS_PYTHON=false
 fi
-echo -e "${GREEN}✅ 核心依赖安装完成 (openpyxl, requests, croniter 等)${NC}"
+echo -e "${GREEN}✅ 核心依赖安装完成 (openpyxl, requests 等)${NC}"
 
 # 4. 授予脚本与入口可执行权限
 echo -e "\n${CYAN}[3/4] 授予程序执行权限...${NC}"

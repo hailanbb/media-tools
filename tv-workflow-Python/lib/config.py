@@ -118,14 +118,6 @@ def load_config(config_path: Optional[str] = None) -> ConfigDict:
     transfer_repair_defaults.update(config.get("transferRepair") or {})
     config["transferRepair"] = transfer_repair_defaults
 
-    schedule_defaults = {
-        "enabled": False,
-        "cron": "0 2 * * *",
-        "stages": ["inspect", "download", "review", "archive"],
-    }
-    schedule_defaults.update(config.get("schedule") or {})
-    config["schedule"] = schedule_defaults
-
     notifications_defaults = {
         "enabled": True,
         "sound": False,

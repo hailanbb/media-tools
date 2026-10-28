@@ -1,6 +1,6 @@
 # 剧集整理 Python 版
 
-面向 Ubuntu/Linux 的剧集与动漫整理工具，通过 CloudDrive2、MoviePilot 和 TMDB 执行初检、补缺、复核和归档。提供终端菜单、tv 命令和可选 systemd 后台服务。
+面向 Ubuntu/Linux 的剧集与动漫整理工具，通过 CloudDrive2、MoviePilot 和 TMDB 执行初检、补缺、复核和归档。提供直观的终端交互菜单与便捷的 tv 命令行工具。
 
 [返回项目列表](../README.md) · [需求与设计文档](../媒体整理需求/README.md)
 
@@ -49,7 +49,6 @@ nano config.json
 | paths.destination | CloudDrive2 中的归档目标根 |
 | paths.downloadPath | MoviePilot 下载目录 |
 | transferRepair.source / target | 整理修复的源、目标路径及存储映射 |
-| schedule.enabled / cron | 定时开关与计划，先核对是否需要开启 |
 
 配置文件必须是有效 UTF-8 JSON，不添加注释。服务地址应能从服务器访问；云盘路径和容器内路径按各自实际含义填写。完整字段见 [config.example.json](config.example.json)。
 
@@ -143,43 +142,13 @@ reports 保存各阶段报告，logs 保存日志，data 保存持久记录。�
 
 ## 更新已安装版本
 
-1. 记录实际安装路径；保留 config.json、data、reports 和 logs，先备份配置。
-2. 如启用了后台服务，先停止服务。
-3. 更新代码文件，保留服务器实际配置，不用示例配置覆盖它。
-4. 在安装目录重新运行安装脚本，然后先做小范围初检。
-5. 检查通过后，再启动需要的后台服务。
-
-已有 systemd 服务时可用：
+只需在服务器终端任意位置执行：
 
 ~~~bash
-sudo systemctl stop tv-workflow.service
-# 完成代码更新后，在项目目录执行：
-sudo bash install.sh
-sudo systemctl start tv-workflow.service
+tv update
 ~~~
 
-## 后台与开机启动
-
-先完成手动检查，再考虑启用后台。项目提供 [systemd 示例](systemd/tv-workflow.service)，其默认安装路径是 /opt/tv-workflow-Python，并使用 /usr/bin/python3 启动。
-
-安装前检查示例中的 User、WorkingDirectory、ExecStart 和日志路径。使用其他安装目录或项目 .venv 时，改为实际路径与 Python；为运行用户准备可写的日志目录。
-
-确认配置后再安装并启用：
-
-~~~bash
-sudo cp systemd/tv-workflow.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now tv-workflow.service
-~~~
-
-检查状态：
-
-~~~bash
-sudo systemctl status tv-workflow.service
-sudo journalctl -u tv-workflow.service -f
-~~~
-
-定时是否执行由项目配置和当前实现共同决定。后台流程含实际操作，启用前核对源、目标与运行范围。
+或者在交互菜单中输入 u 即可自动拉取最新代码并保留所有已有配置与数据。
 
 ## 常见问题
 
@@ -187,7 +156,6 @@ sudo journalctl -u tv-workflow.service -f
 | --- | --- |
 | tv 找不到 | 在项目目录用 ./tv-workflow.sh；检查安装脚本是否成功注册命令 |
 | Python 模块缺失 | 查看依赖安装结果，确认启动器使用的 Python 与安装依赖的环境一致 |
-| 前台正常、systemd 失败 | 检查服务的工作目录、Python 路径、运行用户和日志权限 |
 | 配置不存在或格式错误 | 检查 config.json 位置、UTF-8 编码、引号与逗号 |
 | 连接失败或 401/403 | 核对服务器到服务的网络、地址、端口与令牌 |
 | 没有找到剧集 | 检查源根和目录层级，先指定单剧路径 |

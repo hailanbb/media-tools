@@ -22,11 +22,6 @@
     "source": "/video/downloads",
     "target": "/115/Library_incs/nas"
   },
-  "schedule": {
-    "enabled": false,
-    "cron": "0 2 * * *",
-    "stages": ["inspect", "download", "review", "archive"]
-  },
   "notifications": {
     "enabled": true,
     "sound": false

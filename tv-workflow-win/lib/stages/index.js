@@ -8,7 +8,7 @@ import { runReview } from './review.js';
 import { runArchive, postArchiveReview } from './archive.js';
 import { CloudDriveClient } from '../clients/clouddrive2.js';
 import { readReport, writeReport } from '../core/report-adapter.js';
-import { readdirSync } from 'node:fs';
+import { readdirSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { PROJECT_ROOT } from '../config.js';
 
@@ -32,24 +32,30 @@ export async function runStage(stageName, config, logger, options = {}) {
       case 'inspect':
         result = await runInspect(config, logger, options);
         break;
-      case 'download':
-        result = await runDownload(config, logger, options.reportPath || findLatestReport('初检') || findLatestReport(''));
+      case 'download': {
+        const rep = options.reportPath || findLatestReport('初检') || findLatestReport('');
+        if (rep) logger.info(`📄 依据最新报表执行: ${rep}`);
+        result = await runDownload(config, logger, rep);
         break;
-      case 'repair':
-        result = await runDownload(config, logger, options.reportPath || findLatestReport('初检') || findLatestReport(''), { repairOnly: true });
+      }
+      case 'repair': {
+        const rep = options.reportPath || findLatestReport('初检') || findLatestReport('');
+        if (rep) logger.info(`📄 依据最新报表执行: ${rep}`);
+        result = await runDownload(config, logger, rep, { repairOnly: true });
         break;
-      case 'review':
-        result = await runReview(config, logger,
-          options.reportPath || findLatestReport('补缺') || findLatestReport('初检') || findLatestReport(''),
-          { dryRun: !options.yes }
-        );
+      }
+      case 'review': {
+        const rep = options.reportPath || findLatestReport('补缺') || findLatestReport('初检') || findLatestReport('');
+        if (rep) logger.info(`📄 依据最新报表执行: ${rep}`);
+        result = await runReview(config, logger, rep, { dryRun: !options.yes });
         break;
-      case 'archive':
-        result = await runArchive(config, logger,
-          options.reportPath || findLatestReport('复核清理') || findLatestReport('初检') || findLatestReport(''),
-          { dryRun: !options.yes }
-        );
+      }
+      case 'archive': {
+        const rep = options.reportPath || findLatestReport('复核清理') || findLatestReport('初检') || findLatestReport('');
+        if (rep) logger.info(`📄 依据最新报表执行: ${rep}`);
+        result = await runArchive(config, logger, rep, { dryRun: !options.yes });
         break;
+      }
       case 'verify':
       case 'audit':
         result = await runVerify(config, logger, options);
@@ -170,43 +176,83 @@ function stageLabel(name) {
 }
 
 /**
- * 查找 reports/ 或项目根目录下最新的匹配报告
+ * 从报表文件名精准提取时间戳（优先从 ISO 时间解析，次选文件修改时间）
+ * @param {string} filePath
+ * @returns {number}
+ */
+function extractReportTime(filePath) {
+  const m = filePath.match(/(\d{4}-\d{2}-\d{2}T\d{2}[-:]\d{2}[-:]\d{2})/);
+  if (m) {
+    const tStr = m[1].replace(/-/g, ':');
+    const norm = tStr.replace(
+      /^(\d{4}):(\d{2}):(\d{2})T(\d{2}):(\d{2}):(\d{2})$/,
+      '$1-$2-$3T$4:$5:$6'
+    );
+    const ts = Date.parse(norm);
+    if (!Number.isNaN(ts)) return ts;
+  }
+  try {
+    return statSync(filePath).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * 查找 reports/ 或项目根目录下最新的匹配报告（基于真实时间戳倒序）
  * @param {string} [stageKey=''] - 阶段类型: '初检' | '补缺' | '复核' | '归档'
+ * @param {string} [keyword=''] - 可选剧名关键词
  * @returns {string|undefined}
  */
-function findLatestReport(stageKey = '') {
+function findLatestReport(stageKey = '', keyword = '') {
   const dirs = [resolve(PROJECT_ROOT, 'reports'), PROJECT_ROOT];
+  const allFiles = [];
+
   for (const dir of dirs) {
     try {
       const files = readdirSync(dir)
-        .filter(f => f.endsWith('.xlsx'))
-        .sort()
-        .reverse();
-
-      if (!files.length) continue;
-      if (!stageKey) return join(dir, files[0]);
-
-      let filtered = [];
-      if (stageKey === '初检') {
-        filtered = files.filter(f => f.startsWith('初检报告') && !/(?:补缺|复核|归档)/.test(f));
-      } else if (stageKey === '补缺') {
-        filtered = files.filter(f => f.includes('补缺'));
-      } else if (stageKey === '复核') {
-        filtered = files.filter(f => f.includes('复核'));
-      } else if (stageKey === '归档' || stageKey === '归档完成') {
-        filtered = files.filter(f => f.includes('归档'));
-      } else {
-        filtered = files.filter(f => f.includes(stageKey));
-      }
-
-      if (filtered.length) return join(dir, filtered[0]);
-
-      // 回退：若没有上一阶段报告，取未归档的最新报告
-      const fallback = files.find(f => !/(?:归档)/.test(f)) || files[0];
-      if (fallback) return join(dir, fallback);
+        .filter(f => f.endsWith('.xlsx') && !f.startsWith('~$'))
+        .map(f => join(dir, f));
+      allFiles.push(...files);
     } catch {
-      continue;
+      // 忽略无法读取的目录
     }
   }
-  return undefined;
+
+  // 严格按真实时间戳倒序排序（最新的在最前）
+  allFiles.sort((a, b) => extractReportTime(b) - extractReportTime(a));
+
+  if (!allFiles.length) return undefined;
+
+  function filterByStage(files, stage) {
+    if (!stage) return files[0];
+    let filtered = [];
+    if (stage === '初检') {
+      filtered = files.filter(f => f.includes('初检报告') && !/(?:补缺|复核|归档)/.test(f));
+    } else if (stage === '补缺') {
+      filtered = files.filter(f => f.includes('补缺'));
+    } else if (stage === '复核') {
+      filtered = files.filter(f => f.includes('复核'));
+    } else if (stage === '归档' || stage === '归档完成') {
+      filtered = files.filter(f => f.includes('归档'));
+    } else {
+      filtered = files.filter(f => f.includes(stage));
+    }
+    return filtered[0];
+  }
+
+  // 1. 若提供了剧名关键字，优先在包含关键字的报表中按时间倒序匹配
+  if (keyword) {
+    const kwFiles = allFiles.filter(f => f.includes(keyword));
+    const matched = filterByStage(kwFiles, stageKey);
+    if (matched) return matched;
+  }
+
+  // 2. 在全局报表中按时间倒序匹配
+  const matched = filterByStage(allFiles, stageKey);
+  if (matched) return matched;
+
+  // 3. 回退：若没有上一阶段报告，取未归档的最新报告
+  const fallback = allFiles.find(f => !/(?:归档)/.test(f)) || allFiles[0];
+  return fallback;
 }

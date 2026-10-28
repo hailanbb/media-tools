@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-剧集整理工作流 — 交互式控制台 / 后台守护进程 / 定时调度器
+剧集整理工作流 — 交互式控制台菜单
 
-支持：
-1. 交互式终端模式 (TTY)：显示控制台菜单，支持手动触发各阶段
-2. 后台守护进程模式 (非 TTY / systemd / nohup)：纯后台定时运行，监听系统信号优雅退出
+提供直观的终端编号选择菜单，支持手动触发各阶段任务与在线更新。
+已精简为纯按需运行工具，无常驻后台守护进程与定时轮询开销。
 """
 
 import os
@@ -30,14 +29,13 @@ from lib.config import PROJECT_ROOT as ROOT_DIR, load_config
 from lib.logger import create_logger
 from lib.platform_support.interactive_inspect import handle_interactive_inspect
 from lib.platform_support.notify import notify
-from lib.platform_support.scheduler import create_scheduler
 from lib.stages.dispatcher import run_auto, run_stage
 
 os.chdir(ROOT_DIR)
 
 BANNER = f"""
 {'═' * 50}
-  🎬 剧集整理工作流 (Python 版) — 后台运行中
+  🎬 剧集整理工作流 (Python 版) — 控制台交互菜单
 {'═' * 50}"""
 
 MENU = f"""
@@ -124,33 +122,20 @@ def main() -> None:
                 notify("❌ 全自动流程失败", str(e)[:150], config)
             raise
 
-    # 启动定时调度器
-    scheduler = create_scheduler(config, logger, auto_with_notify)
-    scheduler.start()
-
-    # 处理退出信号
+    # 退出信号处理
     def handle_exit(signum: int, frame: Any) -> None:
-        scheduler.stop()
-        logger.info("\n👋 已接收终止信号，服务安全退出")
+        logger.info("\n👋 控制台退出")
         sys.exit(0)
 
     signal.signal(signal.SIGINT, handle_exit)
     signal.signal(signal.SIGTERM, handle_exit)
-    if hasattr(signal, "SIGHUP"):
-        # 忽略终端挂断信号，防止 SSH 意外断开波及后台调度进程
-        signal.signal(signal.SIGHUP, signal.SIG_IGN)
 
-    # 1. 非 TTY 模式（后台守护进程 / systemd / nohup）
+    # 非 TTY 终端环境阻断
     if not sys.stdin.isatty():
-        logger.info("🖥 后台模式启动（无交互终端，定时调度运行中）")
-        logger.info("发送 SIGTERM 或 SIGINT 即可退出")
-        while True:
-            time.sleep(3600)
+        sys.stderr.write("请在交互式终端中执行，或使用 CLI 命令行参数，例如: tv inspect -i 或 tv download\n")
+        sys.exit(0)
 
-    # 2. TTY 交互终端模式
     print(BANNER)
-    cron_expr = config.get("schedule", {}).get("cron", "0 2 * * *") if isinstance(config, dict) else getattr(config, "schedule", {}).get("cron", "0 2 * * *")
-    print(f"  定时配置: [{cron_expr}] (每日自动执行)")
     print(MENU)
 
     busy = False
@@ -169,7 +154,6 @@ def main() -> None:
                 continue
 
             if choice == "0":
-                scheduler.stop()
                 logger.info("👋 再见")
                 break
 
@@ -215,7 +199,6 @@ def main() -> None:
                 print(MENU)
 
         except (KeyboardInterrupt, EOFError):
-            scheduler.stop()
             logger.info("\n👋 控制台退出")
             break
 

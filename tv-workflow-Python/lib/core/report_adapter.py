@@ -350,7 +350,20 @@ def write_report(session: ReportSession, output_path: str) -> str:
             name_cell.font = build_font(target_color)
 
     wb.save(str(abs_output))
+    csv_output = abs_output.with_suffix(".csv")
+    export_workbook_to_csv(wb, str(csv_output))
     return str(abs_output)
+
+
+def export_workbook_to_csv(wb: openpyxl.Workbook, csv_path: str) -> str:
+    """将工作簿的活跃工作表导出为带有 UTF-8 BOM 的 CSV 格式（完美兼容 Excel/WPS 打开不乱码）"""
+    import csv
+    ws = wb.active
+    with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.writer(f)
+        for row in ws.iter_rows(values_only=True):
+            writer.writerow(["" if cell is None else str(cell) for cell in row])
+    return csv_path
 
 
 def create_new_report(tasks: List[Any], output_path: str) -> str:
@@ -402,4 +415,6 @@ def create_new_report(tasks: List[Any], output_path: str) -> str:
             ws.column_dimensions[col_letter].width = 14
 
     wb.save(output_path)
+    csv_output = Path(output_path).with_suffix(".csv")
+    export_workbook_to_csv(wb, str(csv_output))
     return output_path

@@ -317,6 +317,17 @@ export function writeReport(session, outputPath) {
   });
 
   writeFileSync(absOutput, outputBuffer);
+
+  // 同步生成同名 CSV 文件（带 UTF-8 BOM，Excel/WPS 打开不乱码）
+  try {
+    const activeSheetName = workbook.SheetNames[0];
+    if (activeSheetName && workbook.Sheets[activeSheetName]) {
+      const csvStr = '\uFEFF' + XLSX.utils.sheet_to_csv(workbook.Sheets[activeSheetName]);
+      const csvPath = absOutput.replace(/\.xlsx$/i, '.csv');
+      writeFileSync(csvPath, csvStr, 'utf-8');
+    }
+  } catch {}
+
   return absOutput;
 }
 
@@ -380,5 +391,13 @@ function createNewReport(tasks, outputPath) {
 
   const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx', cellStyles: true });
   writeFileSync(outputPath, buf);
+
+  // 同步生成同名 CSV 文件
+  try {
+    const csvStr = '\uFEFF' + XLSX.utils.sheet_to_csv(ws);
+    const csvPath = outputPath.replace(/\.xlsx$/i, '.csv');
+    writeFileSync(csvPath, csvStr, 'utf-8');
+  } catch {}
+
   return outputPath;
 }

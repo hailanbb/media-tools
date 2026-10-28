@@ -54,6 +54,7 @@ if [ "$1" = "update" ] || [ "$1" = "upgrade" ]; then
         cp -r "$SRC/lib" "$SCRIPT_DIR/"
         cp -r "$SRC/bin" "$SCRIPT_DIR/"
         cp "$SRC/install.sh" "$SCRIPT_DIR/"
+        cp "$SRC/requirements.txt" "$SCRIPT_DIR/" 2>/dev/null || true
         cp "$SRC/tv-workflow.sh" "$SCRIPT_DIR/"
         [ -f "$SRC/update.sh" ] && cp "$SRC/update.sh" "$SCRIPT_DIR/"
         chmod +x "$SCRIPT_DIR/tv-workflow.sh" "$SCRIPT_DIR/install.sh" "$SCRIPT_DIR/bin/"*
