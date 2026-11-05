@@ -28,6 +28,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from lib.config import PROJECT_ROOT as ROOT_DIR, load_config
 from lib.logger import create_logger
 from lib.platform_support.interactive_inspect import handle_interactive_inspect
+from lib.platform_support.archive_library_menu import handle_archive_library_menu
 from lib.platform_support.notify import notify
 from lib.stages.dispatcher import run_auto, run_stage
 
@@ -47,6 +48,7 @@ MENU = f"""
   [5] 复核清理（执行删除）
   [6] 执行归档（实际移动并自动对账复核）
   [v] 归档后对账复核（验证目标完整性与清理残留空别名）
+  [a] 归档目录检查与清理（缺集报告、清理预览、执行清理）
   [7] 全自动流程 (初检→下载→复核→归档)
   [8] 查看最新报表路径
   [9] 查看最新运行日志
@@ -175,6 +177,8 @@ def main() -> None:
                     run_stage("archive", config, logger, {"yes": True})
                 elif choice == "v":
                     run_stage("verify", config, logger)
+                elif choice == "a":
+                    handle_archive_library_menu(config, logger)
                 elif choice == "7":
                     auto_with_notify()
                 elif choice == "8":

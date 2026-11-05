@@ -56,11 +56,12 @@ def run_inspect(config: Any, logger: Any, options: Optional[Dict[str, Any]] = No
     )
 
     origin = cd2_cfg.get("origin", "").rstrip("/")
-    root_source = (paths_cfg.get("source") or "/115/Library_incs/nas").rstrip("/")
+    root_key = "destination" if opts.get("archiveLibrary") else "source"
+    root_source = (paths_cfg.get(root_key) or "/115/Library_incs/nas").rstrip("/")
     base_path = (opts.get("path") or root_source).rstrip("/")
 
     # 1. 根据规则禁用全库初检：未指定任何检测范围且指向根目录时阻断
-    if base_path == root_source and not opts.get("category") and not opts.get("show"):
+    if not opts.get("archiveLibrary") and base_path == root_source and not opts.get("category") and not opts.get("show"):
         raise ValueError("已根据要求禁用全库初检。请使用交互式选剧初检 (python3 bin/tv_workflow.py inspect -i)，或通过 --category / --show / --path 指定检测范围。")
 
     results: List[TaskItem] = []
@@ -69,7 +70,7 @@ def run_inspect(config: Any, logger: Any, options: Optional[Dict[str, Any]] = No
     logger.info(f"📂 正在连接 CloudDrive2，读取目标目录: {base_path}")
 
     try:
-        root_entries = cd2.list_files(base_path)
+        root_entries = opts["selectedShows"] if "selectedShows" in opts else cd2.list_files(base_path)
     except Exception as e:
         raise RuntimeError(f"无法读取目标路径 {base_path}: {e}")
 
@@ -79,7 +80,9 @@ def run_inspect(config: Any, logger: Any, options: Optional[Dict[str, Any]] = No
     # 1. 判断是否是“单部剧集目录”（自身直接包含 Season 1、Season 2 等）
     is_single_show = any(f.get("directory") and season_number(f.get("name", "")) is not None for f in root_entries)
 
-    if is_single_show:
+    if "selectedShows" in opts:
+        category_map[compute_category_rel_path(base_path, root_source)] = root_entries
+    elif is_single_show:
         show_name = base_path.split("/")[-1]
         parent_path = base_path.rsplit("/", 1)[0]
         cat_name = compute_category_rel_path(parent_path, root_source)
@@ -321,8 +324,11 @@ def run_inspect(config: Any, logger: Any, options: Optional[Dict[str, Any]] = No
     timestamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
     tag = f"_{opts['show']}" if opts.get("show") else f"_{opts['category']}" if opts.get("category") else ""
     reports_dir = (PROJECT_ROOT / "reports").resolve()
+    if opts.get("archiveLibrary"):
+        reports_dir = reports_dir / "归档目录"
     reports_dir.mkdir(parents=True, exist_ok=True)
-    output_path = reports_dir / f"初检报告{tag}_{timestamp}.xlsx"
+    report_name = "归档目录初检报告" if opts.get("archiveLibrary") else "初检报告"
+    output_path = reports_dir / f"{report_name}{tag}_{timestamp}.xlsx"
 
     session = ReportSession(tasks=results, errors=[], skipped=0, mode="inspect")
     write_report(session, str(output_path))

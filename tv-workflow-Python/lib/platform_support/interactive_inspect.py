@@ -6,6 +6,7 @@
 完全适配 Ubuntu 终端标准输入输出（UTF-8 字符流与 ANSI 控制台）。
 """
 
+import posixpath
 import re
 import sys
 from typing import Any, List, Optional, Set
@@ -52,7 +53,7 @@ def ask(prompt_str: str) -> str:
         return ""
 
 
-def handle_interactive_inspect(config: Any, logger: Any) -> None:
+def handle_interactive_inspect(config: Any, logger: Any, archive_root=None):
     """执行交互式剧集初检导航"""
     from ..stages.dispatcher import run_stage
 
@@ -64,7 +65,10 @@ def handle_interactive_inspect(config: Any, logger: Any) -> None:
     )
 
     paths_cfg = config.get("paths", {}) if isinstance(config, dict) else getattr(config, "paths", {})
-    source_root = (paths_cfg.get("source") or "/115/Library_incs/nas").rstrip("/")
+    source_root = (archive_root or paths_cfg.get("source") or "/115/Library_incs/nas").rstrip("/")
+
+    def inspect(options):
+        return run_stage("inspect", config, logger, {**options, "archiveLibrary": bool(archive_root)})
 
     print(f"\n⏳ 正在获取网盘媒体库根目录结构 ({source_root})...")
     try:
@@ -98,16 +102,24 @@ def handle_interactive_inspect(config: Any, logger: Any) -> None:
         "     • 或直接输入剧名关键词/网盘绝对路径直达初检\n"
         "     (直接回车取消) > "
     )
+    if archive_root:
+        print("     • 输入 all 初检整个归档目录")
     type_input = ask(type_prompt)
     if not type_input:
         print("  ⚠️ 操作已取消")
         return
 
     # 1. 直接输入网盘绝对路径
+    if archive_root and type_input.lower() == "all":
+        return inspect({"path": archive_root})
     if type_input.startswith("/"):
+        if archive_root:
+            type_input = posixpath.normpath(type_input).rstrip("/")
+            if "\\" in type_input or (type_input != archive_root and not type_input.startswith(archive_root + "/")):
+                print("⚠️ 请选择归档目录内的路径")
+                return
         logger.info(f"🎯 直接扫描指定路径: {type_input}")
-        run_stage("inspect", config, logger, {"path": type_input})
-        return
+        return inspect({"path": type_input})
 
     # 2. 匹配媒体类型
     target_type = None
@@ -128,8 +140,7 @@ def handle_interactive_inspect(config: Any, logger: Any) -> None:
     # 3. 若未匹配到类型，视为全局剧名关键词检索
     if not target_type:
         logger.info(f"🔍 未匹配到类型，按剧名关键词跨动漫/电视剧检索: \"{type_input}\"")
-        run_stage("inspect", config, logger, {"show": type_input})
-        return
+        return inspect({"show": type_input})
 
     # 4. 获取该媒体类型下的子分类
     print(f"\n⏳ 正在获取 [{target_type.get('name')}] 下的子分类列表...")
@@ -181,8 +192,7 @@ def handle_interactive_inspect(config: Any, logger: Any) -> None:
 
     if not target_cat:
         logger.info(f"🔍 按关键词在 [{target_type.get('name')}] 检索: \"{cat_input}\"")
-        run_stage("inspect", config, logger, {"path": target_type.get("path"), "show": cat_input})
-        return
+        return inspect({"path": target_type.get("path"), "show": cat_input})
 
     # 5. 列出该子分类下的具体剧集/动漫文件夹
     cat_name = target_cat.get("name")
@@ -228,13 +238,14 @@ def handle_interactive_inspect(config: Any, logger: Any) -> None:
     # 处理 "all"
     if show_choice.lower() == "all":
         logger.info(f"🎯 初检整子分类: [{target_type.get('name')} / {cat_name}] (共 {len(show_dirs)} 部)")
-        run_stage("inspect", config, logger, {"path": cat_path})
-        return
+        return inspect({"path": cat_path})
 
     # 处理数字序号
     is_number_selection = bool(re.match(r"^(\d+)([\s,，-]\d+)*$", show_choice))
     if is_number_selection:
         selected_indices = parse_indices(show_choice, len(show_dirs))
+        if archive_root and selected_indices:
+            return inspect({"path": cat_path, "selectedShows": [show_dirs[i - 1] for i in selected_indices]})
         if len(selected_indices) == 1:
             selected = show_dirs[selected_indices[0] - 1]
             logger.info(f"🎯 初检指定剧集: [{cat_name}] {selected.get('name')}")
@@ -253,14 +264,12 @@ def handle_interactive_inspect(config: Any, logger: Any) -> None:
     exact_match = next((d for d in show_dirs if d.get("name", "").lower() == show_choice.lower()), None)
     if exact_match:
         logger.info(f"🎯 匹配到文件夹: {exact_match.get('name')}")
-        run_stage("inspect", config, logger, {"path": exact_match.get("path")})
-        return
+        return inspect({"path": exact_match.get("path")})
 
     fuzzy_matches = [d for d in show_dirs if show_choice.lower() in d.get("name", "").lower()]
     if len(fuzzy_matches) == 1:
         logger.info(f"🎯 关键词精准匹配到 1 个文件夹: {fuzzy_matches[0].get('name')}")
-        run_stage("inspect", config, logger, {"path": fuzzy_matches[0].get("path")})
-        return
+        return inspect({"path": fuzzy_matches[0].get("path")})
     elif len(fuzzy_matches) > 1:
         print(f"\n🔍 关键词 \"{show_choice}\" 在该分类匹配到 {len(fuzzy_matches)} 个文件夹:")
         for idx, m in enumerate(fuzzy_matches, start=1):
@@ -271,17 +280,18 @@ def handle_interactive_inspect(config: Any, logger: Any) -> None:
             if 1 <= sub_idx <= len(fuzzy_matches):
                 pick = fuzzy_matches[sub_idx - 1]
                 logger.info(f"🎯 初检指定剧集: {pick.get('name')}")
-                run_stage("inspect", config, logger, {"path": pick.get("path")})
-                return
+                return inspect({"path": pick.get("path")})
         except ValueError:
             pass
 
         logger.info(f"🎯 初检全部 {len(fuzzy_matches)} 个匹配项...")
+        if archive_root:
+            return inspect({"path": cat_path, "selectedShows": fuzzy_matches})
         for m in fuzzy_matches:
             run_stage("inspect", config, logger, {"path": m.get("path")})
         return
 
     # 均未匹配，按关键词初检
     logger.info(f"🎯 未在 [{cat_name}] 中发现同名文件夹，尝试按关键词初检: \"{show_choice}\"")
-    run_stage("inspect", config, logger, {"path": cat_path, "show": show_choice})
+    return inspect({"path": cat_path, "show": show_choice})
 

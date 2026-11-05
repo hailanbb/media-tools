@@ -4,6 +4,7 @@
  * 根目录: /115/Library_incs/nas
  */
 import { CloudDriveClient } from '../clients/clouddrive2.js';
+import { posix } from 'node:path';
 import { runStage } from '../stages/index.js';
 
 /**
@@ -37,14 +38,18 @@ function parseIndices(str, max) {
  * @param {object} config
  * @param {object} logger
  */
-export async function handleInteractiveInspect(rl, config, logger) {
+export async function handleInteractiveInspect(rl, config, logger, { archiveRoot } = {}) {
   const cd2 = new CloudDriveClient({
     origin: config.clouddrive2.origin,
     token: config.clouddrive2.token,
     logger,
   });
 
-  const sourceRoot = (config.paths.source || '/115/Library_incs/nas').replace(/\/+$/, '');
+  const sourceRoot = (archiveRoot || config.paths.source || '/115/Library_incs/nas').replace(/\/+$/, '');
+  const inspect = (options) => runStage('inspect', config, logger, {
+    ...options,
+    archiveLibrary: Boolean(archiveRoot),
+  });
   console.log(`\n⏳ 正在获取网盘媒体库根目录结构 (${sourceRoot})...`);
 
   let rootEntries = [];
@@ -92,6 +97,7 @@ export async function handleInteractiveInspect(rl, config, logger) {
     `  👉 请选择媒体库类型:\n` +
     `     • 输入序号 (如: 1 选动漫, 2 选电视剧)\n` +
     `     • 输入名称 (如: 动漫 或 电视剧)\n` +
+    (archiveRoot ? `     • 输入 all 初检整个归档目录\n` : '') +
     `     • 或直接输入剧名关键词/网盘绝对路径直达初检\n` +
     `     (直接回车取消) > `;
 
@@ -103,10 +109,15 @@ export async function handleInteractiveInspect(rl, config, logger) {
 
   // 1. 如果用户直接输入了网盘绝对路径
   if (typeInput.startsWith('/')) {
-    logger.info(`🎯 直接扫描指定路径: ${typeInput}`);
-    await runStage('inspect', config, logger, { path: typeInput });
-    return;
+    const path = archiveRoot ? posix.normalize(typeInput).replace(/\/+$/, '') : typeInput;
+    if (archiveRoot && (path.includes('\\') || (path !== archiveRoot && !path.startsWith(archiveRoot + '/')))) {
+      console.log('⚠️ 请选择归档目录内的路径');
+      return;
+    }
+    logger.info(`🎯 直接扫描指定路径: ${path}`);
+    return inspect({ path });
   }
+  if (archiveRoot && typeInput.toLowerCase() === 'all') return inspect({ path: archiveRoot });
 
   // 2. 匹配媒体类型
   let targetType = null;
@@ -121,8 +132,7 @@ export async function handleInteractiveInspect(rl, config, logger) {
   // 3. 若第一步未匹配到类型，视为全局剧名关键词直接检索
   if (!targetType) {
     logger.info(`🔍 未匹配到类型，按剧名关键词跨动漫/电视剧检索: "${typeInput}"`);
-    await runStage('inspect', config, logger, { show: typeInput });
-    return;
+    return inspect({ show: typeInput });
   }
 
   // 4. 获取该媒体类型下的子分类（例如 动漫 -> 国产动漫、日韩动漫、欧美动漫）
@@ -176,8 +186,7 @@ export async function handleInteractiveInspect(rl, config, logger) {
   // 若未匹配子分类，视为在该媒体类型下搜索剧名
   if (!targetCat) {
     logger.info(`🔍 按关键词在 [${targetType.name}] 检索: "${catInput}"`);
-    await runStage('inspect', config, logger, { path: targetType.path, show: catInput });
-    return;
+    return inspect({ path: targetType.path, show: catInput });
   }
 
   // 5. 列出该子分类下的具体剧集/动漫文件夹
@@ -228,14 +237,16 @@ export async function handleInteractiveInspect(rl, config, logger) {
   // 处理 "all"
   if (showChoice.toLowerCase() === 'all') {
     logger.info(`🎯 初检整子分类: [${targetType.name} / ${targetCat.name}] (共 ${showDirs.length} 部)`);
-    await runStage('inspect', config, logger, { path: targetCat.path });
-    return;
+    return inspect({ path: targetCat.path });
   }
 
   // 处理序号 (支持单数字、逗号多选、破折号区间如 1-3)
   const isNumberSelection = /^(\d+)([\s,，-]\d+)*$/.test(showChoice);
   if (isNumberSelection) {
     const selectedIndices = parseIndices(showChoice, showDirs.length);
+    if (archiveRoot && selectedIndices.length) {
+      return inspect({ path: targetCat.path, selectedShows: selectedIndices.map(idx => showDirs[idx - 1]) });
+    }
     if (selectedIndices.length === 1) {
       const selected = showDirs[selectedIndices[0] - 1];
       logger.info(`🎯 初检指定剧集: [${targetCat.name}] ${selected.name}`);
@@ -256,15 +267,13 @@ export async function handleInteractiveInspect(rl, config, logger) {
   const exactMatch = showDirs.find(d => d.name.toLowerCase() === showChoice.toLowerCase());
   if (exactMatch) {
     logger.info(`🎯 匹配到文件夹: ${exactMatch.name}`);
-    await runStage('inspect', config, logger, { path: exactMatch.path });
-    return;
+    return inspect({ path: exactMatch.path });
   }
 
   const fuzzyMatches = showDirs.filter(d => d.name.toLowerCase().includes(showChoice.toLowerCase()));
   if (fuzzyMatches.length === 1) {
     logger.info(`🎯 关键词精准匹配到 1 个文件夹: ${fuzzyMatches[0].name}`);
-    await runStage('inspect', config, logger, { path: fuzzyMatches[0].path });
-    return;
+    return inspect({ path: fuzzyMatches[0].path });
   } else if (fuzzyMatches.length > 1) {
     console.log(`\n🔍 关键词 "${showChoice}" 在该分类匹配到 ${fuzzyMatches.length} 个文件夹:`);
     fuzzyMatches.forEach((m, idx) => console.log(`  [${idx + 1}] ${m.name}`));
@@ -273,9 +282,10 @@ export async function handleInteractiveInspect(rl, config, logger) {
     if (!isNaN(subIdx) && subIdx >= 1 && subIdx <= fuzzyMatches.length) {
       const pick = fuzzyMatches[subIdx - 1];
       logger.info(`🎯 初检指定剧集: ${pick.name}`);
-      await runStage('inspect', config, logger, { path: pick.path });
+      return inspect({ path: pick.path });
     } else {
       logger.info(`🎯 初检全部 ${fuzzyMatches.length} 个匹配项...`);
+      if (archiveRoot) return inspect({ path: targetCat.path, selectedShows: fuzzyMatches });
       for (const m of fuzzyMatches) {
         await runStage('inspect', config, logger, { path: m.path });
       }
@@ -285,5 +295,5 @@ export async function handleInteractiveInspect(rl, config, logger) {
 
   // 均未匹配，按关键词初检
   logger.info(`🎯 未在 [${targetCat.name}] 中发现同名文件夹，尝试按关键词初检: "${showChoice}"`);
-  await runStage('inspect', config, logger, { path: targetCat.path, show: showChoice });
+  return inspect({ path: targetCat.path, show: showChoice });
 }

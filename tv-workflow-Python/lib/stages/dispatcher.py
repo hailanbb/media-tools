@@ -17,7 +17,7 @@ from ..core.report_adapter import read_report, write_report
 from .archive import post_archive_review, run_archive
 from .download import run_download
 from .inspect import run_inspect
-from .review import run_review
+from .review import run_review, ReviewRefreshError
 
 
 def stage_label(name: str) -> str:
@@ -232,6 +232,8 @@ def run_auto(config: Any, logger: Any) -> Dict[str, Any]:
             results["review"] = run_review(config, logger, review_in, {"dryRun": False})
         except Exception as e:
             logger.error(f"复核清理失败: {e}")
+            if isinstance(e, ReviewRefreshError):
+                raise
 
     # ④ 归档
     archive_in = (results.get("review") or {}).get("outputPath") or review_in

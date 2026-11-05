@@ -7,6 +7,7 @@ import { loadConfig } from '../lib/config.js';
 import { createLogger } from '../lib/logger.js';
 import { runStage, runAuto } from '../lib/stages/index.js';
 import { handleInteractiveInspect } from '../lib/platform/interactive-inspect.js';
+import { handleArchiveLibraryMenu } from '../lib/platform/archive-library-menu.js';
 import { notify } from '../lib/platform/notify.js';
 import { createScheduler } from '../lib/platform/scheduler.js';
 import { fileURLToPath } from 'node:url';
@@ -31,6 +32,7 @@ const MENU = `
   [5] 复核清理（执行删除）
   [6] 执行归档（实际移动并自动对账复核）
   [v] 归档后对账复核（验证目标完整性与清理残留空别名）
+  [a] 归档目录检查与清理（缺集报告、清理预览、执行清理）
   [7] 全自动流程
   [8] 打开最新报表
   [9] 打开日志目录
@@ -131,6 +133,10 @@ async function main() {
           case 'v':
           case 'V':
             await runStage('verify', config, logger);
+            break;
+          case 'a':
+          case 'A':
+            await handleArchiveLibraryMenu(rl, config, logger);
             break;
           case '7':
             await autoWithNotify();

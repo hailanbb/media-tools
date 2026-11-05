@@ -109,6 +109,7 @@ export async function runAuto(config, logger) {
       results.review = await runReview(config, logger, reviewInput, { dryRun: false });
     } catch (e) {
       logger.error(`复核清理失败: ${e.message}`);
+      if (e.code === 'REVIEW_REFRESH_FAILED') throw e;
     }
   }
 

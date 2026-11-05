@@ -22,7 +22,7 @@ import { episodeFromName, MEDIA_REGEX, SCRAPE_REGEX, SHARED_SCRAPE, range, uniq 
 import { readRepairState, isRepairPending, verifyRepairState } from '../core/repair-state.js';
 import { createDataStore } from '../platform/data-store.js';
 import { promises as fs } from 'node:fs';
-import { join } from 'node:path';
+import { join, posix } from 'node:path';
 
 // 外挂字幕扩展名正则
 const SUBTITLE_REGEX = /\.(?:srt|ass|ssa|vtt|sub|idx|sup)$/i;
@@ -86,11 +86,12 @@ function scoreGroup(g) {
  * @param {object} config
  * @param {object} logger
  * @param {string} reportPath
- * @param {{ dryRun?: boolean }} options
+ * @param {{ dryRun?: boolean, archiveRoot?: string, approvedPlan?: Map<string, string> }} options
  * @returns {Promise<object>}
  */
-export async function runReview(config, logger, reportPath, { dryRun = true } = {}) {
+export async function runReview(config, logger, reportPath, { dryRun = true, archiveRoot, approvedPlan } = {}) {
   if (!reportPath) throw new Error('请指定报告路径');
+  if (archiveRoot && !dryRun && !approvedPlan) throw new Error('请先生成并确认归档清理预览');
 
   const cd2 = new CloudDriveClient({
     origin: config.clouddrive2.origin,
@@ -103,10 +104,20 @@ export async function runReview(config, logger, reportPath, { dryRun = true } = 
   const session = readReport(reportPath, {
     origin: config.clouddrive2.origin,
     source: config.paths.source,
-    mode: 'review',
+    mode: archiveRoot ? 'archive' : 'review',
   });
-  logger.info(`📄 待复核: ${session.tasks.length} 项黄色`);
+  if (archiveRoot) {
+    session.tasks = session.tasks.filter(task =>
+      task.path.startsWith(archiveRoot + '/') &&
+      !task.path.includes('\\') &&
+      posix.normalize(task.path) === task.path &&
+      (dryRun || approvedPlan.has(task.path))
+    );
+  }
+  logger.info(`📄 待复核: ${session.tasks.length} 项${archiveRoot ? '归档季' : '黄色'}`);
   session.updates = new Map();
+  const plan = new Map();
+  let plannedFiles = 0;
 
   const summary = {
     total: session.tasks.length,
@@ -119,6 +130,7 @@ export async function runReview(config, logger, reportPath, { dryRun = true } = 
 
   const nowIso = new Date().toISOString();
   const allAuditDeleted = [];
+  let pauseReason;
 
   for (let i = 0; i < session.tasks.length; i++) {
     const task = session.tasks[i];
@@ -163,7 +175,13 @@ export async function runReview(config, logger, reportPath, { dryRun = true } = 
         continue;
       }
 
-      const total = Number(task.data['来源登记集数']) || videos.length;
+      const registeredTotal = Number(task.data['来源登记集数']);
+      if (archiveRoot && (!Number.isSafeInteger(registeredTotal) || registeredTotal < 1)) {
+        session.updates.set(task, { state: '待核实', note: '登记集数未确认，暂缓清理' });
+        summary.skipped++;
+        continue;
+      }
+      const total = registeredTotal || videos.length;
 
       // 3. 解析视频集号与版本模板（严格保持原生简单分集正则逻辑）
       const parsed = videos.map(f => {
@@ -182,6 +200,11 @@ export async function runReview(config, logger, reportPath, { dryRun = true } = 
 
       const validParsed = parsed.filter(Boolean);
       const foundEpisodes = uniq(validParsed.map(p => p.episode));
+      if (archiveRoot && foundEpisodes.some(episode => episode < 1 || episode > total)) {
+        session.updates.set(task, { state: '待核实', note: '存在超出登记范围的集号，暂缓清理' });
+        summary.skipped++;
+        continue;
+      }
 
       // 4. 【整理修复闭环核验】
       let currentRepair = readRepairState(task.data);
@@ -365,12 +388,37 @@ export async function runReview(config, logger, reportPath, { dryRun = true } = 
 
       logger.info(`  📋 保留 ${toKeep.length} 个文件, 拟删除 ${toDelete.length} 个`);
 
+      let previewFields;
+      if (archiveRoot) {
+        const remove = toDelete.map(f => f.path).sort();
+        const keep = toKeep.map(f => f.path).sort();
+        const fields = { '拟删除文件': remove.join('\n'), '拟保留正片': keep.join('\n') };
+        const signature = JSON.stringify({ remove, keep });
+        const safePaths = [...remove, ...keep].every(path =>
+          !path.includes('\\') && posix.normalize(path) === path && posix.dirname(path) === task.path
+        );
+        if (!safePaths || Object.values(fields).some(value => value.length > 32000) ||
+            (!dryRun && approvedPlan.get(task.path) !== signature)) {
+          session.updates.set(task, { state: '暂缓清理', note: '文件路径异常、明细过长或清理计划已变化，请重新核对' });
+          summary.skipped++;
+          continue;
+        }
+        previewFields = fields;
+        if (dryRun) {
+          plan.set(task.path, signature);
+          plannedFiles += remove.length;
+        } else {
+          approvedPlan.delete(task.path);
+        }
+      }
+
       if (dryRun) {
         session.updates.set(task, {
           state: '待确认清理（预览）',
           color: 'yellow',
           repair: currentRepair || undefined,
           note: `拟删除 ${toDelete.length} 个文件 (${versionNote})`,
+          fields: previewFields,
           remove: toDelete.map(f => f.path),
           keep: toKeep.map(f => f.path),
           fileCheckedAt: nowIso,
@@ -403,11 +451,31 @@ export async function runReview(config, logger, reportPath, { dryRun = true } = 
 
       // 规约：删除后立即刷新季目录缓存
       if (deletedCount > 0) {
-        try {
-          await cd2.refreshDir(task.path);
-          logger.debug(`    🔄 已刷新季目录: ${task.path}`);
-        } catch (e) {
-          logger.warn(`    ⚠️ 刷新季目录异常: ${e.message}`);
+        for (let attempt = 0; attempt <= 3; attempt++) {
+          try {
+            await cd2.refreshDir(task.path);
+            logger.info(`    🔄 已刷新季目录: ${task.path}`);
+            break;
+          } catch (e) {
+            logger.warn(`    ⚠️ 刷新季目录异常: ${task.path} — ${e.message}（${attempt === 0 ? '首次尝试' : '重试 ' + attempt + '/3'}）`);
+            if (attempt < 3) {
+              await new Promise(resolve => setTimeout(resolve, 2000));
+            } else {
+              pauseReason = `刷新季目录异常，重试 3 次后仍失败。目录 ${task.path}，原因 ${e.message}`;
+            }
+          }
+        }
+        if (pauseReason) {
+          summary.errors++;
+          session.updates.set(task, {
+            state: '任务暂停：刷新失败',
+            color: 'yellow',
+            note: `已删除 ${deletedCount}/${toDelete.length} 个文件；${pauseReason}`,
+            fields: { '刷新异常': pauseReason },
+            fileCheckedAt: nowIso,
+          });
+          logger.error(`⏸ ${pauseReason}。停止处理后续剧集。`);
+          break;
         }
       }
 
@@ -454,11 +522,16 @@ export async function runReview(config, logger, reportPath, { dryRun = true } = 
 
   const suffix = dryRun ? '_复核预览' : '_复核清理';
   const outputPath = reportPath.replace(/(?:_补缺下载|_复核预览|_复核清理|_归档预览|_归档完成)*\.xlsx$/i, `${suffix}.xlsx`);
-  await writeReport(session, outputPath);
+  await writeReport(archiveRoot ? { ...session, mode: 'review' } : session, outputPath);
 
-  logger.info(`\n📊 复核${dryRun ? '预览' : '清理'}完成:`);
+  logger.info(`\n📊 复核${dryRun ? '预览' : '清理'}${pauseReason ? '已暂停' : '完成'}:`);
   logger.info(`   ✅ 已清理 ${summary.cleaned}  ⏳ 修复待闭环 ${summary.repairPending}  ⏭ 跳过 ${summary.skipped}  🗑 删除文件 ${summary.deletedFiles}  ❌ 错误 ${summary.errors}`);
   logger.info(`   📄 报告: ${outputPath}`);
+  if (pauseReason) {
+    const error = new Error(`${pauseReason}。已保存报告 ${outputPath}，请排查后重新初检和预览。`);
+    error.code = 'REVIEW_REFRESH_FAILED';
+    throw error;
+  }
 
-  return { ...summary, outputPath };
+  return { ...summary, outputPath, ...(archiveRoot && dryRun ? { plan, plannedFiles } : {}) };
 }

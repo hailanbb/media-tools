@@ -52,11 +52,12 @@ export async function runInspect(config, logger, options = {}) {
   });
 
   const origin = config.clouddrive2.origin;
-  const rootSource = (config.paths.source || '/115/Library_incs/nas').replace(/\/+$/, '');
+  const scanRoot = options.archiveLibrary ? config.paths.destination : config.paths.source;
+  const rootSource = (scanRoot || '/115/Library_incs/nas').replace(/\/+$/, '');
   const basePath = (options.path || rootSource).replace(/\/+$/, '');
 
   // 1. 根据规则禁用全库初检：未指定任何检测范围且指向根目录时阻断
-  if (basePath === rootSource && !options.category && !options.show) {
+  if (!options.archiveLibrary && basePath === rootSource && !options.category && !options.show) {
     throw new Error('已根据要求禁用全库初检。请使用交互式选剧初检 (node bin/tv-workflow.js -i)，或通过 --category / --show / --path 指定检测范围。');
   }
 
@@ -67,7 +68,7 @@ export async function runInspect(config, logger, options = {}) {
 
   let rootEntries;
   try {
-    rootEntries = await cd2.listFiles(basePath);
+    rootEntries = options.selectedShows || await cd2.listFiles(basePath);
   } catch (e) {
     throw new Error(`无法读取目标路径 ${basePath}: ${e.message}`);
   }
@@ -79,7 +80,9 @@ export async function runInspect(config, logger, options = {}) {
   // 1. 判断是否直接是“单部剧集目录”（自身直接包含 Season 1、Season 2 等）
   const isSingleShow = rootEntries.some(f => f.directory && seasonNumber(f.name) !== null);
 
-  if (isSingleShow) {
+  if (options.selectedShows) {
+    categoryMap.set(computeCategoryRelPath(basePath, rootSource), rootEntries);
+  } else if (isSingleShow) {
     const showName = basePath.split('/').pop();
     const parentPath = basePath.slice(0, basePath.lastIndexOf('/'));
     const catName = computeCategoryRelPath(parentPath, rootSource);
@@ -301,8 +304,11 @@ export async function runInspect(config, logger, options = {}) {
   // 写入初检报告
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
   const tag = options.show ? `_${options.show}` : options.category ? `_${options.category}` : '';
-  const reportsDir = resolve(PROJECT_ROOT, 'reports');
-  const outputPath = join(reportsDir, `初检报告${tag}_${timestamp}.xlsx`);
+  const reportsDir = options.archiveLibrary
+    ? resolve(PROJECT_ROOT, 'reports', '归档目录')
+    : resolve(PROJECT_ROOT, 'reports');
+  const reportName = options.archiveLibrary ? '归档目录初检报告' : '初检报告';
+  const outputPath = join(reportsDir, `${reportName}${tag}_${timestamp}.xlsx`);
   await writeReport({ tasks: results, mode: 'inspect' }, outputPath);
 
   logger.info(`\n📊 初检完成: 共核对 ${summary.total} 季`);

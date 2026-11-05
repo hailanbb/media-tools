@@ -18,6 +18,8 @@
 from datetime import datetime
 import json
 import os
+import posixpath
+import time
 from pathlib import Path
 import re
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -85,6 +87,10 @@ def score_group(g: Dict[str, Any]) -> float:
     return res_score + avg_size_mb
 
 
+class ReviewRefreshError(RuntimeError):
+    """删除后刷新失败，阻止流程继续归档。"""
+
+
 def run_review(
     config: Any,
     logger: Any,
@@ -97,6 +103,11 @@ def run_review(
 
     opts = options or {}
     dry_run = opts.get("dryRun", True) if "dryRun" in opts else (not opts.get("yes", False))
+
+    archive_root = opts.get("archiveRoot")
+    approved_plan = opts.get("approvedPlan")
+    if archive_root and not dry_run and approved_plan is None:
+        raise ValueError("请先生成并确认归档清理预览")
 
     cd2_cfg = config.get("clouddrive2", {}) if isinstance(config, dict) else getattr(config, "clouddrive2", {})
     paths_cfg = config.get("paths", {}) if isinstance(config, dict) else getattr(config, "paths", {})
@@ -113,9 +124,22 @@ def run_review(
         file_path=report_path,
         origin=cd2_cfg.get("origin", ""),
         source=paths_cfg.get("source", ""),
-        mode="review"
+        mode="archive" if archive_root else "review"
     )
-    logger.info(f"📄 待复核: {len(session.tasks)} 项黄色")
+    if archive_root:
+        session.tasks = [
+            task for task in session.tasks
+            if task.path.startswith(archive_root + "/")
+            and "\\" not in task.path
+            and posixpath.normpath(task.path) == task.path
+            and (dry_run or task.path in approved_plan)
+        ]
+        session.mode = "review"
+    scope_label = "归档季" if archive_root else "黄色"
+    logger.info(f"📄 待复核: {len(session.tasks)} 项{scope_label}")
+    plan = {}
+    planned_files = 0
+    pause_reason = None
     session.updates = {}
 
     summary = {
@@ -179,6 +203,18 @@ def run_review(
             except (ValueError, TypeError):
                 total = len(videos)
 
+            if archive_root:
+                try:
+                    registered = float(task.data.get("来源登记集数"))
+                    valid_total = registered > 0 and registered.is_integer()
+                except (TypeError, ValueError):
+                    valid_total = False
+                if not valid_total:
+                    session.updates[task] = {"state": "待核实", "note": "登记集数未确认，暂缓清理"}
+                    summary["skipped"] += 1
+                    continue
+                total = int(registered)
+
             # 3. 解析视频集号与版本模板（严格保持原生简单分集正则逻辑）
             parsed = []
             for f in videos:
@@ -209,6 +245,11 @@ def run_review(
 
             valid_parsed = [p for p in parsed if p is not None]
             found_episodes = uniq([p["episode"] for p in valid_parsed])
+
+            if archive_root and any(ep < 1 or ep > total for ep in found_episodes):
+                session.updates[task] = {"state": "待核实", "note": "存在超出登记范围的集号，暂缓清理"}
+                summary["skipped"] += 1
+                continue
 
             # 4. 【整理修复闭环核验】
             current_repair = read_repair_state(task.data)
@@ -405,8 +446,34 @@ def run_review(
 
             logger.info(f"  📋 保留 {len(to_keep)} 个文件, 拟删除 {len(to_delete)} 个")
 
+            preview_fields = {}
+            if archive_root:
+                remove = sorted(f["path"] for f in to_delete)
+                keep = sorted(f["path"] for f in to_keep)
+                preview_fields = {"拟删除文件": "\n".join(remove), "拟保留正片": "\n".join(keep)}
+                signature = {"remove": remove, "keep": keep}
+                safe_paths = all(
+                    "\\" not in path and posixpath.normpath(path) == path
+                    and posixpath.dirname(path) == task.path
+                    for path in remove + keep
+                )
+                if (not safe_paths or any(len(v) > 32000 for v in preview_fields.values())
+                        or (not dry_run and approved_plan.get(task.path) != signature)):
+                    session.updates[task] = {
+                        "state": "暂缓清理",
+                        "note": "文件路径异常、明细过长或清理计划已变化，请重新核对",
+                    }
+                    summary["skipped"] += 1
+                    continue
+                if dry_run:
+                    plan[task.path] = signature
+                    planned_files += len(remove)
+                else:
+                    del approved_plan[task.path]
+
             if dry_run:
                 session.updates[task] = {
+                    "fields": preview_fields,
                     "state": "待确认清理（预览）",
                     "color": "yellow",
                     "repair": current_repair,
@@ -441,11 +508,27 @@ def run_review(
 
             # 规约：删除后立即刷新季目录缓存
             if deleted_count > 0:
-                try:
-                    cd2.refresh_dir(task.path)
-                    logger.debug(f"    🔄 已刷新季目录: {task.path}")
-                except Exception as ref_err:
-                    logger.warn(f"    ⚠️ 刷新季目录异常: {ref_err}")
+                for attempt in range(4):
+                    try:
+                        cd2.refresh_dir(task.path)
+                        logger.info(f"    🔄 已刷新季目录: {task.path}")
+                        break
+                    except Exception as ref_err:
+                        label = "首次尝试" if attempt == 0 else f"重试 {attempt}/3"
+                        logger.warn(f"    ⚠️ 刷新季目录异常: {task.path} — {ref_err}（{label}）")
+                        if attempt < 3:
+                            time.sleep(2)
+                        else:
+                            pause_reason = f"刷新季目录异常，重试 3 次后仍失败。目录 {task.path}，原因 {ref_err}"
+                if pause_reason:
+                    summary["errors"] += 1
+                    session.updates[task] = {
+                        "state": "任务暂停：刷新失败", "color": "yellow",
+                        "note": f"已删除 {deleted_count}/{len(to_delete)} 个文件；{pause_reason}",
+                        "fields": {"刷新异常": pause_reason}, "fileCheckedAt": now_iso,
+                    }
+                    logger.error(f"⏸ {pause_reason}。停止处理后续剧集。")
+                    break
 
             is_all_clean = (deleted_count == len(to_delete))
             if is_all_clean and broadcast_ended:
@@ -496,11 +579,17 @@ def run_review(
     write_report(session, output_path)
 
     action_label = "预览" if dry_run else "清理"
-    logger.info(f"\n📊 复核{action_label}完成:")
+    status_label = "已暂停" if pause_reason else "完成"
+    logger.info(f"\n📊 复核{action_label}{status_label}:")
     logger.info(
         f"   ✅ 已清理 {summary['cleaned']}  ⏳ 修复待闭环 {summary['repairPending']}  "
         f"⏭ 跳过 {summary['skipped']}  🗑 删除文件 {summary['deletedFiles']}  ❌ 错误 {summary['errors']}"
     )
     logger.info(f"   📄 报告: {output_path}")
 
-    return {**summary, "outputPath": output_path}
+    if pause_reason:
+        raise ReviewRefreshError(f"{pause_reason}。已保存报告 {output_path}，请排查后重新初检和预览。")
+    result = {**summary, "outputPath": output_path}
+    if archive_root and dry_run:
+        result.update(plan=plan, plannedFiles=planned_files)
+    return result
