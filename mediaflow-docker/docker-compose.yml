@@ -1,0 +1,35 @@
+# ┌────────────────────────────────────────────────────────┐
+# │  MediaFlow Docker Compose 配置文件                     │
+# │  使用方式:                                             │
+# │  1. 复制并编辑配置: cp .env.example .env && nano .env │
+# │  2. 启动服务:       docker compose up -d              │
+# │  3. 访问控制台:     http://<NAS_IP>:8080              │
+# └────────────────────────────────────────────────────────┘
+
+version: "3.8"
+
+services:
+  mediaflow:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: hailanbb/mediaflow:latest
+    container_name: mediaflow
+    restart: unless-stopped
+    ports:
+      - "${MF_PORT:-8080}:8080"
+    volumes:
+      # 持久化数据库与任务日志目录
+      - ./data:/app/data
+      # 可选：如果网盘通过宿主机本地挂载，可映射媒体根目录
+      # - /volume1/115:/115
+    env_file:
+      - .env
+    environment:
+      - TZ=Asia/Shanghai
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/api/system/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
