@@ -116,6 +116,34 @@ class TestInspectionEngine(unittest.TestCase):
         self.assertEqual(status, "unknown")
         self.assertIn("无法获取", detail)
 
+    def test_07_filter_non_regular_episodes_and_historical_finish(self):
+        """测试 TMDB 混入预告片时被剔除，且历史完结剧（首播距今超半年）正确识别已完结与真实总集数."""
+        import asyncio
+        from unittest.mock import AsyncMock
+        from app.core.inspector import _fetch_seasons_by_tmdb_id
+
+        mock_mp = AsyncMock()
+        # 模拟 TMDB 返回包含预告片（如山河新疆 S01，TMDB 宣称 4 集，但第 4 集是预告片且无 air_date）
+        mock_mp.get_tmdb_seasons.return_value = [
+            {"season_number": 1, "episode_count": 4, "air_date": "2020-03-24"}
+        ]
+        mock_mp.get_tmdb_episodes.return_value = [
+            {"episode_number": 1, "name": "天山", "air_date": "2020-03-24"},
+            {"episode_number": 2, "name": "昆仑山", "air_date": "2020-03-31"},
+            {"episode_number": 3, "name": "阿尔泰山", "air_date": "2020-04-07"},
+            {"episode_number": 4, "name": "预告片 - 走进探秘《山河新疆》", "air_date": None},
+        ]
+
+        async def run():
+            data = await _fetch_seasons_by_tmdb_id(mock_mp, 201303, None)
+            self.assertIn(1, data)
+            # 必须成功过滤掉第 4 集预告片，真实总集数为 3
+            self.assertEqual(data[1]["total"], 3)
+            # 首播于 2020 年且 3 集均已播出，必须判定为已完结 True，绝不能误判为连载追更中
+            self.assertTrue(data[1]["finished"])
+
+        asyncio.run(run())
+
 
 if __name__ == "__main__":
     unittest.main()

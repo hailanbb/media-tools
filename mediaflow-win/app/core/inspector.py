@@ -25,6 +25,12 @@ from dataclasses import dataclass, field
 
 from app.core.episode_parser import ParsedEpisode, is_video_file, parse_episode
 
+# 非正片判定正则（预告、片花、特辑、宣传片、花絮、Trailer、Teaser 等，杜绝污染正片总集数）
+NON_REGULAR_EP_PATTERN = re.compile(
+    r"(?:预告|片花|特辑|花絮|宣传|特番|番外|制作特辑|花絮篇|Trailer|Teaser|Preview|Making\s*of|Extra|Special)",
+    re.IGNORECASE,
+)
+
 
 @dataclass
 class SeasonDiagnosis:
@@ -495,7 +501,7 @@ def _parse_season_number(dirname: str) -> int | None:
 async def _fetch_seasons_by_tmdb_id(
     mp_client, tmdb_id: int, log
 ) -> dict[int, dict]:
-    """已知 tmdb_id，直接通过 MoviePilot 获取季度信息。
+    """已知 tmdb_id，通过 MoviePilot 获取季度信息并进行非正片预告剔除与科学完结判定。
 
     Returns:
         {season_num: {"total": N, "finished": bool}}
@@ -512,30 +518,64 @@ async def _fetch_seasons_by_tmdb_id(
                 if sn is None:
                     continue
                 sn = int(sn)
-                ep_count = s.get("episode_count") or 0
+                raw_ep_count = s.get("episode_count") or 0
                 finished = False
+                real_total = raw_ep_count
 
-                if ep_count > 0:
+                if raw_ep_count > 0:
                     try:
                         episodes_info = await mp_client.get_tmdb_episodes(tmdb_id, sn)
                         if isinstance(episodes_info, list) and episodes_info:
-                            last_ep = episodes_info[-1]
-                            last_air = last_ep.get("air_date", "")
-                            if last_air:
-                                last_date = _dt.strptime(last_air, "%Y-%m-%d")
-                                finished = last_date < today
+                            # 1. 过滤 TMDB 中混入的预告片、花絮、特辑等非正片伪条目
+                            regular_eps = []
+                            for ep in episodes_info:
+                                ep_name = str(ep.get("name") or "")
+                                if NON_REGULAR_EP_PATTERN.search(ep_name):
+                                    if log:
+                                        log.info("TMDB tmdb_id=%d S%02d: 自动剔除非正片条目 [%s]", tmdb_id, sn, ep_name)
+                                    continue
+                                regular_eps.append(ep)
+
+                            if regular_eps:
+                                real_total = len(regular_eps)
+
+                            # 2. 提取正片中有效播出日期
+                            valid_air_dates = []
+                            for ep in (regular_eps or episodes_info):
+                                ad = ep.get("air_date")
+                                if ad:
+                                    try:
+                                        valid_air_dates.append(_dt.strptime(ad, "%Y-%m-%d"))
+                                    except Exception:
+                                        pass
+
+                            if valid_air_dates and max(valid_air_dates) < today:
+                                finished = True
+
+                            # 3. 首播年份保底规则（历史老剧绝不能因缺少某集播出时间误判为连载追更）
+                            season_air = s.get("air_date") or ""
+                            if season_air:
+                                try:
+                                    s_date = _dt.strptime(season_air, "%Y-%m-%d")
+                                    # 若首播距今已超 180 天且已有正片播出，判定该季已播出完结
+                                    if (today - s_date).days > 180 and valid_air_dates:
+                                        finished = True
+                                except Exception:
+                                    pass
                         else:
                             finished = True
                     except Exception:
                         finished = True
 
                 seasons_data[sn] = {
-                    "total": ep_count if ep_count > 0 else None,
+                    "total": real_total if real_total > 0 else None,
                     "finished": finished,
                 }
-            log.info("TMDB tmdb_id=%d: 获取到 %d 季信息", tmdb_id, len(seasons_data))
+            if log:
+                log.info("TMDB tmdb_id=%d: 获取到 %d 季信息 (已清洗非正片)", tmdb_id, len(seasons_data))
     except Exception as e:
-        log.warning("获取 tmdb_id=%d 的季度信息失败: %s", tmdb_id, e)
+        if log:
+            log.warning("获取 tmdb_id=%d 的季度信息失败: %s", tmdb_id, e)
 
     return seasons_data
 
