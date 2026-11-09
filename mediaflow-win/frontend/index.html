@@ -55,6 +55,18 @@
     ::-webkit-scrollbar-track { background: transparent; }
     .light ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
     .dark ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+
+    /* 移动端平滑滚动与隐藏滚动条 (Scroll Snap 胶囊栏) */
+    .no-scrollbar::-webkit-scrollbar { display: none; }
+    .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    
+    /* 移动端触控优化 */
+    @media (max-width: 768px) {
+      .touch-target {
+        min-height: 44px;
+        min-width: 44px;
+      }
+    }
   </style>
 </head>
 <body class="bg-slate-50 text-slate-800 dark:bg-[#0b0f19] dark:text-slate-100 min-h-screen flex flex-col antialiased selection:bg-indigo-500 selection:text-white">
@@ -72,10 +84,10 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.2</span>
+              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.3</span>
             </div>
             <!-- 完善后的命名 -->
-            <p class="text-[11px] text-slate-500 dark:text-slate-400">智能媒体库整理与归档工作台</p>
+            <p class="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">智能媒体库整理与归档工作台</p>
           </div>
         </div>
 
@@ -103,11 +115,18 @@
         </div>
       </div>
 
-      <!-- 右侧控制：发起初检 + 主题切换 -->
-      <div class="flex items-center space-x-3">
-        <button onclick="openNewTaskModal()" class="flex items-center space-x-2 px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold shadow-sm shadow-indigo-600/30 transition transform active:scale-95">
+      <!-- 右侧控制：移动端抽屉开关 + 发起初检 + 主题切换 -->
+      <div class="flex items-center space-x-2 sm:space-x-3">
+        <!-- 移动端汉堡包侧边栏呼出按钮 -->
+        <button onclick="toggleSidebarDrawer()" class="md:hidden flex items-center justify-center w-9 h-9 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:text-indigo-600 dark:hover:text-indigo-400 transition shadow-sm relative active:scale-95" title="切换任务与运维菜单">
+          <i class="fa-solid fa-bars text-sm"></i>
+          <span id="mobileTaskBadge" class="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-indigo-600 border-2 border-white dark:border-slate-900"></span>
+        </button>
+
+        <button onclick="openNewTaskModal()" class="flex items-center space-x-1.5 sm:space-x-2 px-3 sm:px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold shadow-sm shadow-indigo-600/30 transition transform active:scale-95">
           <i class="fa-solid fa-plus text-xs"></i>
-          <span>新建初检任务</span>
+          <span class="hidden sm:inline">新建初检任务</span>
+          <span class="inline sm:hidden">新建</span>
         </button>
 
         <button id="themeToggle" onclick="toggleTheme()" class="w-9 h-9 rounded-lg border border-slate-200 dark:border-slate-700/80 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:text-indigo-600 dark:hover:text-indigo-400 flex items-center justify-center transition shadow-sm" title="切换浅色 / 暗黑主题">
@@ -118,11 +137,27 @@
     </div>
   </header>
 
-  <!-- ================= 主内容布局 (左侧栏 + 右侧主工作区) ================= -->
-  <div class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 flex flex-col md:flex-row gap-6">
+  <!-- 移动端侧边抽屉半透明背景遮罩 -->
+  <div id="sidebarBackdrop" onclick="closeSidebarDrawer()" class="hidden fixed inset-0 z-40 bg-slate-900/60 backdrop-blur-sm md:hidden transition-opacity"></div>
 
-    <!-- ================= 左侧导航侧边栏 (任务列表 + MoviePilot 运维模块) ================= -->
-    <aside class="w-full md:w-80 flex-shrink-0 space-y-6">
+  <!-- ================= 主内容布局 (左侧栏 + 右侧主工作区) ================= -->
+  <div class="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-6 flex flex-col md:flex-row gap-6">
+
+    <!-- ================= 左侧导航侧边栏 (桌面端常驻 / 移动端滑动抽屉) ================= -->
+    <aside id="appSidebar" class="fixed md:static inset-y-0 left-0 z-50 md:z-auto w-[85vw] max-w-xs md:w-80 bg-white dark:bg-slate-900 md:bg-transparent md:dark:bg-transparent shadow-2xl md:shadow-none p-5 md:p-0 transform -translate-x-full md:translate-x-0 transition-transform duration-300 ease-in-out overflow-y-auto flex-shrink-0 space-y-6">
+      
+      <!-- 移动端抽屉专属顶部标题与关闭按钮 -->
+      <div class="flex md:hidden items-center justify-between pb-3 border-b border-slate-200 dark:border-slate-800">
+        <div class="flex items-center space-x-2">
+          <div class="w-7 h-7 rounded-lg bg-indigo-600 flex items-center justify-center text-white text-xs">
+            <i class="fa-solid fa-layer-group"></i>
+          </div>
+          <span class="font-bold text-sm text-slate-900 dark:text-white">任务与运维中心</span>
+        </div>
+        <button onclick="closeSidebarDrawer()" class="w-8 h-8 rounded-lg flex items-center justify-center text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 bg-slate-100 dark:bg-slate-800 transition" title="关闭抽屉">
+          <i class="fa-solid fa-xmark text-sm"></i>
+        </button>
+      </div>
       
       <!-- 1. 初检任务列表模块 (支持大批量任务滚动、搜索、重新初检、删除) -->
       <div class="space-y-3">
@@ -271,52 +306,52 @@
             </div>
           </div>
 
-          <!-- 五大核心结果分类卡片 (点击即时钻取) -->
-          <div class="grid grid-cols-2 sm:grid-cols-5 gap-3 mt-5">
+          <!-- 五大核心结果分类卡片 (移动端横向滑动胶囊 snap-x / PC端5列经典栅格) -->
+          <div class="flex sm:grid sm:grid-cols-5 overflow-x-auto sm:overflow-x-visible pb-2 sm:pb-0 gap-2.5 sm:gap-3 mt-4 sm:mt-5 -mx-1 px-1 sm:mx-0 sm:px-0 no-scrollbar snap-x">
 
-            <div onclick="filterResultCategory('review')" id="cat-card-review" class="cursor-pointer rounded-xl p-3.5 border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 hover:border-amber-400 transition relative group">
+            <div onclick="filterResultCategory('review')" id="cat-card-review" class="cursor-pointer rounded-xl p-3 sm:p-3.5 border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 hover:border-amber-400 transition relative group flex-shrink-0 w-36 sm:w-auto snap-start shadow-sm">
               <div class="flex items-center justify-between text-xs font-medium text-amber-700 dark:text-amber-400 mb-1">
                 <span>待复核清理</span>
-                <i class="fa-solid fa-broom text-amber-500"></i>
+                <i class="fa-solid fa-broom text-amber-500 text-xs"></i>
               </div>
-              <div class="text-2xl font-bold text-amber-600 dark:text-amber-400" id="catCountReview">0 <span class="text-xs font-normal">处需清理</span></div>
-              <p class="text-[11px] text-slate-500 dark:text-slate-400 mt-1">去重/纠偏处置 ➔</p>
+              <div class="text-xl sm:text-2xl font-bold text-amber-600 dark:text-amber-400" id="catCountReview">0 <span class="text-xs font-normal">处需清理</span></div>
+              <p class="text-[10px] sm:text-[11px] text-slate-500 dark:text-slate-400 mt-1 truncate">去重/纠偏处置 ➔</p>
             </div>
 
-            <div onclick="filterResultCategory('anomaly')" id="cat-card-anomaly" class="cursor-pointer rounded-xl p-3.5 border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 hover:border-rose-400 transition relative group">
+            <div onclick="filterResultCategory('anomaly')" id="cat-card-anomaly" class="cursor-pointer rounded-xl p-3 sm:p-3.5 border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 hover:border-rose-400 transition relative group flex-shrink-0 w-36 sm:w-auto snap-start shadow-sm">
               <div class="flex items-center justify-between text-xs font-medium text-rose-700 dark:text-rose-400 mb-1">
                 <span>异常剧集</span>
-                <i class="fa-solid fa-triangle-exclamation text-rose-500"></i>
+                <i class="fa-solid fa-triangle-exclamation text-rose-500 text-xs"></i>
               </div>
-              <div class="text-2xl font-bold text-rose-600 dark:text-rose-400" id="catCountAnomaly">0 <span class="text-xs font-normal">季异常</span></div>
-              <p class="text-[11px] text-slate-500 dark:text-slate-400 mt-1">集数失真/归档已有/未知 ➔</p>
+              <div class="text-xl sm:text-2xl font-bold text-rose-600 dark:text-rose-400" id="catCountAnomaly">0 <span class="text-xs font-normal">季异常</span></div>
+              <p class="text-[10px] sm:text-[11px] text-slate-500 dark:text-slate-400 mt-1 truncate">失真/已有/未知 ➔</p>
             </div>
 
-            <div onclick="filterResultCategory('download')" id="cat-card-download" class="cursor-pointer rounded-xl p-3.5 border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 hover:border-blue-400 transition relative group">
+            <div onclick="filterResultCategory('download')" id="cat-card-download" class="cursor-pointer rounded-xl p-3 sm:p-3.5 border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 hover:border-blue-400 transition relative group flex-shrink-0 w-36 sm:w-auto snap-start shadow-sm">
               <div class="flex items-center justify-between text-xs font-medium text-blue-700 dark:text-blue-400 mb-1">
                 <span>真缺集待补</span>
-                <i class="fa-solid fa-cloud-arrow-down text-blue-500"></i>
+                <i class="fa-solid fa-cloud-arrow-down text-blue-500 text-xs"></i>
               </div>
-              <div class="text-2xl font-bold text-blue-600 dark:text-blue-400" id="catCountDownload">0 <span class="text-xs font-normal">季</span></div>
-              <p class="text-[11px] text-slate-500 dark:text-slate-400 mt-1">补缺/整理修复 ➔</p>
+              <div class="text-xl sm:text-2xl font-bold text-blue-600 dark:text-blue-400" id="catCountDownload">0 <span class="text-xs font-normal">季</span></div>
+              <p class="text-[10px] sm:text-[11px] text-slate-500 dark:text-slate-400 mt-1 truncate">补缺/整理修复 ➔</p>
             </div>
 
-            <div onclick="filterResultCategory('airing')" id="cat-card-airing" class="cursor-pointer rounded-xl p-3.5 border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 hover:border-indigo-400 transition relative group">
+            <div onclick="filterResultCategory('airing')" id="cat-card-airing" class="cursor-pointer rounded-xl p-3 sm:p-3.5 border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 hover:border-indigo-400 transition relative group flex-shrink-0 w-36 sm:w-auto snap-start shadow-sm">
               <div class="flex items-center justify-between text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
                 <span>连载留源</span>
-                <i class="fa-solid fa-clock text-slate-500"></i>
+                <i class="fa-solid fa-clock text-slate-500 text-xs"></i>
               </div>
-              <div class="text-2xl font-bold text-slate-800 dark:text-slate-200" id="catCountAiring">0 <span class="text-xs font-normal">季</span></div>
-              <p class="text-[11px] text-slate-500 dark:text-slate-400 mt-1">追更留源清单 ➔</p>
+              <div class="text-xl sm:text-2xl font-bold text-slate-800 dark:text-slate-200" id="catCountAiring">0 <span class="text-xs font-normal">季</span></div>
+              <p class="text-[10px] sm:text-[11px] text-slate-500 dark:text-slate-400 mt-1 truncate">追更留源清单 ➔</p>
             </div>
 
-            <div onclick="filterResultCategory('archive')" id="cat-card-archive" class="cursor-pointer rounded-xl p-3.5 border-2 border-indigo-500 bg-indigo-50/70 dark:bg-indigo-950/30 transition relative group">
+            <div onclick="filterResultCategory('archive')" id="cat-card-archive" class="cursor-pointer rounded-xl p-3 sm:p-3.5 border-2 border-indigo-500 bg-indigo-50/70 dark:bg-indigo-950/30 transition relative group flex-shrink-0 w-36 sm:w-auto snap-start shadow-sm">
               <div class="flex items-center justify-between text-xs font-medium text-emerald-800 dark:text-emerald-300 mb-1">
                 <span>齐全可归档</span>
-                <i class="fa-solid fa-box-archive text-emerald-600 dark:text-emerald-400"></i>
+                <i class="fa-solid fa-box-archive text-emerald-600 dark:text-emerald-400 text-xs"></i>
               </div>
-              <div class="text-2xl font-bold text-emerald-700 dark:text-emerald-400" id="catCountArchive">1 <span class="text-xs font-normal">季已齐</span></div>
-              <p class="text-[11px] text-emerald-600/80 dark:text-emerald-400/80 mt-1">点击查看可归档清单 ➔</p>
+              <div class="text-xl sm:text-2xl font-bold text-emerald-700 dark:text-emerald-400" id="catCountArchive">1 <span class="text-xs font-normal">季已齐</span></div>
+              <p class="text-[10px] sm:text-[11px] text-emerald-600/80 dark:text-emerald-400/80 mt-1 truncate">可归档清单 ➔</p>
             </div>
 
           </div>
@@ -463,7 +498,7 @@
 
   <!-- ================= 弹窗 1：点击式目录选择器发起初检任务 (解决第3点) ================= -->
   <div id="newTaskModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
-    <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-2xl w-full p-6 space-y-5 border border-slate-200 dark:border-slate-800 shadow-2xl transition-all">
+    <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-2xl w-full p-4 sm:p-6 space-y-4 sm:space-y-5 border border-slate-200 dark:border-slate-800 shadow-2xl transition-all">
       <div class="flex items-center justify-between">
         <div class="flex items-center space-x-2.5">
           <div class="w-8 h-8 rounded-lg bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 flex items-center justify-center font-bold">
@@ -484,7 +519,7 @@
         <!-- 常用快捷目录 (明确区分 nas 源盘 vs nas.finish 归档盘) -->
         <div>
           <label class="block font-semibold text-slate-700 dark:text-slate-300 mb-1.5">常用快捷目录 (已区分源库与归档库):</label>
-          <div class="grid grid-cols-2 gap-2">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
             <!-- 源盘库 -->
             <button onclick="selectPresetPath('/115/Library_incs/nas/电视剧/国产剧/')" class="p-2 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 hover:border-indigo-500 text-left transition group">
               <div class="flex items-center gap-1.5 text-indigo-600 dark:text-indigo-400 font-semibold text-[11px]">
@@ -568,7 +603,7 @@
 
   <!-- 弹窗：归档预检确认框 -->
   <div id="archiveModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
-    <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-xl w-full p-6 space-y-4 border border-slate-200 dark:border-slate-800 shadow-2xl">
+    <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-xl w-full p-4 sm:p-6 space-y-4 border border-slate-200 dark:border-slate-800 shadow-2xl">
       <div class="flex items-center justify-between">
         <div class="flex items-center space-x-2">
           <i class="fa-solid fa-box-archive text-emerald-600 text-base"></i>
@@ -590,7 +625,7 @@
 
   <!-- 弹窗：复核清理试跑预览详情框 -->
   <div id="cleanPreviewModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
-    <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-3xl w-full p-6 space-y-4 border border-slate-200 dark:border-slate-800 shadow-2xl max-h-[85vh] flex flex-col">
+    <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-3xl w-full p-4 sm:p-6 space-y-4 border border-slate-200 dark:border-slate-800 shadow-2xl max-h-[90dvh] sm:max-h-[85vh] flex flex-col">
       <div class="flex items-center justify-between pb-3 border-b border-slate-200 dark:border-slate-800">
         <div class="flex items-center space-x-2">
           <i class="fa-solid fa-file-magnifying-glass text-indigo-500 text-base"></i>
@@ -620,7 +655,7 @@
   
   <!-- 弹窗：初检实时进度悬浮面板 -->
   <div id="inspectProgressModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/70 backdrop-blur-sm">
-    <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-md w-full p-6 space-y-4 border border-slate-200 dark:border-slate-800 shadow-2xl">
+    <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-md w-full p-4 sm:p-6 space-y-4 border border-slate-200 dark:border-slate-800 shadow-2xl">
       <div class="flex items-center justify-between">
         <div class="flex items-center space-x-3">
           <div class="w-10 h-10 rounded-xl bg-indigo-50 dark:bg-indigo-950/60 flex items-center justify-center text-indigo-600 dark:text-indigo-400">
@@ -707,7 +742,7 @@
 
   <!-- 弹窗：删除源端剧集整剧目录确认框 -->
   <div id="deleteSourceShowModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
-    <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-md w-full p-6 space-y-4 border border-rose-200 dark:border-rose-900 shadow-2xl">
+    <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-md w-full p-4 sm:p-6 space-y-4 border border-rose-200 dark:border-rose-900 shadow-2xl">
       <div class="flex items-center justify-between pb-3 border-b border-rose-100 dark:border-rose-900/40">
         <div class="flex items-center space-x-2 text-rose-600 dark:text-rose-400">
           <i class="fa-solid fa-triangle-exclamation text-lg"></i>
@@ -741,7 +776,7 @@
 
   <!-- 弹窗：MoviePilot 智能订阅清理决策面板 -->
   <div id="subCleanModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
-    <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-2xl w-full p-6 space-y-4 border border-slate-200 dark:border-slate-800 shadow-2xl max-h-[85vh] flex flex-col">
+    <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-2xl w-full p-6 space-y-4 border border-slate-200 dark:border-slate-800 shadow-2xl max-h-[90dvh] sm:max-h-[85vh] flex flex-col">
       <div class="flex items-center justify-between pb-3 border-b border-slate-200 dark:border-slate-800">
         <div class="flex items-center space-x-2">
           <i class="fa-solid fa-broom text-amber-500 text-base"></i>
@@ -779,7 +814,7 @@
 
   <!-- 弹窗：清理源端冗余确认框 -->
   <div id="cleanRedundantModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
-    <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-xl w-full p-6 space-y-4 border border-slate-200 dark:border-slate-800 shadow-2xl">
+    <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-xl w-full p-4 sm:p-6 space-y-4 border border-slate-200 dark:border-slate-800 shadow-2xl">
       <div class="flex items-center justify-between">
         <div class="flex items-center space-x-2">
           <i class="fa-solid fa-trash-can text-purple-600 text-base"></i>
@@ -801,7 +836,7 @@
 
   <!-- 弹窗：复核清理预检确认框 -->
   <div id="reviewModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
-    <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-xl w-full p-6 space-y-4 border border-slate-200 dark:border-slate-800 shadow-2xl">
+    <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-xl w-full p-4 sm:p-6 space-y-4 border border-slate-200 dark:border-slate-800 shadow-2xl">
       <div class="flex items-center justify-between">
         <div class="flex items-center space-x-2">
           <i class="fa-solid fa-broom text-amber-600 text-base"></i>
@@ -822,7 +857,7 @@
 
   <!-- 弹窗：补缺/修复确认框 -->
   <div id="downloadModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
-    <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-xl w-full p-6 space-y-4 border border-slate-200 dark:border-slate-800 shadow-2xl">
+    <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-xl w-full p-4 sm:p-6 space-y-4 border border-slate-200 dark:border-slate-800 shadow-2xl">
       <div class="flex items-center justify-between">
         <div class="flex items-center space-x-2">
           <i class="fa-solid fa-cloud-arrow-down text-blue-600 text-base"></i>
@@ -848,7 +883,7 @@
 
   <!-- 弹窗：批量补缺实时流水线面板 -->
   <div id="downloadProgressModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
-    <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-2xl w-full p-6 space-y-4 border border-slate-200 dark:border-slate-800 shadow-2xl flex flex-col max-h-[85vh]">
+    <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-2xl w-full p-6 space-y-4 border border-slate-200 dark:border-slate-800 shadow-2xl flex flex-col max-h-[90dvh] sm:max-h-[85vh]">
       <div class="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
         <div class="flex items-center space-x-2.5">
           <div class="w-8 h-8 rounded-xl bg-blue-100 dark:bg-blue-900/40 text-blue-600 dark:text-blue-400 flex items-center justify-center text-sm shadow-sm">
@@ -1651,7 +1686,43 @@
     }
 
     // ── 9. 视图切换 ──────────────────────────────────────────
+    
+    // ── 移动端侧边抽屉 (Drawer) 控制 ──────────────────────────────
+    function openSidebarDrawer() {
+      const sidebar = document.getElementById('appSidebar');
+      const backdrop = document.getElementById('sidebarBackdrop');
+      if (sidebar && backdrop) {
+        sidebar.classList.remove('-translate-x-full');
+        backdrop.classList.remove('hidden');
+        document.body.classList.add('overflow-hidden', 'md:overflow-auto');
+      }
+    }
+
+    function closeSidebarDrawer() {
+      const sidebar = document.getElementById('appSidebar');
+      const backdrop = document.getElementById('sidebarBackdrop');
+      if (sidebar && backdrop) {
+        sidebar.classList.add('-translate-x-full');
+        backdrop.classList.add('hidden');
+        document.body.classList.remove('overflow-hidden', 'md:overflow-auto');
+      }
+    }
+
+    function toggleSidebarDrawer() {
+      const sidebar = document.getElementById('appSidebar');
+      if (sidebar && sidebar.classList.contains('-translate-x-full')) {
+        openSidebarDrawer();
+      } else {
+        closeSidebarDrawer();
+      }
+    }
+
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') closeSidebarDrawer();
+    });
+
     function showTaskDetailView() {
+      closeSidebarDrawer();
       document.getElementById('taskDetailView').classList.remove('hidden');
       document.getElementById('mpSubscriptionsView').classList.add('hidden');
       document.getElementById('mpTransferRepairView').classList.add('hidden');
@@ -1660,6 +1731,7 @@
     }
 
     function openMoviePilotView(viewName) {
+      closeSidebarDrawer();
       document.getElementById('taskDetailView').classList.add('hidden');
       document.getElementById('mpSubscriptionsView').classList.add('hidden');
       document.getElementById('mpTransferRepairView').classList.add('hidden');
@@ -1838,7 +1910,7 @@
         return `
           <div class="app-card rounded-xl p-4 transition flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-l-4 border-l-${badgeColor}-500">
             <div class="flex items-start space-x-3.5 flex-1 min-w-0">
-              <input type="checkbox" name="itemCheck" value="${item.id}" onchange="updateSelection()" class="mt-1 w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer">
+              <input type="checkbox" name="itemCheck" value="${item.id}" onchange="updateSelection()" class="mt-1 w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer accent-indigo-600">
               <div class="w-10 h-14 rounded bg-slate-100 dark:bg-slate-800 flex-shrink-0 flex items-center justify-center text-slate-400 border border-slate-200 dark:border-slate-700">
                 <i class="fa-solid fa-film text-lg"></i>
               </div>
