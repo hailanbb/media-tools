@@ -29,8 +29,9 @@ async def health_check() -> dict:
         try:
             from app.clients.clouddrive2 import CloudDrive2Client
             cd2 = CloudDrive2Client()
-            info = await cd2.get_file_info("/")
-            status = "online" if info else "error"
+            # 真实通过 gRPC-Web 发送网络 RPC 请求，杜绝本地硬编码假在线
+            files = await cd2.list_files("/", force_refresh=True)
+            status = "online" if isinstance(files, list) else "error"
             await cd2.close()
         except Exception as e:
             status = f"error: {str(e)[:80]}"
@@ -64,8 +65,16 @@ async def health_check() -> dict:
     if "tmdb" in _HEALTH_CACHE and _HEALTH_CACHE["tmdb"][1] > now:
         services["tmdb"] = _HEALTH_CACHE["tmdb"][0]
     elif settings.tmdb_api_key:
-        services["tmdb"] = "online"
-        _HEALTH_CACHE["tmdb"] = ("online", now + _CACHE_TTL)
+        try:
+            from app.clients.tmdb import TMDBClient
+            t_client = TMDBClient()
+            probe_ok = await t_client.verify_connectivity()
+            await t_client.close()
+            status = "online" if probe_ok else "error: TMDB API响应异常"
+        except Exception as te:
+            status = f"error: {str(te)[:50]}"
+        services["tmdb"] = status
+        _HEALTH_CACHE["tmdb"] = (status, now + _CACHE_TTL)
     elif mp_online:
         try:
             from app.clients.moviepilot import MoviePilotClient

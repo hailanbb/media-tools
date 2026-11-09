@@ -131,6 +131,7 @@ def diagnose_season(
     recognized_set = set(recognized)
     expected_set = set(range(1, total_episodes + 1))
     missing = sorted(expected_set - recognized_set)
+    out_of_range = sorted(recognized_set - expected_set)
 
     # 1. 连载中剧集（官方尚未完结）：暂留源或复核
     if not season_finished:
@@ -142,18 +143,23 @@ def diagnose_season(
     # 2. 已完结但有真实缺集：【集齐大于一切】缺集属实时优先归入“真缺集待补”
     if missing:
         missing_text = f"第 {','.join(str(m) for m in missing[:5])} 集" if len(missing) <= 5 else f"{len(missing)} 集"
+        out_desc = f"（同时包含超范围集: {out_of_range}）" if out_of_range else ""
         if has_duplicates:
             dup_text = f"第 {','.join(str(d) for d in sorted(duplicate_episodes))} 集" if duplicate_episodes else "部分集数"
-            return "download_needed", f"已完结但缺失 {missing_text}（同时存在重复集: {dup_text}，优先补缺，亦可顺带清理冗余）"
+            return "download_needed", f"已完结但缺失 {missing_text}{out_desc}（同时存在重复集: {dup_text}，优先补缺，亦可顺带清理冗余）"
         else:
-            return "download_needed", f"已完结但缺失 {missing_text}，缺少已播出集：{missing}"
+            return "download_needed", f"已完结但缺失 {missing_text}，缺少已播出集：{missing}{out_desc}"
 
-    # 3. 已完结且全部集数已就绪，但存在同集重复版本：进入复核清理
+    # 3. 超范围集号异常保护 (P1-4): 已齐但包含超范围集号，转复核人工确认
+    if out_of_range:
+        return "review_needed", f"全 {total_episodes} 集已齐，但存在超出官方范围的异常集号 ({out_of_range})，需人工核对后归档"
+
+    # 4. 已完结且全部集数已就绪，但存在同集重复版本：进入复核清理
     if has_duplicates:
         dup_text = f"第 {','.join(str(d) for d in sorted(duplicate_episodes))} 集" if duplicate_episodes else "部分集数"
         return "review_needed", f"全 {total_episodes} 集已齐，但存在重复版本 ({dup_text})，需清理低质冗余后归档"
 
-    # 4. 已完结、无缺集、无重复：完美就绪，可归档
+    # 5. 已完结、无缺集、无重复、无超范围：完美就绪，可归档
     return "archive_ready", f"全 {total_episodes} 集齐全，可归档"
 
 
@@ -355,28 +361,38 @@ async def run_inspection(
 
                             source_eps = set(recognized)
                             unarchived_source_eps = sorted(source_eps - archived_eps)
+                            expected_set = set(range(1, total_eps + 1)) if total_eps and total_eps > 0 else set()
 
-                            if source_eps and source_eps.issubset(archived_eps):
-                                # 源端所有集数在归档库中均已存在：真·归档后残留，可安全清理源端
+                            if not source_eps:
+                                # P0-1 门禁: 源端未识别到任何有效正片集号，严禁误判为已归档！
+                                status = "review_needed"
+                                detail = f"归档目标已存在 ({archive_target})，但源端未识别到正片集号，需人工复核"
+                            elif source_eps.issubset(archived_eps):
+                                # 源端所有集号在归档库中均已存在：真·已归档残留
                                 status = "already_archived"
                                 detail = f"归档库已完整包含源端所有集数 (归档库已有: {sorted(archived_eps)})，源端为历史冗余残留，可安全清理"
                             elif unarchived_source_eps:
-                                # 源端含有归档库没有的增量集数（如源端有 E02，归档只有 E01）：绝不是冗余！绝对禁止清理源端！
-                                combined = sorted(source_eps | archived_eps)
-                                if total_eps and len(combined) >= total_eps:
+                                # 源端含有归档库没有的增量集数
+                                combined_eps = source_eps | archived_eps
+                                if expected_set and expected_set.issubset(combined_eps):
                                     status = "archive_ready"
-                                    detail = f"跨库增量就绪：归档库已有 {sorted(archived_eps)}，源端含增量集 {unarchived_source_eps}，跨库汇聚后已集齐，可执行增量归档"
+                                    detail = f"跨库增量就绪：归档库已有 {sorted(archived_eps)}，源端含增量集 {unarchived_source_eps}，跨库汇聚后已全剧集齐，可执行增量归档"
+                                    # P1-4 修复：两库已集齐，全剧缺集必须清空，识别集数更新为两库并集
+                                    missing = []
+                                    recognized = sorted(combined_eps)
                                 else:
-                                    missing_combined = [e for e in range(1, (total_eps or 0) + 1) if e not in combined]
+                                    missing_combined = sorted(expected_set - combined_eps) if expected_set else []
                                     status = "download_needed"
                                     detail = f"跨库分散待补：归档库已有 {sorted(archived_eps)}，源端含增量集 {unarchived_source_eps}，全剧仍缺 {missing_combined}，严禁误删源端"
+                                    missing = missing_combined
+                                    recognized = sorted(combined_eps)
                             else:
-                                status = "already_archived"
-                                detail = f"归档库对应目录已存在 ({archive_target})，归类为异常剧集（归档库已有）"
+                                status = "review_needed"
+                                detail = f"跨库比对状态异常，需人工复核 ({archive_target})"
                         except Exception as af_err:
                             log.warning("读取归档库季目录集数失败 %s: %s", archive_target, af_err)
-                            status = "already_archived"
-                            detail = f"归档库对应目录已存在 ({archive_target})，归类为异常剧集（归档库已有）"
+                            status = "review_needed"
+                            detail = f"归档库对应目录已存在 ({archive_target}) 但读取集数失败，需人工复核，严防误判"
                 except Exception as arc_err:
                     log.warning("跨库感知查重探测失败 %s: %s", archive_target, arc_err)
 
@@ -615,9 +631,16 @@ async def _fetch_seasons_by_tmdb_id(
                                 except Exception:
                                     pass
                         else:
-                            finished = True
+                            season_air = s.get("air_date") or ""
+                            if season_air:
+                                try:
+                                    s_date = _dt.strptime(season_air, "%Y-%m-%d")
+                                    if (today - s_date).days > 180:
+                                        finished = True
+                                except Exception:
+                                    pass
                     except Exception:
-                        finished = True
+                        pass
 
                 seasons_data[sn] = {
                     "total": real_total if real_total > 0 else None,
@@ -990,7 +1013,17 @@ async def _resolve_show_metadata(
                         sn = s.get("season_number")
                         cnt = s.get("episode_count") or 0
                         if sn in missing_seasons and cnt > 0 and sn not in seasons_data:
-                            seasons_data[sn] = {"total": cnt, "finished": True}
+                            s_finished = False
+                            s_air = s.get("air_date") or ""
+                            if s_air:
+                                try:
+                                    from datetime import datetime as _dt
+                                    s_d = _dt.strptime(s_air, "%Y-%m-%d")
+                                    if (_dt.now() - s_d).days > 180:
+                                        s_finished = True
+                                except Exception:
+                                    pass
+                            seasons_data[sn] = {"total": cnt, "finished": s_finished}
                             if log:
                                 log.info("剧集 %s 缺失第 S%02d 季，通过 TMDB 检索系列 [%s] (ID=%d) 成功补齐: %d 集",
                                          show_name, sn, cname, cid, cnt)

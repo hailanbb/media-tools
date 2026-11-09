@@ -334,7 +334,10 @@ class CloudDrive2Client:
         frames = await self._call_rpc("DeleteFile", req_pb)
         if not frames:
             return {"success": True}
-        return self._decode_file_op_result(frames[0])
+        res = self._decode_file_op_result(frames[0])
+        if not res.get("success", False):
+            raise RuntimeError(f"CloudDrive2 删除失败: {res.get('errorMessage') or '未知错误'}")
+        return res
 
     async def mkdir(self, dir_path: str) -> dict[str, Any]:
         """创建目录。"""

@@ -24,6 +24,7 @@ import asyncio
 TASK_PROGRESS: dict[str, dict] = {}
 TASK_EVENTS: dict[str, asyncio.Event] = {}
 TASK_CANCELLED: set[str] = set()
+TASK_RUNNING_WORKERS: dict[str, asyncio.Task] = {}
 
 
 def get_task_control_event(task_id: str) -> asyncio.Event:
@@ -79,14 +80,16 @@ def get_task_progress(task_id: str) -> dict:
 
 
 async def start_background_inspection(task_id: str) -> None:
-    """后台独立会话执行初检。"""
+    """后台独立会话执行初检（F09: 具备代次互斥与工作协程生命周期追踪）。"""
     from app.database import async_session
-    async with async_session() as db:
-        try:
+    try:
+        async with async_session() as db:
             await execute_inspection(task_id, db)
-        except Exception as e:
-            import logging
-            logging.getLogger("mediaflow.task_service").error("后台初检异常: %s", e)
+    except Exception as e:
+        import logging
+        logging.getLogger("mediaflow.task_service").error("后台初检异常: %s", e)
+    finally:
+        TASK_RUNNING_WORKERS.pop(task_id, None)
 
 
 async def execute_inspection(task_id: str, db: AsyncSession) -> InspectionResult:

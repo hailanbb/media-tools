@@ -25,6 +25,11 @@ SUITES = [
     {"name": "6. 归档迁移与源端零残留测试", "cmd": [sys.executable, "tests/test_archiver.py"], "type": "python"},
     {"name": "7. MoviePilot 智能治理双轨分离测试", "cmd": [sys.executable, "tests/test_moviepilot.py"], "type": "python"},
     {"name": "8. 全系统端到端真实服务生命周期测试", "cmd": [sys.executable, "tests/full_system_test.py"], "type": "python"},
+    {"name": "9. 物理安全底线与字幕保护专项测试", "cmd": [sys.executable, "tests/test_phase1_security.py"], "type": "python"},
+    {"name": "10. 领域算法多集识别与增量合并测试", "cmd": [sys.executable, "tests/test_phase3_domain.py"], "type": "python"},
+    {"name": "11. 跨库集数差分与前端契约审计测试", "cmd": [sys.executable, "tests/test_amw_and_cross_diff.py"], "type": "python"},
+    {"name": "12. 执行手册全规范覆盖专项测试", "cmd": [sys.executable, "tests/test_manual_full_coverage.py"], "type": "python"},
+    {"name": "13. 离线 P0 安全探针 (8/8 核心防线)", "cmd": [sys.executable, "-B", "p0_probe.py", "."], "type": "python"},
 ]
 
 def run_suite():
@@ -38,7 +43,7 @@ def run_suite():
     for s in SUITES:
         print(f"\n▶ 正在执行套件: 【{s['name']}】...")
         t0 = time.time()
-        res = subprocess.run(s["cmd"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
+        res = subprocess.run(s["cmd"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
         cost = time.time() - t0
         passed = (res.returncode == 0)
 

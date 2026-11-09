@@ -147,7 +147,10 @@ class MoviePilotClient:
         return []
 
     async def delete_subscription(self, sub_id: int) -> dict:
-        return await self._delete(f"/api/v1/subscribe/{sub_id}")
+        res = await self._delete(f"/api/v1/subscribe/{sub_id}")
+        if isinstance(res, dict) and res.get("success") is False:
+            raise RuntimeError(res.get("message") or "MoviePilot 退订业务处理失败")
+        return res
 
     # ── 转移队列 ──────────────────────────────────────────
     async def get_transfer_queue(self) -> list[dict]:
@@ -301,7 +304,10 @@ class MoviePilotClient:
     # ── 下载 ──────────────────────────────────────────────
     async def submit_download(self, media_info: dict, torrent_info: dict) -> dict:
         body = {"media_in": media_info, "torrent_in": torrent_info, "downloader": None, "save_path": None}
-        return await self._post("/api/v1/download/", json=body)
+        res = await self._post("/api/v1/download/", json=body)
+        if isinstance(res, dict) and res.get("success") is False:
+            raise RuntimeError(res.get("message") or "MoviePilot 下载提交失败")
+        return res
 
     async def get_active_downloads(self) -> list[dict]:
         return await self._get("/api/v1/download/")

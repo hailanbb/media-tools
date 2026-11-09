@@ -21,6 +21,7 @@ from app.services.task_service import (
 )
 
 router = APIRouter()
+_RUN_TASK_LOCK = asyncio.Lock()
 
 
 @router.post("/{task_id}/run", response_model=StatusResponse)
@@ -30,28 +31,36 @@ async def run_inspection(task_id: str, db: AsyncSession = Depends(get_db)) -> St
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
 
-    prog = get_task_progress(task_id)
-    if task.status == "running" and prog.get("status") == "running":
-        return StatusResponse(ok=False, message="任务正在执行中，请等待完成")
+    from app.services.task_service import TASK_RUNNING_WORKERS
+    async with _RUN_TASK_LOCK:
+        existing_worker = TASK_RUNNING_WORKERS.get(task_id)
+        if existing_worker and not existing_worker.done():
+            if task.status == "paused":
+                return StatusResponse(ok=False, message="任务已处于暂停状态，请点击【恢复】继续执行或【停止】终止")
+            return StatusResponse(ok=False, message="任务正在后台执行中，请勿重复拉起")
 
-    # 1. 立即重置内存中的进度状态为初始 running
-    TASK_PROGRESS[task_id] = {
-        "task_id": task_id,
-        "status": "running",
-        "current": 0,
-        "total": 0,
-        "current_show": "",
-        "percent": 1,
-        "message": "正在初始化初检引擎，准备并发探测目录与剧集...",
-        "error": None,
-    }
+        prog = get_task_progress(task_id)
+        if task.status == "running" and prog.get("status") == "running":
+            return StatusResponse(ok=False, message="任务正在执行中，请等待完成")
 
-    # 2. 标记数据库任务状态为 running
-    task.status = "running"
-    await db.commit()
+        # 1. 立即重置内存中的进度状态为初始 running
+        TASK_PROGRESS[task_id] = {
+            "task_id": task_id,
+            "status": "running",
+            "current": 0,
+            "total": 0,
+            "current_show": "",
+            "percent": 1,
+            "message": "正在初始化初检引擎，准备并发探测目录与剧集...",
+            "error": None,
+        }
 
-    # 3. 异步启动后台分析
-    asyncio.create_task(start_background_inspection(task_id))
+        # 2. 标记数据库任务状态为 running
+        task.status = "running"
+        await db.commit()
+
+        # 3. 异步启动后台分析并登记 worker (P1-7 原子认领)
+        TASK_RUNNING_WORKERS[task_id] = asyncio.create_task(start_background_inspection(task_id))
     return StatusResponse(
         ok=True,
         message="初检任务已在后台启动，多协程并发加速分析中..."

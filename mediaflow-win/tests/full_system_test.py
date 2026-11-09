@@ -1,4 +1,6 @@
 import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import time
 import requests
 
@@ -144,7 +146,8 @@ def test_frontend_delivery():
     r = requests.get(f"{BASE_URL}/", timeout=10)
     assert r.status_code == 200, f"Index.html deliver failed: {r.status_code}"
     html = r.text
-    assert "v2.5.4" in html, "Frontend does not contain v2.5.1 badge"
+    from app.config import VERSION
+    assert f"v{VERSION}" in html, f"Frontend does not contain v{VERSION} badge"
     assert "loadTasks" in html, "Frontend does not contain loadTasks function"
     assert "taskTag" in html, "Frontend does not contain taskTag function"
     assert "openCalibrateModal" in html, "Frontend does not contain openCalibrateModal function"

@@ -103,39 +103,55 @@ def episode_from_any_name(filename: str, season: Optional[int] = None) -> Option
     return None
 
 
-def episode_from_name(filename: str, season: Optional[int] = None) -> Optional[int]:
-    """从文件名中提取集号（兼容 S01E05、第05集、EP05 等格式）"""
+def episodes_from_name(filename: str, season: Optional[int] = None) -> List[int]:
+    """从文件名中提取所有集号（F07: 支持范围集如 S01E01-E02、EP01-03、第01-02集 等多集格式）。"""
     if not filename or not MEDIA_REGEX.search(filename):
-        return None
+        return []
 
     name = re.sub(r"\.[^.]+$", "", filename)
     # 忽略特典
     if re.search(r"(?:^|[\s._\-[\]])(?:NCOP|NCED|PV|CM|Preview|Menu|Creditless|Textless|CleanOP|CleanED)\d*", name, re.IGNORECASE):
-        return None
+        return []
 
     if season is not None:
-        se_pattern = re.compile(rf"(?:^|[^a-z0-9])S0*{season}\s*E(\d{{1,4}})(?!\d)", re.IGNORECASE)
+        se_pattern = re.compile(rf"(?:^|[^a-z0-9])S0*{season}\s*E(\d{{1,4}})(?:-[Ee]?(\d{{1,4}}))?(?!\d)", re.IGNORECASE)
         m = se_pattern.search(name)
         if m:
-            return int(m.group(1))
+            s_ep = int(m.group(1))
+            e_ep = int(m.group(2)) if m.group(2) else s_ep
+            return list(range(s_ep, e_ep + 1))
 
-    m = re.search(r"(?:^|[^a-z0-9])S\d{1,4}\s*E(\d{1,4})(?!\d)", name, re.IGNORECASE)
+    m = re.search(r"(?:^|[^a-z0-9])S\d{1,4}\s*E(\d{1,4})(?:-[Ee]?(\d{1,4}))?(?!\d)", name, re.IGNORECASE)
     if m:
-        return int(m.group(1))
+        s_ep = int(m.group(1))
+        e_ep = int(m.group(2)) if m.group(2) else s_ep
+        return list(range(s_ep, e_ep + 1))
 
-    m = re.search(r"第\s*(\d{1,4})\s*[集话話回章]", name)
+    m = re.search(r"第\s*(\d{1,4})(?:\s*[-~至到]\s*(\d{1,4}))?\s*[集话話回章]", name)
     if m:
-        return int(m.group(1))
+        s_ep = int(m.group(1))
+        e_ep = int(m.group(2)) if m.group(2) else s_ep
+        return list(range(s_ep, e_ep + 1))
 
-    m = re.search(r"(?:^|[\s._\-[\]])(?:EP|E)\s*(\d{1,4})(?!\d)", name, re.IGNORECASE)
+    m = re.search(r"(?:^|[\s._\-[\]])(?:EP|E)\s*(\d{1,4})(?:-[Ee]?[Pp]?(\d{1,4}))?(?!\d)", name, re.IGNORECASE)
     if m:
-        return int(m.group(1))
+        s_ep = int(m.group(1))
+        e_ep = int(m.group(2)) if m.group(2) else s_ep
+        return list(range(s_ep, e_ep + 1))
 
     m = re.search(r"[\s._-](\d{2,4})(?:v\d+)?[\s._\-\]]", name)
     if m:
-        return int(m.group(1))
+        ep_val = int(m.group(1))
+        if 0 < ep_val < 1000:
+            return [ep_val]
 
-    return None
+    return []
+
+
+def episode_from_name(filename: str, season: Optional[int] = None) -> Optional[int]:
+    """单集兼容接口。"""
+    eps = episodes_from_name(filename, season)
+    return eps[0] if eps else None
 
 
 def format_missing_episodes_text(missing_eps: List[int]) -> str:
@@ -228,22 +244,23 @@ def generate_review_clean_plan(
             })
             continue
 
-        ep = episode_from_name(f_name, season_number)
-        if ep is None:
+        eps = episodes_from_name(f_name, season_number)
+        if not eps:
             continue
 
         stem = re.sub(r"\.[^.]+$", "", f_name)
-        se_re = re.compile(rf"S0*{season_number}\s*E\d+", re.IGNORECASE)
+        se_re = re.compile(rf"S0*{season_number}\s*E\d+(?:-[Ee]?\d+)?", re.IGNORECASE)
         template = se_re.sub(f"S{season_number}E{{集}}", stem)
         if template == stem:
-            template = re.sub(r"第\s*\d+\s*集", "第{集}集", template)
+            template = re.sub(r"第\s*\d+(?:\s*[-~至到]\s*\d+)?\s*集", "第{集}集", template)
 
         m_ext = re.search(r"\.[^.]+$", f_name)
         ext = m_ext.group(0) if m_ext else ""
         key = re.sub(r"\s+", " ", template).strip().lower() + ext
 
         valid_parsed.append({
-            "episode": ep,
+            "episode": eps[0],
+            "episodes": eps,
             "key": key,
             "name": f_name,
             "path": f.get("path"),
@@ -251,7 +268,10 @@ def generate_review_clean_plan(
             "size": f.get("size", 0),
         })
 
-    found_episodes = sorted(set(p["episode"] for p in valid_parsed))
+    all_found_eps = set()
+    for p in valid_parsed:
+        all_found_eps.update(p.get("episodes", [p["episode"]]))
+    found_episodes = sorted(all_found_eps)
     expected_range = list(range(1, total_episodes + 1))
 
     # 按原生版本模板分组
@@ -261,7 +281,7 @@ def generate_review_clean_plan(
         if k not in groups:
             groups[k] = {"key": k, "files": [], "episodes": []}
         groups[k]["files"].append(p)
-        groups[k]["episodes"].append(p["episode"])
+        groups[k]["episodes"].extend(p.get("episodes", [p["episode"]]))
 
     for g in groups.values():
         g_eps = sorted(set(g["episodes"]))
@@ -283,13 +303,18 @@ def generate_review_clean_plan(
         version_note = f"存在 {len(complete_groups)} 个完整版本，优选保留最佳画质 [{best['key']}]，淘汰劣质版本"
 
         for ep in expected_range:
-            copies = [f for f in best["files"] if f["episode"] == ep]
+            copies = [f for f in best["files"] if ep in f.get("episodes", [f.get("episode")])]
+            if not copies:
+                continue
             copies.sort(key=rank_copy, reverse=True)
-            to_keep.append(copies[0])
+            chosen = copies[0]
+            if not any(k["path"] == chosen["path"] for k in to_keep):
+                to_keep.append(chosen)
             for dup in copies[1:]:
                 d_item = dict(dup)
                 d_item["reason"] = "同版本较旧或冗余副本"
-                to_delete.append(d_item)
+                if not any(d["path"] == d_item["path"] for d in to_delete) and not any(k["path"] == d_item["path"] for k in to_keep):
+                    to_delete.append(d_item)
 
         for inferior_g in complete_groups[1:]:
             for f in inferior_g["files"]:
@@ -311,13 +336,18 @@ def generate_review_clean_plan(
         version_note = f"保留完整版本: {best['key']}"
 
         for ep in expected_range:
-            copies = [f for f in best["files"] if f["episode"] == ep]
+            copies = [f for f in best["files"] if ep in f.get("episodes", [f.get("episode")])]
+            if not copies:
+                continue
             copies.sort(key=rank_copy, reverse=True)
-            to_keep.append(copies[0])
+            chosen = copies[0]
+            if not any(k["path"] == chosen["path"] for k in to_keep):
+                to_keep.append(chosen)
             for dup in copies[1:]:
                 d_item = dict(dup)
                 d_item["reason"] = "同版本较旧或冗余副本"
-                to_delete.append(d_item)
+                if not any(d["path"] == d_item["path"] for d in to_delete) and not any(k["path"] == d_item["path"] for k in to_keep):
+                    to_delete.append(d_item)
 
         for k, g in groups.items():
             if k == best["key"]:
@@ -340,15 +370,18 @@ def generate_review_clean_plan(
             target_eps = expected_range
 
         for ep in target_eps:
-            copies = [p for p in valid_parsed if p["episode"] == ep]
+            copies = [p for p in valid_parsed if ep in p.get("episodes", [p.get("episode")])]
             if not copies:
                 continue
             copies.sort(key=rank_copy, reverse=True)
-            to_keep.append(copies[0])
+            chosen = copies[0]
+            if not any(k["path"] == chosen["path"] for k in to_keep):
+                to_keep.append(chosen)
             for dup in copies[1:]:
                 d_item = dict(dup)
                 d_item["reason"] = "同集较低画质或冗余副本"
-                to_delete.append(d_item)
+                if not any(d["path"] == d_item["path"] for d in to_delete) and not any(k["path"] == d_item["path"] for k in to_keep):
+                    to_delete.append(d_item)
 
     # 衍生花絮文件绝对保护保留
     for ef in extra_files:
@@ -381,6 +414,7 @@ def generate_review_clean_plan(
         matched_kept = [
             v for v in to_keep
             if stem.lower() == re.sub(r"\.[^.]+$", "", v.get("name", "")).lower()
+            or stem.lower() == re.sub(r"\.[^.]+$", "", v.get("name", "")).lower() + "-thumb"
             or clean_stem.lower() == re.sub(r"\.[^.]+$", "", v.get("name", "")).lower()
         ]
 
@@ -397,16 +431,41 @@ def generate_review_clean_plan(
                     "reason": reason,
                 })
         elif is_sub:
-            # 外挂字幕文件：只有明确唯一匹配本次要删除的视频且不匹配保留视频时才删除；无主字幕坚决安全保留防误删
-            if matched_deleted and not matched_kept:
-                to_delete.append({
-                    "episode": episode_from_any_name(f_name, season_number),
-                    "name": f_name,
-                    "path": f.get("path"),
-                    "modified": f.get("modified"),
-                    "size": f.get("size", 0),
-                    "reason": "对应已删视频的外挂字幕",
-                })
+            # 外挂字幕文件：遵循核心安全原则，默认绝对保护不删
+            # 即使对应视频被淘汰，外挂字幕也安全保留防误删，坚决不加入待删除清单
+            continue
+
+    # ── 终道收敛与绝对安全不变量校验 (P0-2) ───────────────────
+    # 1. 绝对互斥性：任何进入 to_keep 的文件绝对禁止出现在 to_delete 中！
+    kept_paths = {f["path"] for f in to_keep if f.get("path")}
+    dedup_to_delete: List[Dict[str, Any]] = []
+    seen_del_paths: Set[str] = set()
+
+    for d in to_delete:
+        d_path = d.get("path")
+        if not d_path or d_path in kept_paths or d_path in seen_del_paths:
+            continue
+        seen_del_paths.add(d_path)
+        dedup_to_delete.append(d)
+
+    # 2. 单调不减性：删除任何视频文件绝对不得导致正片集号覆盖减少！
+    final_to_delete: List[Dict[str, Any]] = []
+    current_kept_eps = set()
+    for k in to_keep:
+        current_kept_eps.update(k.get("episodes", [k.get("episode")]))
+
+    for d in dedup_to_delete:
+        # 如果是伴生刮削或字幕文件，直接保留在删除列表
+        d_eps = set(d.get("episodes", [d.get("episode")])) if d.get("episodes") or d.get("episode") else set()
+        if d_eps and not d_eps.issubset(current_kept_eps):
+            # 存在未被覆盖的唯一集号！具有绝对免死保护，坚决不能删，转入 to_keep！
+            to_keep.append(d)
+            kept_paths.add(d["path"])
+            current_kept_eps.update(d_eps)
+        else:
+            final_to_delete.append(d)
+
+    to_delete = final_to_delete
 
     can_clean = len(to_delete) > 0
     all_missing = [n for n in expected_range if n not in found_episodes]

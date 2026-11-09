@@ -84,7 +84,7 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.4</span>
+              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.5</span>
             </div>
             <!-- 完善后的命名 -->
             <p class="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">智能媒体库整理与归档工作台</p>
@@ -974,6 +974,16 @@
 
     // ── 2. 全局状态 ─────────────────────────────────────────
     let taskList = [];
+        function escapeHtml(str) {
+      if (str === null || str === undefined) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
     let currentTaskId = null;
     let currentCategory = 'archive';
     let configRoots = { source_root: '/115/Library_incs/nas', archive_root: '/115/Library_incs/nas.finish' };
@@ -1088,8 +1098,12 @@
         }));
         renderTaskList();
         if (taskList.length > 0) {
-          const exists = currentTaskId && taskList.some(t => t.id === currentTaskId);
-          selectTask(exists ? currentTaskId : taskList[0].id);
+          let savedId = null;
+          try { savedId = localStorage.getItem('mediaflow_selected_task_id'); } catch(e) {}
+          const targetId = (currentTaskId && taskList.some(t => t.id === currentTaskId)) ? currentTaskId :
+                           (savedId && taskList.some(t => t.id === savedId)) ? savedId :
+                           taskList[0].id;
+          selectTask(targetId);
         } else {
           clearTaskDetailView();
         }
@@ -1252,6 +1266,7 @@
 
     async function selectTask(taskId) {
       currentTaskId = taskId;
+      try { localStorage.setItem('mediaflow_selected_task_id', taskId); } catch(e) {}
       showTaskDetailView();
       renderTaskList();
 
@@ -1929,7 +1944,7 @@
               </div>
               <div class="min-w-0 space-y-1">
                 <div class="flex items-center gap-2 flex-wrap">
-                  <span class="text-sm font-bold text-slate-900 dark:text-white">${item.show}</span>
+                  <span class="text-sm font-bold text-slate-900 dark:text-white">${escapeHtml(item.show)}</span>
                   <span class="text-xs px-2 py-0.5 rounded-full bg-${badgeColor}-100 dark:bg-${badgeColor}-950/70 text-${badgeColor}-700 dark:text-${badgeColor}-400 font-semibold border border-${badgeColor}-300 dark:border-${badgeColor}-800">
                     ${item.season} (${item.statusText})
                   </span>
@@ -1937,12 +1952,12 @@
                   ${item.tmdbId ? `<span class="text-xs px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 font-mono">TMDB: ${item.tmdbId}</span>` : ''}
                 </div>
                 <div class="text-xs text-slate-500 dark:text-slate-400 font-mono flex flex-wrap gap-x-3">
-                  <span>${item.pathA || ''}</span>
-                  ${item.pathB ? `<span>${item.pathB}</span>` : ''}
+                  <span>${escapeHtml(item.pathA || '')}</span>
+                  ${item.pathB ? `<span>${escapeHtml(item.pathB)}</span>` : ''}
                 </div>
                 <div class="text-[11px] text-slate-600 dark:text-slate-400 flex items-center gap-2">
-                  <span class="text-${badgeColor}-600 dark:text-${badgeColor}-400 font-medium">👉 ${item.note}</span>
-                  ${item.dest ? `<span>• ${item.dest}</span>` : ''}
+                  <span class="text-${badgeColor}-600 dark:text-${badgeColor}-400 font-medium">👉 ${escapeHtml(item.note || '')}</span>
+                  ${item.dest ? `<span>• ${escapeHtml(item.dest)}</span>` : ''}
                 </div>
               </div>
             </div>
@@ -2046,7 +2061,7 @@
               <i class="fa-solid fa-circle-info"></i>
               <span>决策结论</span>
             </div>
-            <div class="text-slate-700 dark:text-slate-200">${p.version_note || p.reason}</div>
+            <div class="text-slate-700 dark:text-slate-200">${escapeHtml(p.version_note || p.reason || '')}</div>
           </div>`;
 
         // 保留文件
@@ -2059,7 +2074,7 @@
         if (p.to_keep && p.to_keep.length > 0) {
           html += p.to_keep.map(f => `
             <div class="flex items-center justify-between py-0.5 text-slate-700 dark:text-slate-300">
-              <span class="truncate flex-1" title="${f.name}">${f.name}</span>
+              <span class="truncate flex-1" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>
               <span class="text-emerald-600 dark:text-emerald-400 font-semibold flex-shrink-0 ml-2">${f.reason || '最佳画质'}</span>
             </div>
           `).join('');
@@ -2078,8 +2093,8 @@
         if (p.to_delete && p.to_delete.length > 0) {
           html += p.to_delete.map(f => `
             <div class="flex items-center justify-between py-0.5 text-slate-700 dark:text-slate-300">
-              <span class="truncate flex-1 text-red-600 dark:text-red-400" title="${f.name}">${f.name}</span>
-              <span class="text-slate-400 flex-shrink-0 ml-2 font-normal">${f.reason || '淘汰残卷'}</span>
+              <span class="truncate flex-1 text-red-600 dark:text-red-400" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>
+              <span class="text-slate-400 flex-shrink-0 ml-2 font-normal">${escapeHtml(f.reason || '淘汰残卷')}</span>
             </div>
           `).join('');
         } else {
@@ -2569,26 +2584,40 @@
           try {
             const res = await api('/api/moviepilot/download-gap-fill', {
               method: 'POST',
-              body: JSON.stringify({ record_ids: [item.id] })
+              body: JSON.stringify({ season_record_ids: [item.id], record_ids: [item.id] })
             });
-            const itemResult = (res.details && res.details.length > 0) ? res.details[0] : null;
-            if (itemResult) {
-              if (itemResult.success) {
+
+            if (res.ok === false || res.success === false) {
+              appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] ✗ 推送失败: 【${escapeHtml(item.name)}】${escapeHtml(res.message || '未找到合适资源')}</span>`);
+              return { success: false, reason: res.message };
+            }
+
+            const details = res.details || res.submitted || [];
+            if (details && details.length > 0) {
+              const successes = details.filter(d => d.success || d.status === 'success');
+              const failures = details.filter(d => !d.success && d.status !== 'success');
+
+              if (successes.length > 0) {
                 let extra = '';
-                if (itemResult.seeders) extra += ` (做种: ${itemResult.seeders}, 站点: ${itemResult.site || 'PT'})`;
-                if (itemResult.cleaned_transfers_count > 0) extra += ` | 自动解绑清理 ${itemResult.cleaned_transfers_count} 条旧整理记录`;
-                appendLog(`<span class="text-emerald-400 font-bold">[${getNowTimestamp()}] ✓ 推送成功: 【${item.name}】已推送到下载器: ${itemResult.torrent_title || ''}${extra}</span>`);
+                const maxSeeds = Math.max(...successes.map(d => Number(d.seeders || d.seeds || 0)));
+                if (maxSeeds > 0) extra += ` (做种: ${maxSeeds})`;
+                const cleanedTotal = successes.reduce((acc, d) => acc + (d.cleaned_transfers_count || d.cleared_transfer_records_count || 0), 0);
+                if (cleanedTotal > 0) extra += ` | 自动解绑清理 ${cleanedTotal} 条旧整理记录`;
+
+                if (failures.length > 0) {
+                  appendLog(`<span class="text-amber-400 font-bold">[${getNowTimestamp()}] ⚠️ 部分推送成功: 【${escapeHtml(item.name)}】成功 ${successes.length} 项，失败 ${failures.length} 项${extra}</span>`);
+                } else {
+                  appendLog(`<span class="text-emerald-400 font-bold">[${getNowTimestamp()}] ✓ 推送成功: 【${escapeHtml(item.name)}】共提交 ${successes.length} 个下载任务${extra}</span>`);
+                }
                 return { success: true };
-              } else if (itemResult.skipped) {
-                appendLog(`<span class="text-amber-400 font-semibold">[${getNowTimestamp()}] ⚠️ 暂缓推送: 【${item.name}】${itemResult.message || '未找到健康做种资源(做种≥2)'}</span>`);
-                return { success: false, skipped: true };
               } else {
-                appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] ✗ 推送失败: 【${item.name}】${itemResult.message || '未找到匹配资源'}</span>`);
-                return { success: false };
+                const failReason = (failures[0] && (failures[0].reason || failures[0].message)) || res.message || '未找到合适种子';
+                appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] ✗ 推送失败: 【${escapeHtml(item.name)}】(${escapeHtml(failReason)})</span>`);
+                return { success: false, reason: failReason };
               }
             } else {
-              appendLog(`<span class="text-slate-300">[${getNowTimestamp()}] ℹ️ 【${item.name}】${res.message || '处理完成'}</span>`);
-              return { success: true };
+              appendLog(`<span class="text-slate-300">[${getNowTimestamp()}] ℹ️ 【${escapeHtml(item.name)}】${escapeHtml(res.message || '处理完成')}</span>`);
+              return { success: res.ok === true };
             }
           } catch (err) {
             appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] ✗ 推送异常: 【${item.name}】${err.message}</span>`);
@@ -2640,32 +2669,32 @@
         const folders = data.folders || [];
 
         if (data.error) {
-          folderList.innerHTML = `<div class="p-4 text-center text-xs text-red-500"><i class="fa-solid fa-exclamation-circle mr-1"></i>${data.error}</div>`;
+          folderList.innerHTML = `<div class="p-4 text-center text-xs text-red-500"><i class="fa-solid fa-exclamation-circle mr-1"></i>${escapeHtml(data.error)}</div>`;
           return;
         }
 
         folderList.innerHTML = `
           <div class="px-2 py-1.5 mb-1 bg-slate-50 dark:bg-slate-900 text-slate-500 text-[11px] flex justify-between items-center rounded">
             <span>点击文件夹进入下级，或点击右侧按钮直接选定为初检目标</span>
-            <button onclick="pickCurrentFolder('${currentBrowsePath}')" class="px-2 py-0.5 rounded bg-indigo-600 text-white text-[10px] font-semibold hover:bg-indigo-700">
+            <button data-path="${encodeURIComponent(currentBrowsePath)}" onclick="pickCurrentFolder(decodeURIComponent(this.dataset.path))" class="px-2 py-0.5 rounded bg-indigo-600 text-white text-[10px] font-semibold hover:bg-indigo-700">
               选定当前整级目录
             </button>
           </div>
           ${folders.length === 0 ? '<div class="p-3 text-center text-xs text-slate-400">此目录下无子文件夹</div>' :
             folders.map(f => `
               <div class="flex items-center justify-between p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer transition group">
-                <div class="flex items-center space-x-2 flex-1 min-w-0" onclick="drillDownFolder('${f.path}')">
+                <div class="flex items-center space-x-2 flex-1 min-w-0" data-path="${encodeURIComponent(f.path)}" onclick="drillDownFolder(decodeURIComponent(this.dataset.path))">
                   <i class="fa-solid fa-folder text-amber-500 text-sm"></i>
-                  <span class="text-xs text-slate-700 dark:text-slate-200 font-medium truncate">${f.name}</span>
+                  <span class="text-xs text-slate-700 dark:text-slate-200 font-medium truncate">${escapeHtml(f.name)}</span>
                 </div>
-                <button onclick="pickCurrentFolder('${f.path}')" class="px-2.5 py-1 rounded bg-slate-100 dark:bg-slate-800 hover:bg-indigo-500 hover:text-white text-[11px] text-slate-600 dark:text-slate-300 font-medium transition">
+                <button data-path="${encodeURIComponent(f.path)}" onclick="pickCurrentFolder(decodeURIComponent(this.dataset.path))" class="px-2.5 py-1 rounded bg-slate-100 dark:bg-slate-800 hover:bg-indigo-500 hover:text-white text-[11px] text-slate-600 dark:text-slate-300 font-medium transition">
                   选定此项
                 </button>
               </div>
             `).join('')}
         `;
       } catch (e) {
-        folderList.innerHTML = `<div class="p-4 text-center text-xs text-red-500"><i class="fa-solid fa-exclamation-circle mr-1"></i>加载失败: ${e.message}</div>`;
+        folderList.innerHTML = `<div class="p-4 text-center text-xs text-red-500"><i class="fa-solid fa-exclamation-circle mr-1"></i>加载失败: ${escapeHtml(e.message)}</div>`;
       }
     }
 
@@ -2959,7 +2988,7 @@
 
             <div class="flex flex-col items-end space-y-2 flex-shrink-0">
               ${confBadge}
-              <button onclick="triggerDeleteSingleSub(${s.id}, '${s.name.replace(/'/g, "\\'")}')" class="text-slate-400 hover:text-red-500 text-xs p-1 transition" title="立即退订此条目">
+              <button onclick="triggerDeleteSingleSub(${s.id})" class="text-slate-400 hover:text-red-500 text-xs p-1 transition" title="立即退订此条目">
                 <i class="fa-solid fa-trash-can"></i>
               </button>
             </div>
@@ -2968,7 +2997,9 @@
       }).join('');
     }
 
-    async function triggerDeleteSingleSub(subId, name) {
+    async function triggerDeleteSingleSub(subId) {
+      const sub = allSubscriptions.find(s => s.id === subId);
+      const name = sub ? sub.name : `订阅 #${subId}`;
       if (!confirm(`确定在 MoviePilot 中退订【${name}】吗？\n此操作仅取消追更，本地已下载的影视文件不会被删除。`)) return;
       try {
         await api(`/api/moviepilot/subscriptions/${subId}`, { method: 'DELETE' });
@@ -3194,7 +3225,7 @@
           try {
             const res = await api('/api/moviepilot/subscriptions/batch-delete', {
               method: 'POST',
-              body: JSON.stringify({ sub_ids: [item.id] })
+              body: JSON.stringify({ sub_ids: [item.id], titles: [item.name] })
             });
             if (res.ok) {
               appendLog(`<span class="text-emerald-400 font-bold">[${getNowTimestamp()}] ✓ 退订成功: 【${item.name}】</span>`);

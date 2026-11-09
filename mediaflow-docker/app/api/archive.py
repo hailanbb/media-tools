@@ -43,6 +43,78 @@ class CalibrateEpisodesRequest(BaseModel):
     total_episodes: int
 
 
+
+async def _safe_cleanup_source_show_dir(
+    cd2: CloudDrive2Client,
+    show_path: str,
+    target_parent: str | None = None,
+) -> bool:
+    """源端剧集目录空壳安全清理门禁（F01 防空壳误删连带花絮/自定义目录）。
+
+    安全准则：
+    1. 强制实时刷新列出 show_path 下全部子项；
+    2. 如果存在任何子目录（无论是普通目录还是 Extras、Specials 等非正片季目录），绝对禁止删除剧集目录！
+    3. 如果存在任何正片或非正片视频文件，绝对禁止删除剧集目录！
+    4. 若有公共刮削资产（tvshow.nfo、poster.jpg 等）且提供了 target_parent，先安全迁移至归档目标。如果迁移过程中有任何一个文件失败，立即中止删除并返回 False！
+    5. 迁移后再次强制刷新，确认该目录下已完全为空（0 个子项），方可调用 delete_file(show_path)。
+    """
+    if not show_path or len(show_path.strip("/").split("/")) < 2:
+        return False
+
+    try:
+        source_items = await cd2.list_files(show_path, force_refresh=True)
+    except Exception as e:
+        log.warning("检查源剧集目录失败: %s - %s", show_path, e)
+        return False
+
+    subdirs = [f for f in source_items if f.get("isDirectory")]
+    if subdirs:
+        subdir_names = ", ".join(f.get("name", "") for f in subdirs[:3])
+        log.info("源剧集目录仍有子目录 (%s 等)，安全保留源剧集主目录: %s", subdir_names, show_path)
+        return False
+
+    videos = [f for f in source_items if not f.get("isDirectory") and is_video_file(f.get("name", ""))]
+    if videos:
+        log.info("源剧集目录仍有视频文件，安全保留源剧集主目录: %s", show_path)
+        return False
+
+    assets = [f for f in source_items if not f.get("isDirectory")]
+    if assets and target_parent:
+        migration_failed = False
+        for asset in assets:
+            asset_name = asset.get("name")
+            if not asset_name:
+                continue
+            asset_path = f"{show_path}/{asset_name}"
+            try:
+                mv_res = await cd2.move_file(asset_path, target_parent)
+                if not mv_res.get("success", True):
+                    log.warning("迁移公共资产 %s 失败，中止源剧集删除", asset_name)
+                    migration_failed = True
+                    break
+            except Exception as mv_err:
+                log.warning("迁移公共资产 %s 异常: %s，中止源剧集删除", asset_name, mv_err)
+                migration_failed = True
+                break
+
+        if migration_failed:
+            log.warning("公共资产迁移未完全成功，安全保留源剧集目录: %s", show_path)
+            return False
+
+    try:
+        final_check = await cd2.list_files(show_path, force_refresh=True)
+        if final_check:
+            log.info("源剧集目录尚有残留项目 (%d 个)，保留主目录: %s", len(final_check), show_path)
+            return False
+
+        await cd2.delete_file(show_path)
+        log.info("源端全剧已无其余季度与任何子目录/文件，已彻底安全清理源端空壳目录: %s", show_path)
+        return True
+    except Exception as del_err:
+        log.warning("清理源剧集空壳目录失败: %s - %s", show_path, del_err)
+        return False
+
+
 async def _refresh_task_summary(task_id: str, db: AsyncSession) -> None:
     """级联刷新关联 Task 的汇总统计 summary_json。"""
     task = await db.get(Task, task_id)
@@ -123,8 +195,11 @@ async def execute_archive(
                 # 【tv-workflow-win 工业级保护：同季冲突检测】
                 try:
                     target_parent_files = await cd2.list_files(target_parent, force_refresh=True)
-                except Exception:
-                    target_parent_files = []
+                except Exception as list_err:
+                    err_msg = f"{rec.show_name} S{rec.season_number:02d}: 读取目标目录失败 ({list_err})，安全拦截归档"
+                    log.error(err_msg)
+                    errors.append(err_msg)
+                    continue
 
                 existing_season = next(
                     (f for f in target_parent_files if f.get("isDirectory") and (
@@ -134,13 +209,122 @@ async def execute_archive(
                     None
                 )
                 if existing_season:
-                    err_msg = f"{rec.show_name} S{rec.season_number:02d}: 同季冲突，归档库已存在同季目录 \"{existing_season.get('name')}\"，已安全拦截"
-                    log.warning(err_msg)
-                    errors.append(err_msg)
-                    rec.status = "conflict"
-                    rec.status_detail = f"同季冲突：归档目标已存在同季目录 {existing_season.get('name')}，整季暂缓移动"
-                    affected_tasks.add(rec.task_id)
-                    continue
+                    existing_season_path = existing_season.get("path") or f"{target_parent}/{existing_season.get('name')}"
+                    log.info("发现目标归档库已存在同季目录: %s，启动季内文件级增量合并通道 (F08)", existing_season_path)
+
+                    try:
+                        src_season_files = await cd2.list_files(source_season_path, force_refresh=True)
+                        dest_season_files = await cd2.list_files(existing_season_path, force_refresh=True)
+                        dest_file_names = {f.get("name", "").lower() for f in dest_season_files if not f.get("isDirectory")}
+
+                        # 检查源端是否有与目标端同名的视频文件（发生真实文件名冲突）
+                        duplicate_videos = [
+                            f.get("name") for f in src_season_files
+                            if not f.get("isDirectory") and is_video_file(f.get("name", "")) and f.get("name", "").lower() in dest_file_names
+                        ]
+
+                        if duplicate_videos:
+                            err_msg = f"{rec.show_name} S{rec.season_number:02d}: 同季冲突，归档库已存在同名视频文件 ({duplicate_videos[0]})，已安全拦截"
+                            log.warning(err_msg)
+                            errors.append(err_msg)
+                            rec.status = "conflict"
+                            rec.status_detail = f"同季文件冲突：目标目录已存在同名视频 {duplicate_videos[0]}，整季暂缓合并"
+                            affected_tasks.add(rec.task_id)
+                            continue
+
+                        # 无同名视频冲突：逐一将源端增量文件移动到目标同季目录
+                        # 保护性策略 (P1-3): 目标端已存在同名的非视频资产（字幕/NFO/图片）严禁覆盖，安全保留目标端已有健康资产
+                        merged_files = []
+                        for sf in src_season_files:
+                            if sf.get("isDirectory"):
+                                continue
+                            sf_name = sf.get("name")
+                            if not sf_name:
+                                continue
+                            if sf_name.lower() in dest_file_names:
+                                # 目标端已存在同名非视频文件，跳过移动以保护目标库健康资产
+                                log.info("目标库已存在同名非视频资产 %s，安全保留目标端，跳过覆盖", sf_name)
+                                continue
+
+                            mv_res = await cd2.move_file(sf.get("path"), existing_season_path)
+                            if mv_res.get("success", True):
+                                merged_files.append(sf_name)
+                            else:
+                                log.warning("增量迁移文件 %s 失败: %s", sf_name, mv_res.get("errorMessage"))
+
+                        # 检查源端剩余文件
+                        rem_in_src = []
+                        try:
+                            rem_in_src = await cd2.list_files(source_season_path, force_refresh=True)
+                            # 如果剩余的仅为刚才跳过的同名冗余伴生，安全清理它们
+                            if rem_in_src and all(rf.get("name", "").lower() in dest_file_names for rf in rem_in_src if not rf.get("isDirectory")):
+                                for rf in rem_in_src:
+                                    if not rf.get("isDirectory"):
+                                        try:
+                                            await cd2.delete_file(rf.get("path"))
+                                        except Exception:
+                                            pass
+                                rem_in_src = await cd2.list_files(source_season_path, force_refresh=True)
+
+                            if not rem_in_src:
+                                await cd2.delete_file(source_season_path)
+                                log.info("源端季目录已全部增量合并，已安全清理源季空壳: %s", source_season_path)
+                        except Exception as del_season_err:
+                            log.warning("清理已合并源季目录失败: %s", del_season_err)
+
+                        # P1-2 修复：严格核对移动结果
+                        src_valid_files = [f for f in src_season_files if not f.get("isDirectory")]
+                        if not merged_files and src_valid_files:
+                            err_msg = f"{rec.show_name} S{rec.season_number:02d}: 增量合并失败，未能成功移动任何文件"
+                            log.error(err_msg)
+                            errors.append(err_msg)
+                            rec.status = "failed"
+                            rec.status_detail = err_msg
+                            affected_tasks.add(rec.task_id)
+                            continue
+
+                        if rem_in_src:
+                            # 仍有未移动成功的文件残留，标记为部分归档，不增加全局成功计数
+                            err_msg = f"{rec.show_name} S{rec.season_number:02d}: 增量合并部分成功，已移动 {len(merged_files)} 个文件，源端仍残留 {len(rem_in_src)} 项，支持重试"
+                            log.warning(err_msg)
+                            errors.append(err_msg)
+                            rec.status = "review_needed"
+                            rec.status_detail = err_msg
+                            affected_tasks.add(rec.task_id)
+                            continue
+
+                        success_count += 1
+                        rec.status = "archived"
+                        rec.status_detail = f"已成功增量合并 {len(merged_files)} 个文件至 {existing_season_path}"
+                        rec.archive_target_path = existing_season_path
+                        affected_tasks.add(rec.task_id)
+
+                        op_log = OperationLog(
+                            task_id=rec.task_id,
+                            season_record_id=rec.id,
+                            action="archive_incremental_merge",
+                            status="completed",
+                            detail_json=json.dumps({
+                                "show": rec.show_name,
+                                "season": rec.season_number,
+                                "source": source_season_path,
+                                "target": existing_season_path,
+                                "merged_files_count": len(merged_files),
+                            }, ensure_ascii=False),
+                        )
+                        db.add(op_log)
+
+                        # 源剧集根目录清理门禁
+                        if rec.show_path and rec.show_path != source_season_path:
+                            await _safe_cleanup_source_show_dir(cd2, rec.show_path, target_parent)
+
+                        continue
+
+                    except Exception as merge_err:
+                        err_msg = f"{rec.show_name} S{rec.season_number:02d}: 增量合并失败 - {merge_err}"
+                        log.error(err_msg)
+                        errors.append(err_msg)
+                        continue
 
                 log.info("执行归档迁移: %s -> %s", source_season_path, target_parent)
 
@@ -166,36 +350,9 @@ async def execute_archive(
                     )
                     db.add(op_log)
 
-                    # 【源端零残留与公共资产完备归档】
+                    # 【源端零残留与公共资产完备归档 (F01 强化安全门禁)】
                     if rec.show_path and rec.show_path != source_season_path:
-                        try:
-                            source_rem = await cd2.list_files(rec.show_path, force_refresh=True)
-                            rem_seasons = [
-                                f for f in source_rem
-                                if f.get("isDirectory") and _parse_season_number(f.get("name", "")) is not None
-                            ]
-                            rem_videos = [
-                                f for f in source_rem
-                                if not f.get("isDirectory") and is_video_file(f.get("name", ""))
-                            ]
-                            if not rem_seasons and not rem_videos:
-                                # 源端已无其他季和视频：将公共削刮资产（tvshow.nfo、海报等）迁移至归档库
-                                for asset in source_rem:
-                                    asset_name = asset.get("name")
-                                    if not asset.get("isDirectory") and asset_name:
-                                        asset_path = f"{rec.show_path}/{asset_name}"
-                                        try:
-                                            await cd2.move_file(asset_path, target_parent)
-                                        except Exception as mv_err:
-                                            log.warning("迁移公共资产 %s 到归档库失败: %s", asset_name, mv_err)
-                                
-                                # 公共资产已转移完毕，源端剧集目录已彻底空壳，执行彻底物理删除，不留任何残留
-                                await cd2.delete_file(rec.show_path)
-                                log.info("源端全剧已无其余季度，公共削刮资产已完整迁移至归档库，已彻底删除源端剧集目录: %s", rec.show_path)
-                            else:
-                                log.info("源端剧集仍有其他季度或视频在连载，暂保留源端剧集主目录: %s", rec.show_path)
-                        except Exception as rem_err:
-                            log.warning("检查清理源剧集空壳失败: %s", rem_err)
+                        await _safe_cleanup_source_show_dir(cd2, rec.show_path, target_parent)
                 else:
                     err_msg = move_result.get("errorMessage", "未知错误")
                     errors.append(f"{rec.show_name} S{rec.season_number:02d}: {err_msg}")
@@ -366,11 +523,20 @@ async def clean_duplicates(
     finally:
         await cd2.close()
 
+    has_deleted = (total_deleted_videos > 0 or total_deleted_orphans > 0)
+    # P1-9 修复：若没有成功删除任何文件且存在错误/异常，绝对不能报告成功
+    if not has_deleted and errors:
+        is_ok = False
+    elif is_all_failed := (len(errors) == len(records) and not has_deleted):
+        is_ok = False
+    else:
+        is_ok = True
+
     msg = f"清理完成：成功删除 {total_deleted_videos} 个冗余视频，清理 {total_deleted_orphans} 个伴生孤儿文件"
     if errors:
         msg += f"，遇到 {len(errors)} 项提醒: {'; '.join(errors[:2])}"
 
-    return StatusResponse(ok=True, message=msg)
+    return StatusResponse(ok=is_ok, message=msg)
 
 
 # ---------- 试跑预览与源端冗余清理 ----------
@@ -491,9 +657,128 @@ async def clean_source_redundant(
             source_season_path = rec.season_path
             show_path = rec.show_path
 
+            # 【P0-1 & P1-1: 物理安全门禁：状态、路径隔离、两端集号与独有附件覆盖核验】
+            if rec.status != "already_archived":
+                err_msg = f"{rec.show_name} S{rec.season_number:02d}: 当前状态为 {rec.status}，非已归档状态，安全拦截源端删除！"
+                log.warning(err_msg)
+                errors.append(err_msg)
+                continue
+
+            import posixpath
+            settings = get_settings()
+            norm_source_root = posixpath.normpath(settings.source_root.rstrip("/")) if settings.source_root else ""
+            norm_archive_root = posixpath.normpath(settings.archive_root.rstrip("/")) if settings.archive_root else ""
+            norm_src = posixpath.normpath(source_season_path)
+
+            # 门禁 1: 源季路径必须为受控源根目录的严格子目录
+            if not norm_source_root or not (norm_src.startswith(norm_source_root + "/") and norm_src != norm_source_root):
+                err_msg = f"{rec.show_name} S{rec.season_number:02d}: 源季路径非受控源根严格子目录 ({source_season_path})，拦截删除！"
+                log.error(err_msg)
+                errors.append(err_msg)
+                continue
+
+            archive_target = rec.archive_target_path
+            if not archive_target:
+                if norm_src.startswith(norm_source_root + "/"):
+                    relative = norm_src[len(norm_source_root):]
+                    archive_target = norm_archive_root + relative
+                else:
+                    err_msg = f"{rec.show_name} S{rec.season_number:02d}: 无法安全推导归档目标路径，需要重新初检，拦截删除！"
+                    log.warning(err_msg)
+                    errors.append(err_msg)
+                    continue
+
+            norm_target = posixpath.normpath(archive_target)
+
+            # 门禁 2: 目标路径必须属于归档库根目录，且源与目标路径绝对不能重叠
+            if not norm_archive_root or not (norm_target.startswith(norm_archive_root + "/") and norm_target != norm_archive_root):
+                err_msg = f"{rec.show_name} S{rec.season_number:02d}: 归档目标非受控归档根严格子目录 ({archive_target})，拦截删除！"
+                log.error(err_msg)
+                errors.append(err_msg)
+                continue
+
+            if norm_src == norm_target or norm_src.startswith(norm_target + "/") or norm_target.startswith(norm_src + "/"):
+                err_msg = f"{rec.show_name} S{rec.season_number:02d}: 严重危险拦截：源路径与目标路径重叠 ({norm_src} vs {norm_target})，拒绝删除！"
+                log.error(err_msg)
+                errors.append(err_msg)
+                continue
+
+            # 门禁 3: 重新实时获取源端与目标端文件清单，执行集号与独有附件覆盖比对
             try:
-                # 1. 删除源端季目录
-                log.info("正在清理源端冗余季目录: %s", source_season_path)
+                src_files = await cd2.list_files(source_season_path, force_refresh=True)
+                target_files = await cd2.list_files(archive_target, force_refresh=True)
+
+                src_video_eps: set[int] = set()
+                src_subs: list[dict] = []
+                unrecognized_videos: list[dict] = []
+                for sf in src_files:
+                    if sf.get("isDirectory"):
+                        continue
+                    sf_name = sf.get("name", "")
+                    if is_video_file(sf_name):
+                        p_sf = parse_episode(sf_name, sf.get("path", ""), sf.get("size", 0))
+                        if not p_sf.is_extra:
+                            if p_sf.episode_numbers:
+                                src_video_eps.update(p_sf.episode_numbers)
+                            else:
+                                unrecognized_videos.append(sf)
+                    elif is_subtitle_file(sf_name):
+                        src_subs.append(sf)
+
+                target_video_eps: set[int] = set()
+                target_sub_names: set[str] = set()
+                for tf in target_files:
+                    if tf.get("isDirectory"):
+                        continue
+                    tf_name = tf.get("name", "")
+                    if is_video_file(tf_name):
+                        p_tf = parse_episode(tf_name, tf.get("path", ""), tf.get("size", 0))
+                        if not p_tf.is_extra:
+                            target_video_eps.update(p_tf.episode_numbers)
+                    elif is_subtitle_file(tf_name):
+                        target_sub_names.add(tf_name.lower())
+
+                # 核验 A: 源端若未识别到任何有效正片集号，或含有无法识别集号的正片视频，绝对拦截删除（源集数与记录不变）
+                if unrecognized_videos:
+                    unrec_names = [f.get("name", "") for f in unrecognized_videos[:2]]
+                    err_msg = f"{rec.show_name} S{rec.season_number:02d}: 源端含有未识别集号的正片视频 ({unrec_names})，证据不足拦截删除！"
+                    log.warning(err_msg)
+                    errors.append(err_msg)
+                    continue
+
+                if not src_video_eps:
+                    err_msg = f"{rec.show_name} S{rec.season_number:02d}: 源端未识别出任何正片集号，证据不足拦截删除！"
+                    log.warning(err_msg)
+                    errors.append(err_msg)
+                    continue
+
+                # 核验 B: 目标端必须完整包含源端所有正片集号 (source_eps ⊆ target_eps)，证据不足坚决拦截（源集数与记录不变）
+                uncovered_eps = sorted(src_video_eps - target_video_eps)
+                if uncovered_eps:
+                    err_msg = f"{rec.show_name} S{rec.season_number:02d}: 源端含有归档库未包含的集数 {uncovered_eps}，拦截删除！"
+                    log.warning(err_msg)
+                    errors.append(err_msg)
+                    continue
+
+                # 核验 C: 源端独有外挂字幕自动迁移至目标库
+                for sub in src_subs:
+                    s_name = sub.get("name", "")
+                    if s_name.lower() not in target_sub_names:
+                        try:
+                            await cd2.move_file(sub.get("path"), archive_target)
+                            log.info("源端残留清理前已安全迁移独有字幕: %s -> %s", s_name, archive_target)
+                        except Exception as sub_mv_err:
+                            log.warning("迁移独有字幕失败 (%s): %s", s_name, sub_mv_err)
+
+            except Exception as chk_err:
+                err_msg = f"{rec.show_name} S{rec.season_number:02d}: 校验两端文件清单失败 ({chk_err})，安全拦截源端删除！"
+                log.warning(err_msg)
+                errors.append(err_msg)
+                continue
+
+            try:
+                # 1. 安全删除源端冗余季目录
+                log.info("已通过全部覆盖门禁，正在安全清理源端冗余季目录: %s", source_season_path)
                 await cd2.delete_file(source_season_path)
                 success_count += 1
                 rec.status = "cleaned_redundant"
@@ -513,23 +798,10 @@ async def clean_source_redundant(
                 )
                 db.add(op_log)
 
-                # 2. 检查源剧集目录是否为空壳
+                # 2. 检查源剧集目录是否为空壳 (F01 强化门禁)
                 if show_path and show_path != source_season_path:
-                    try:
-                        rem_items = await cd2.list_files(show_path, force_refresh=True)
-                        rem_seasons = [
-                            f for f in rem_items
-                            if f.get("isDirectory") and _parse_season_number(f.get("name", "")) is not None
-                        ]
-                        rem_videos = [
-                            f for f in rem_items
-                            if not f.get("isDirectory") and is_video_file(f.get("name", ""))
-                        ]
-                        if not rem_seasons and not rem_videos:
-                            await cd2.delete_file(show_path)
-                            log.info("源端剧集已无其他季与视频，已自动清理源剧集空壳: %s", show_path)
-                    except Exception as show_err:
-                        log.warning("检查清理源剧集空壳失败: %s", show_err)
+                    target_parent = archive_target.rsplit("/", 1)[0] if "/" in archive_target else None
+                    await _safe_cleanup_source_show_dir(cd2, show_path, target_parent)
 
             except Exception as e:
                 err_msg = f"{rec.show_name} S{rec.season_number:02d}: 清理失败 - {str(e)[:150]}"
@@ -560,6 +832,10 @@ async def calibrate_episodes(
     rec = await db.get(SeasonRecord, body.season_record_id)
     if not rec:
         return StatusResponse(ok=False, message="剧季记录不存在")
+
+    # SCAN-08 安全门禁：总集数必须大于 0，非法输入明确拒绝
+    if body.total_episodes is None or body.total_episodes <= 0:
+        return StatusResponse(ok=False, message=f"非法总集数 ({body.total_episodes})，总集数必须为大于 0 的正整数")
 
     old_total = rec.total_episodes
     rec.total_episodes = body.total_episodes
@@ -609,10 +885,29 @@ async def delete_source_show(
     if not show_path or len(show_path.strip("/").split("/")) < 2:
         return StatusResponse(ok=False, message=f"非法或不安全的剧集源路径: {show_path}")
 
+    import posixpath
     settings = get_settings()
+    norm_show_path = posixpath.normpath(show_path)
+
+    # 安全红线 1: 绝对禁止将根目录或顶层作为剧集删除
+    if not norm_show_path or norm_show_path in ("/", ".", "..") or len(norm_show_path.strip("/").split("/")) < 2:
+        return StatusResponse(ok=False, message=f"非法或危险的剧集源路径: {show_path}")
+
+    # 安全红线 2: 绝对禁止删除配置的源根目录自身 (P0-3)
     source_root = settings.source_root.rstrip("/")
-    if source_root and not show_path.startswith(source_root):
-        return StatusResponse(ok=False, message=f"目标路径不在受控源目录下: {show_path}")
+    norm_source_root = posixpath.normpath(source_root) if source_root else ""
+    if norm_source_root:
+        if norm_show_path == norm_source_root:
+            return StatusResponse(ok=False, message=f"严重危险拦截：禁止删除受控源根目录本身 ({show_path})！")
+        if not norm_show_path.startswith(norm_source_root + "/"):
+            return StatusResponse(ok=False, message=f"目标路径不在受控源目录下: {show_path}")
+
+    # 安全红线 3: 绝对禁止将归档根目录及其子项作为源端删除
+    archive_root = settings.archive_root.rstrip("/")
+    norm_archive_root = posixpath.normpath(archive_root) if archive_root else ""
+    if norm_archive_root:
+        if norm_show_path == norm_archive_root or norm_show_path.startswith(norm_archive_root + "/"):
+            return StatusResponse(ok=False, message=f"严重危险拦截：目标路径属于归档库根目录或其子路径，严禁删除: {show_path}")
 
     cd2 = CloudDrive2Client()
     try:
@@ -641,17 +936,17 @@ async def delete_source_show(
         await _refresh_task_summary(task_id, db)
         await db.commit()
 
-        # 4. 记录审计日志
+        # 4. 记录审计日志 (F04 修复字段模型定义)
         op_log = OperationLog(
             task_id=task_id,
             season_record_id=rec.id,
-            operation_type="delete_source_show",
+            action="delete_source_show",
             status="completed",
-            details_json=json.dumps({
+            detail_json=json.dumps({
                 "show_name": rec.show_name,
                 "deleted_show_path": show_path,
                 "refreshed_parent": parent_dir,
-            }),
+            }, ensure_ascii=False),
         )
         db.add(op_log)
         await db.commit()

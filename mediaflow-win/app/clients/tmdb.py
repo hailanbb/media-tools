@@ -62,6 +62,14 @@ class TMDBClient:
             return data.get("results", [])
         return []
 
+    async def verify_connectivity(self) -> bool:
+        """真实探测 TMDB API 连通性 (P2)."""
+        try:
+            data = await self._get("/configuration")
+            return isinstance(data, dict) and bool(data)
+        except Exception:
+            return False
+
     async def close(self) -> None:
         """关闭底层 HTTP 连接。"""
         await self._client.aclose()

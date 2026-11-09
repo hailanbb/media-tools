@@ -202,7 +202,14 @@ async def execute_gap_fill_download(
     records = list(res.scalars().all())
 
     if not records:
-        return {"success": False, "message": "未找到匹配的剧集季度记录", "submitted": []}
+        return {
+            "ok": False,
+            "success": False,
+            "message": "未找到匹配的剧集季度记录",
+            "submitted": [],
+            "details": [],
+            "errors": ["未找到匹配的剧集季度记录"],
+        }
 
     mp = MoviePilotClient()
     submitted_results: list[dict[str, Any]] = []
@@ -414,10 +421,25 @@ async def execute_gap_fill_download(
     if errors:
         summary_msg += f"，遇到 {len(errors)} 项提醒: {'; '.join(errors[:2])}"
 
+    # F03 契约增强：同时提供 details 与 submitted，双向兼容前端读取
+    details_list = [
+        {
+            "success": s["status"] == "success",
+            "seeders": s.get("seeds", 0),
+            "reason": s.get("plan_desc") or s.get("message", ""),
+            "show_name": s.get("show_name", ""),
+            "title": s.get("title", ""),
+            "site": s.get("site", ""),
+            "message": s.get("message", ""),
+        }
+        for s in submitted_results
+    ]
+
     return {
         "ok": success_count > 0,
         "message": summary_msg,
         "submitted": submitted_results,
+        "details": details_list,
         "total_cleared_transfer_records": total_cleared,
         "errors": errors,
     }

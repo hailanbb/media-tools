@@ -90,9 +90,13 @@ async def auth_middleware(request: Request, call_next):
     """
     if settings.auth_token:
         path = request.url.path
-        # 白名单
-        skip = path.startswith(("/docs", "/openapi.json", "/api/system/health"))
-        if not skip and not path.endswith((".html", ".css", ".js", ".ico", ".png", ".svg")):
+        # 白名单：首页、静态文件、文档与健康检查放行
+        is_public = (
+            path in ("/", "/index.html", "/favicon.ico")
+            or path.startswith(("/static/", "/docs", "/openapi.json", "/api/system/health"))
+            or path.endswith((".html", ".css", ".js", ".ico", ".png", ".svg", ".woff", ".woff2"))
+        )
+        if not is_public:
             auth_header = request.headers.get("Authorization", "")
             if auth_header != f"Bearer {settings.auth_token}":
                 return JSONResponse(status_code=401, content={"detail": "未授权"})

@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.clients.moviepilot import MoviePilotClient
 from app.config import get_settings
 from app.core.subscription_cleaner import diagnose_subscription, evaluate_subscriptions
+import json
 import logging
 import re
 from typing import Any
@@ -31,6 +32,7 @@ def _check_mp_configured() -> None:
 
 class BatchDeleteSubscriptionsRequest(BaseModel):
     sub_ids: list[int]
+    titles: list[str] | None = None
 
 
 class SubscriptionCleanPreviewRequest(BaseModel):
@@ -205,25 +207,60 @@ async def preview_subscription_cleanup(body: SubscriptionCleanPreviewRequest) ->
 
 
 @router.post("/subscriptions/batch-delete", response_model=StatusResponse)
-async def batch_delete_subscriptions(body: BatchDeleteSubscriptionsRequest) -> StatusResponse:
-    """批量取消指定订阅。"""
+async def batch_delete_subscriptions(
+    body: BatchDeleteSubscriptionsRequest,
+    db: AsyncSession = Depends(get_db),
+) -> StatusResponse:
+    """批量取消指定订阅（自动关联剧名并写入审计日志）。"""
     if not body.sub_ids:
         return StatusResponse(ok=False, message="未选择任何订阅")
 
     _check_mp_configured()
+    from app.models.operation import OperationLog
     mp = MoviePilotClient()
     success_count = 0
     fail_count = 0
     errors: list[str] = []
 
     try:
-        for sid in body.sub_ids:
+        # 获取当前订阅列表建立 id -> name 映射
+        sub_name_map: dict[int, str] = {}
+        try:
+            current_subs = await mp.list_subscriptions()
+            for cs in current_subs:
+                cs_id = cs.get("id")
+                if cs_id is not None:
+                    sub_name_map[int(cs_id)] = cs.get("name") or cs.get("title") or ""
+        except Exception as map_err:
+            log.warning("获取订阅列表映射失败: %s", map_err)
+
+        for idx, sid in enumerate(body.sub_ids):
+            title = (
+                sub_name_map.get(sid)
+                or (body.titles[idx] if body.titles and idx < len(body.titles) else f"订阅#{sid}")
+            )
+            mp_deleted = False
             try:
                 await mp.delete_subscription(sid)
+                mp_deleted = True
+                op_log = OperationLog(
+                    action="unsubscribe",
+                    status="completed",
+                    detail_json=json.dumps({"sub_id": sid, "title": title}, ensure_ascii=False),
+                )
+                db.add(op_log)
                 success_count += 1
             except Exception as e:
-                fail_count += 1
-                errors.append(f"退订 {sid} 失败: {e}")
+                if mp_deleted:
+                    # MP 已成功退订，但本地数据库审计写入异常，避免用户误判未完成而重复提交
+                    success_count += 1
+                    errors.append(f"退订 {title} 在 MP 已生效，但本地审计日志写入失败: {e}")
+                else:
+                    fail_count += 1
+                    errors.append(f"退订 {title} 失败: {e}")
+
+        if success_count > 0:
+            await db.commit()
 
         msg = f"批量清理完成：成功退订 {success_count} 项"
         if fail_count > 0:
@@ -270,10 +307,48 @@ async def list_transfer_queue() -> list[dict]:
 
 @router.post("/transfer-repair/{item_id}", response_model=StatusResponse)
 async def repair_transfer(item_id: str) -> StatusResponse:
-    """修复卡住的转移任务 — 重发手动转移。"""
+    """修复卡住的转移任务 — 真正向 MoviePilot 发起手动转移重试。"""
     _check_mp_configured()
-    # TODO: 根据 item_id 获取源路径后调用 manual_transfer
-    return StatusResponse(ok=True, message=f"转移任务 {item_id} 修复已提交")
+    mp = MoviePilotClient()
+    try:
+        # 1. 从当前转移队列中定位任务对应的源路径
+        queue = await mp.get_transfer_queue()
+        matched = None
+        if isinstance(queue, list):
+            for it in queue:
+                if str(it.get("id")) == str(item_id) or str(it.get("item_id")) == str(item_id):
+                    matched = it
+                    break
+
+        source_path = None
+        if matched:
+            source_path = (
+                matched.get("source_path")
+                or matched.get("src")
+                or matched.get("path")
+                or matched.get("file_path")
+                or matched.get("title")
+            )
+
+        if not source_path:
+            return StatusResponse(
+                ok=False,
+                message=f"未能在 MoviePilot 队列中找到任务 #{item_id} 的原始路径，建议在 MoviePilot 后台查看",
+            )
+
+        # 2. 真实调用 MoviePilot 手动转移重试
+        res = await mp.manual_transfer(source_path=source_path)
+        success = res.get("success", True) if isinstance(res, dict) else True
+        msg = (
+            res.get("message")
+            if isinstance(res, dict) and res.get("message")
+            else f"已向 MoviePilot 提交任务 #{item_id} 重新转移: {source_path}"
+        )
+        return StatusResponse(ok=bool(success), message=msg)
+    except Exception as e:
+        return StatusResponse(ok=False, message=f"发起转移修复失败: {e}")
+    finally:
+        await mp.close()
 
 
 # ---------- 资源搜索与下载 ----------
@@ -442,7 +517,11 @@ async def list_active_downloads() -> list[dict]:
 # ---------- 智能补缺下载 ----------
 
 class _GapFillRequest(BaseModel):
-    season_record_ids: list[str]
+    season_record_ids: list[str] = []
+    record_ids: list[str] = []
+
+    def get_target_ids(self) -> list[str]:
+        return self.season_record_ids or self.record_ids
 
 
 @router.post("/download-gap-fill")
@@ -452,11 +531,12 @@ async def download_gap_fill(
 ) -> dict:
     """针对选中的季度记录，自动从 MoviePilot 搜索做种≥2的最佳资源并推送下载。"""
     _check_mp_configured()
-    if not body.season_record_ids:
+    target_ids = body.get_target_ids()
+    if not target_ids:
         return {"ok": False, "message": "未选择任何需要补缺的剧集季度"}
 
     from app.services.download_service import execute_gap_fill_download
     try:
-        return await execute_gap_fill_download(body.season_record_ids, db)
+        return await execute_gap_fill_download(target_ids, db)
     except Exception as e:
         return {"ok": False, "message": f"补缺推送异常: {str(e)[:200]}", "errors": [str(e)]}
