@@ -165,7 +165,7 @@
           <h2 class="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
             <i class="fa-solid fa-list-check text-indigo-500"></i>
             初检任务列表
-            <span class="px-1.5 py-0.2 rounded-full bg-slate-200 dark:bg-slate-800 text-[10px] text-slate-700 dark:text-slate-300 font-mono" id="taskCountBadge">6</span>
+            <span class="px-1.5 py-0.2 rounded-full bg-slate-200 dark:bg-slate-800 text-[10px] text-slate-700 dark:text-slate-300 font-mono" id="taskCountBadge">0</span>
           </h2>
           <!-- 批量清理已完成任务 -->
           <button onclick="clearCompletedTasks()" class="text-[11px] text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 transition" title="清理已完结任务">
@@ -239,14 +239,14 @@
             <div>
               <div class="flex items-center gap-2">
                 <span class="text-xs font-semibold px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">当前任务</span>
-                <h2 class="text-lg font-bold text-slate-900 dark:text-white tracking-tight" id="currentTaskTitle">
-                  奔跑吧！兄弟 (2014) [tmdbid=98031]
+                <h2 class="text-base sm:text-lg font-bold text-slate-900 dark:text-white tracking-tight break-all" id="currentTaskTitle">
+                  <span class="text-slate-400 dark:text-slate-500 font-normal text-sm">正在加载当前任务...</span>
                 </h2>
               </div>
               <div class="flex flex-wrap items-center gap-y-1 gap-x-4 mt-1.5 text-xs text-slate-500 dark:text-slate-400">
-                <span class="flex items-center gap-1"><i class="fa-regular fa-folder text-indigo-500"></i> 初检目录: <code class="text-slate-700 dark:text-slate-300" id="currentTaskPath">/115/Library_incs/nas/电视剧/综艺/</code></span>
-                <span>• 绑定: TMDB (98031)</span>
-                <span>• 检查时间: 2026-10-27 15:10</span>
+                <span class="flex items-center gap-1"><i class="fa-regular fa-folder text-indigo-500"></i> 初检目录: <code class="text-slate-700 dark:text-slate-300" id="currentTaskPath">-</code></span>
+                <span id="currentTaskBinding"></span>
+                <span id="currentTaskCheckTime"></span>
               </div>
             </div>
 
@@ -1195,9 +1195,13 @@
         function clearTaskDetailView() {
       currentTaskId = null;
       const titleEl = document.getElementById('currentTaskTitle');
-      if (titleEl) titleEl.textContent = '暂无选中的初检任务';
+      if (titleEl) titleEl.textContent = '暂无初检任务，请点击上方「新建」';
       const pathEl = document.getElementById('currentTaskPath');
       if (pathEl) pathEl.textContent = '-';
+      const bindingEl = document.getElementById('currentTaskBinding');
+      if (bindingEl) bindingEl.textContent = '';
+      const checkTimeEl = document.getElementById('currentTaskCheckTime');
+      if (checkTimeEl) checkTimeEl.textContent = '';
 
       const catIds = ['catCountArchive', 'catCountReview', 'catCountAnomaly', 'catCountDownload', 'catCountAiring'];
       catIds.forEach(id => {
@@ -1256,6 +1260,15 @@
 
       document.getElementById('currentTaskTitle').textContent = task.title;
       document.getElementById('currentTaskPath').textContent = task.path;
+
+      const bindingEl = document.getElementById('currentTaskBinding');
+      if (bindingEl) {
+        bindingEl.textContent = task.raw && task.raw.media_type ? `• 识别: ${task.raw.media_type}` : '';
+      }
+      const checkTimeEl = document.getElementById('currentTaskCheckTime');
+      if (checkTimeEl) {
+        checkTimeEl.textContent = task.time ? `• 检查时间: ${task.time}` : '';
+      }
 
       document.getElementById('catCountArchive').innerHTML = `${task.counts.archive} <span class="text-xs font-normal">季已齐</span>`;
       document.getElementById('catCountReview').innerHTML = `${task.counts.review} <span class="text-xs font-normal">处需清理</span>`;
@@ -3393,21 +3406,20 @@
     }
     // ── 13. 页面初始化 ───────────────────────────────────────
     (async function init() {
-      // 加载配置根路径
+      // 并发加速首屏初始握手：优先并发加载任务列表、健康检查与配置，消灭首屏等待闪烁
       try {
-        configRoots = await api('/api/system/config/roots');
-      } catch (e) { console.warn('加载配置失败:', e); }
+        await Promise.allSettled([
+          loadTasks(),
+          checkHealth(),
+          api('/api/system/config/roots').then(r => { configRoots = r; }).catch(e => console.warn('加载配置根路径失败:', e))
+        ]);
+      } catch (e) {
+        console.error('初始化握手失败:', e);
+      }
 
-      // 健康检查
-      await checkHealth();
-
-      // 加载任务列表
-      await loadTasks();
-
-      // 如果没有任务，选中第一个
+      // 如果没有任务，重置视图为等待状态
       if (taskList.length === 0) {
-        document.getElementById('currentTaskTitle').textContent = '暂无任务';
-        document.getElementById('currentTaskPath').textContent = '点击「新建初检任务」开始';
+        clearTaskDetailView();
       }
     })();
   </script>
