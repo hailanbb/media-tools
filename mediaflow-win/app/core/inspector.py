@@ -670,10 +670,60 @@ async def _fetch_tmdb_via_mp(
 
     return tmdb_id, seasons_data
 
+_DOUBAN_SUFFIX_VARIANTS = {
+    "殿": ["传", "篇", "录", "志"],
+    "传": ["殿", "篇", "记", "录"],
+    "篇": ["季", "传", "章"],
+    "记": ["传", "录", "志"],
+    "录": ["志", "传", "记"],
+}
+
+
+def _generate_douban_queries(show_name: str) -> list[str]:
+    """生成豆瓣智能搜索的多轮候选词（含副标题切分与殿/传等变体字纠偏）。"""
+    clean = re.sub(r"\s*[\(\[（].*?[\)\]）]\s*", " ", show_name).strip()
+    clean = re.sub(r"\s*\(\d{4}\)\s*", " ", clean).strip()
+    clean = re.sub(r"\s+\d{4}$", "", clean).strip()
+
+    queries = [clean]
+
+    for orig_char, replacements in _DOUBAN_SUFFIX_VARIANTS.items():
+        if orig_char in clean:
+            for rep in replacements:
+                variant = clean.replace(orig_char, rep)
+                if variant not in queries:
+                    queries.append(variant)
+
+    parts = [p.strip() for p in re.split(r"[:：\-_·\s]+", clean) if p.strip()]
+    if len(parts) >= 2:
+        main_part = parts[0]
+        sub_part = parts[1]
+        sp_space = f"{main_part} {sub_part}"
+        if sp_space not in queries:
+            queries.append(sp_space)
+        for orig_char, replacements in _DOUBAN_SUFFIX_VARIANTS.items():
+            if orig_char in sub_part:
+                for rep in replacements:
+                    var_sub = sub_part.replace(orig_char, rep)
+                    if var_sub not in queries:
+                        queries.append(var_sub)
+                    var_combo = f"{main_part} {var_sub}"
+                    if var_combo not in queries:
+                        queries.append(var_combo)
+        if sub_part not in queries:
+            queries.append(sub_part)
+        if len(sub_part) > 2 and sub_part[:-1] not in queries:
+            queries.append(sub_part[:-1])
+        if main_part not in queries:
+            queries.append(main_part)
+
+    return queries
+
+
 async def _fetch_seasons_via_douban(
     mp_client, show_name: str, log
 ) -> tuple[str | None, dict[int, dict]]:
-    """通过 MoviePilot 搜索豆瓣并获取真实季集数据（支持日韩剧、国产剧、综艺等）。
+    """通过 MoviePilot 搜索豆瓣并获取真实季集数据（支持日韩剧、国产剧、多季综艺与变体字纠偏）。
 
     Returns:
         (douban_id, {season_num: {"total": N, "finished": bool}})
@@ -681,38 +731,59 @@ async def _fetch_seasons_via_douban(
     douban_id: str | None = None
     seasons_data: dict[int, dict] = {}
 
-    clean_name = re.sub(r"\s*[\(\[（].*?[\)\]）]\s*", " ", show_name).strip()
-    clean_name = re.sub(r"\s*\(\d{4}\)\s*", " ", clean_name).strip()
-    clean_name = re.sub(r"\s+\d{4}$", "", clean_name).strip()
-    if not clean_name:
-        clean_name = show_name
+    year_match = re.search(r"\((\d{4})\)", show_name)
+    target_year = year_match.group(1) if year_match else ""
 
-    try:
-        results = await mp_client.search_media(clean_name, source="douban")
-        if results and isinstance(results, list):
-            first = results[0]
-            if isinstance(first, dict):
-                douban_id = str(first.get("douban_id") or first.get("media_id") or "")
-                if douban_id and douban_id != "None":
+    queries = _generate_douban_queries(show_name)
+    seen_did = set()
+    candidate_items = []
+
+    for q in queries:
+        try:
+            res = await mp_client.search_media(q, source="douban")
+            if isinstance(res, list):
+                for item in res:
+                    did = str(item.get("douban_id") or item.get("media_id") or "")
+                    if did and did != "None" and did not in seen_did:
+                        seen_did.add(did)
+                        candidate_items.append(item)
+        except Exception as e:
+            if log:
+                log.warning("豆瓣搜索关键词 '%s' 出错: %s", q, e)
+
+        if candidate_items:
+            has_strong = any(
+                str(it.get("year")) == target_year or queries[0] in str(it.get("title") or "")
+                for it in candidate_items
+            )
+            if has_strong and len(candidate_items) >= 4:
+                break
+
+    # 多季条目并发解析并汇聚（如《三时三餐》各季条目是独立的 subject）
+    for it in candidate_items[:8]:
+        did = str(it.get("douban_id") or it.get("media_id") or "")
+        it_title = str(it.get("title") or "")
+        try:
+            detail = await mp_client.get_douban_media_info(did, type_name="电视剧")
+            seasons_dict = detail.get("seasons") or {}
+            if isinstance(seasons_dict, dict) and seasons_dict:
+                for s_str, eps in seasons_dict.items():
                     try:
-                        detail = await mp_client.get_douban_media_info(douban_id, type_name="电视剧")
-                        seasons_dict = detail.get("seasons") or {}
-                        if isinstance(seasons_dict, dict):
-                            for s_str, eps in seasons_dict.items():
-                                try:
-                                    sn = int(s_str)
-                                    if isinstance(eps, list) and eps:
-                                        seasons_data[sn] = {
-                                            "total": len(eps),
-                                            "finished": True,
-                                        }
-                                except Exception:
-                                    pass
-                    except Exception as det_err:
-                        if log:
-                            log.warning("获取豆瓣 douban_id=%s 详情失败: %s", douban_id, det_err)
-    except Exception as e:
-        if log:
-            log.warning("豆瓣搜索 %s 失败: %s", show_name, e)
+                        sn = int(s_str)
+                        if isinstance(eps, list) and eps:
+                            if sn not in seasons_data:
+                                seasons_data[sn] = {
+                                    "total": len(eps),
+                                    "finished": True,
+                                }
+                                if not douban_id:
+                                    douban_id = did
+                                if log:
+                                    log.info("从豆瓣条目 [%s] (ID=%s) 成功解析第 S%02d 季共 %d 集", it_title, did, sn, len(eps))
+                    except Exception:
+                        pass
+        except Exception as det_err:
+            if log:
+                log.warning("获取豆瓣条目 ID=%s 详情失败: %s", did, det_err)
 
     return douban_id, seasons_data
