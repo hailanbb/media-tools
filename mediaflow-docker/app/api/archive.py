@@ -589,3 +589,79 @@ async def calibrate_episodes(
         ok=True,
         message=f"已成功将 {rec.show_name} S{rec.season_number:02d} 总集数校准为 {body.total_episodes} 集，最新状态：{new_status}"
     )
+
+
+class DeleteSourceShowRequest(BaseModel):
+    season_record_id: str
+
+
+@router.post("/delete-source-show", response_model=StatusResponse)
+async def delete_source_show(
+    body: DeleteSourceShowRequest,
+    db: AsyncSession = Depends(get_db),
+) -> StatusResponse:
+    """彻底删除源端整个剧集目录及其所有文件，并在删除后强制刷新父目录。"""
+    rec = await db.get(SeasonRecord, body.season_record_id)
+    if not rec:
+        return StatusResponse(ok=False, message="剧季记录不存在")
+
+    show_path = rec.show_path
+    if not show_path or len(show_path.strip("/").split("/")) < 2:
+        return StatusResponse(ok=False, message=f"非法或不安全的剧集源路径: {show_path}")
+
+    settings = get_settings()
+    source_root = settings.source_root.rstrip("/")
+    if source_root and not show_path.startswith(source_root):
+        return StatusResponse(ok=False, message=f"目标路径不在受控源目录下: {show_path}")
+
+    cd2 = CloudDrive2Client()
+    try:
+        # 1. 物理删除源端剧集完整目录（移至回收站）
+        log.warning("用户主动请求删除源端剧集目录: %s (关联记录: %s)", show_path, rec.id)
+        await cd2.delete_file(show_path)
+
+        # 2. 刷新父级目录（强制同步网盘最新文件列表）
+        parent_dir = show_path.rsplit("/", 1)[0]
+        try:
+            await cd2.list_files(parent_dir, force_refresh=True)
+            log.info("已成功强制刷新源端父级目录: %s", parent_dir)
+        except Exception as ref_err:
+            log.warning("强制刷新源端父级目录失败: %s - %s", parent_dir, ref_err)
+
+        # 3. 从数据库中级联清理同属该 task_id 和该 show_path 的所有季记录
+        stmt = select(SeasonRecord).where(
+            SeasonRecord.task_id == rec.task_id,
+            SeasonRecord.show_path == show_path,
+        )
+        show_recs = (await db.scalars(stmt)).all()
+        for sr in show_recs:
+            await db.delete(sr)
+
+        task_id = rec.task_id
+        await _refresh_task_summary(task_id, db)
+        await db.commit()
+
+        # 4. 记录审计日志
+        op_log = OperationLog(
+            task_id=task_id,
+            season_record_id=rec.id,
+            operation_type="delete_source_show",
+            status="completed",
+            details_json=json.dumps({
+                "show_name": rec.show_name,
+                "deleted_show_path": show_path,
+                "refreshed_parent": parent_dir,
+            }),
+        )
+        db.add(op_log)
+        await db.commit()
+
+        return StatusResponse(
+            ok=True,
+            message=f"已成功删除源端剧集目录: {rec.show_name}，并完成源路径强制刷新！"
+        )
+    except Exception as e:
+        log.error("删除源端剧集失败 %s: %s", show_path, e)
+        return StatusResponse(ok=False, message=f"删除源端失败: {str(e)[:200]}")
+    finally:
+        await cd2.close()

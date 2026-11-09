@@ -72,7 +72,7 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.0</span>
+              <span class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.0</span>
             </div>
             <!-- 完善后的命名 -->
             <p class="text-[11px] text-slate-500 dark:text-slate-400">智能媒体库整理与归档工作台</p>
@@ -550,15 +550,7 @@
           </span>
         </div>
 
-        <!-- 媒体类型 (已删除对账政策及其相关内容) -->
-        <div>
-          <label class="block font-semibold text-slate-700 dark:text-slate-300 mb-1">媒体类型:</label>
-          <select id="taskMediaType" class="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-2.5 py-1.5 text-slate-800 dark:text-slate-200 text-xs">
-            <option value="auto">自动识别 (电视剧 / 动漫 / 综艺)</option>
-            <option value="tv">电视剧 (标准季集)</option>
-            <option value="anime">动漫 (优先S01E01命名)</option>
-          </select>
-        </div>
+        <input type="hidden" id="taskMediaType" value="auto">
 
       </div>
 
@@ -713,7 +705,41 @@
     </div>
   </div>
 
-    <!-- 弹窗：MoviePilot 智能订阅清理决策面板 -->
+  <!-- 弹窗：删除源端剧集整剧目录确认框 -->
+  <div id="deleteSourceShowModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+    <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-md w-full p-6 space-y-4 border border-rose-200 dark:border-rose-900 shadow-2xl">
+      <div class="flex items-center justify-between pb-3 border-b border-rose-100 dark:border-rose-900/40">
+        <div class="flex items-center space-x-2 text-rose-600 dark:text-rose-400">
+          <i class="fa-solid fa-triangle-exclamation text-lg"></i>
+          <h3 class="text-sm font-bold">高危操作：删除源端剧集整剧目录</h3>
+        </div>
+        <button onclick="closeModal('deleteSourceShowModal')" class="text-slate-400 hover:text-slate-600"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+
+      <div class="space-y-3 text-xs">
+        <p class="text-slate-700 dark:text-slate-200 font-medium leading-relaxed">
+          您将从 115 源端物理删除该剧集目录及其包含的全部季集和视频文件，删除完成后系统将<b class="text-indigo-600 dark:text-indigo-400">自动对源路径执行强制刷新</b>。
+        </p>
+        <div class="p-3 rounded-lg bg-rose-50/70 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/60 space-y-1">
+          <div class="text-[11px] text-rose-700 dark:text-rose-300 font-semibold" id="deleteSourceShowName">剧集名称</div>
+          <div class="text-[11px] font-mono text-slate-600 dark:text-slate-300 break-all" id="deleteSourceShowPath">/path/...</div>
+        </div>
+        <p class="text-[11px] text-slate-400 leading-relaxed">
+          * 文件将移至网盘回收站，若误删可在网盘回收站内找回。
+        </p>
+      </div>
+
+      <div class="flex justify-end gap-2 pt-3 border-t border-slate-100 dark:border-slate-800">
+        <button onclick="closeModal('deleteSourceShowModal')" class="px-4 py-2 rounded-lg bg-slate-100 dark:bg-slate-800 text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-200">取消</button>
+        <button onclick="executeDeleteSourceShow()" id="btnConfirmDeleteSourceShow" class="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold shadow-md shadow-rose-600/30 flex items-center gap-1.5">
+          <i class="fa-solid fa-trash-can text-xs"></i>
+          <span>确认删除源端并刷新</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 弹窗：MoviePilot 智能订阅清理决策面板 -->
   <div id="subCleanModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
     <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-2xl w-full p-6 space-y-4 border border-slate-200 dark:border-slate-800 shadow-2xl max-h-[85vh] flex flex-col">
       <div class="flex items-center justify-between pb-3 border-b border-slate-200 dark:border-slate-800">
@@ -1742,6 +1768,11 @@
         else if (currentCategory === 'anomaly' || currentCategory === 'already_archived') { badgeColor = 'rose'; actionBtnClass = 'bg-rose-600 hover:bg-rose-700 text-white'; actionIcon = 'fa-triangle-exclamation'; }
         else if (currentCategory === 'download') { badgeColor = 'blue'; actionBtnClass = 'bg-blue-600 hover:bg-blue-700 text-white'; actionIcon = item.actionType === 'download_repair' ? 'fa-arrows-rotate' : 'fa-cloud-arrow-down'; }
 
+        if (item.actionType === 'calibrate') {
+          actionBtnClass = 'bg-indigo-600 hover:bg-indigo-700 text-white';
+          actionIcon = 'fa-sliders';
+        }
+
         // 标签附加
         let anomalyTagHtml = '';
         if (item.isAnomaly) {
@@ -1781,25 +1812,25 @@
               </div>
             </div>
             <div class="flex items-center space-x-2 flex-shrink-0 self-end sm:self-center flex-wrap gap-y-1">
-              ${(item.isAnomaly && (item.anomalySubtype === 'split_conflict' || item.anomalySubtype === 'unknown_meta')) ? `
-                <button onclick="openCalibrateModal('${item.id}', '${item.show} - ${item.season}', ${item.maxRec}, ${item.totalEpisodes || 0})" class="px-2.5 py-1.5 rounded-lg border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/50 text-indigo-600 dark:text-indigo-400 text-xs font-semibold hover:bg-indigo-100 transition flex items-center gap-1 shadow-sm" title="校准官方总集数">
-                  <i class="fa-solid fa-sliders text-xs"></i>
-                  <span>校准集数</span>
+              ${(item.isAnomaly && item.anomalySubtype === 'unknown_meta') ? `
+                <button onclick="promptDeleteSourceShow('${item.id}')" class="px-2.5 py-1.5 rounded-lg border border-rose-200 dark:border-rose-800 bg-rose-50 dark:bg-rose-950/40 text-rose-600 dark:text-rose-400 text-xs font-semibold hover:bg-rose-100 dark:hover:bg-rose-900/40 transition flex items-center gap-1 shadow-sm" title="彻底删除源端整个剧集目录及其所有文件，并在删除后立即强制刷新源目录">
+                  <i class="fa-solid fa-trash-can text-xs"></i>
+                  <span>删除源端</span>
                 </button>
               ` : ''}
-              ${(currentCategory === 'review' || (currentCategory === 'download' && item.duplicates && item.duplicates.length > 0) || (currentCategory === 'anomaly' && item.duplicates && item.duplicates.length > 0)) ? `
-                <button onclick="openCleanPreview('${item.id}', '${item.show} - ${item.season}')" class="px-2.5 py-1.5 rounded-lg border border-amber-200 dark:border-amber-700 bg-white dark:bg-slate-800 text-amber-600 dark:text-amber-400 text-xs font-semibold hover:bg-amber-50 dark:hover:bg-amber-950/30 transition flex items-center gap-1.5 shadow-sm" title="查看保留版本与拟删除文件">
+              ${(item.duplicates && item.duplicates.length > 0) ? `
+                <button onclick="openCleanPreview('${item.id}')" class="px-2.5 py-1.5 rounded-lg border border-amber-200 dark:border-amber-700 bg-white dark:bg-slate-800 text-amber-600 dark:text-amber-400 text-xs font-semibold hover:bg-amber-50 dark:hover:bg-amber-950/30 transition flex items-center gap-1.5 shadow-sm" title="查看保留版本与拟删除文件">
                   <i class="fa-solid fa-file-magnifying-glass text-xs"></i>
                   <span>清理预览</span>
                 </button>
               ` : ''}
               ${(currentCategory === 'anomaly' && item.anomalySubtype === 'already_archived') ? `
-                <button onclick="cleanSourceRedundantSingle('${item.id}', '${item.show} - ${item.season}')" class="px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-700 text-white text-xs font-semibold shadow-sm transition flex items-center gap-1.5">
+                <button onclick="cleanSourceRedundantSingle('${item.id}')" class="px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-700 text-white text-xs font-semibold shadow-sm transition flex items-center gap-1.5">
                   <i class="fa-solid fa-trash-can text-xs"></i>
                   <span>清理源端</span>
                 </button>
               ` : `
-                <button onclick="handleSingleAction('${item.actionType}', '${item.show} - ${item.season}', '${item.id}')" class="px-3 py-1.5 rounded-lg ${actionBtnClass} text-xs font-semibold shadow-sm transition flex items-center gap-1.5">
+                <button onclick="handleSingleAction('${item.actionType}', '${item.id}')" class="px-3 py-1.5 rounded-lg ${actionBtnClass} text-xs font-semibold shadow-sm transition flex items-center gap-1.5">
                   <i class="fa-solid ${actionIcon} text-xs"></i>
                   <span>${item.actionText}</span>
                 </button>
@@ -1848,6 +1879,10 @@
 
     async function openCleanPreview(seasonId, title, forceClean = false) {
       previewTargetSeasonId = seasonId;
+      if (!title) {
+        const item = findItemByRecordId(seasonId);
+        title = item ? `${item.show} - ${item.season}` : '';
+      }
       previewTargetSeasonTitle = title || previewTargetSeasonTitle;
       lastPreviewIsForce = forceClean;
       document.getElementById('cleanPreviewTitle').textContent = `复核清理计划预览: ${previewTargetSeasonTitle}${forceClean ? ' (已启用强制局部清理)' : ''}`;
@@ -1979,8 +2014,26 @@
       }
     }
 
+    function findItemByRecordId(recId) {
+      if (!currentTaskId) return null;
+      const task = taskList.find(t => t.id === currentTaskId);
+      if (!task || !task.categories) return null;
+      for (const catKey of Object.keys(task.categories)) {
+        const list = task.categories[catKey];
+        if (Array.isArray(list)) {
+          const found = list.find(i => String(i.id) === String(recId));
+          if (found) return found;
+        }
+      }
+      return null;
+    }
+
     function cleanSourceRedundantSingle(recordId, name) {
       currentActionRecordId = recordId;
+      if (!name) {
+        const item = findItemByRecordId(recordId);
+        name = item ? `${item.show} - ${item.season}` : '';
+      }
       openModal('cleanRedundantModal');
       document.getElementById('cleanRedundantTitle').textContent = `源端冗余清理确认: ${name}`;
     }
@@ -1991,10 +2044,18 @@
 
     function openCalibrateModal(recId, showTitle, maxRec, currentTotal) {
       currentCalibrateRecId = recId;
+      if (!showTitle) {
+        const item = findItemByRecordId(recId);
+        if (item) {
+          showTitle = `${item.show} - ${item.season}`;
+          maxRec = item.maxRec;
+          currentTotal = item.totalEpisodes;
+        }
+      }
       currentCalibrateMaxRec = maxRec;
-      document.getElementById('calibrateShowTitle').textContent = showTitle;
+      document.getElementById('calibrateShowTitle').textContent = showTitle || '剧集名称';
       document.getElementById('calibrateTotalInput').value = (currentTotal && currentTotal > 0 && currentTotal < 900) ? currentTotal : (maxRec || '');
-      document.getElementById('calibrateModal').classList.remove('hidden');
+      openModal('calibrateModal');
     }
 
     function setCalibrateFromLocalMax() {
@@ -2028,9 +2089,50 @@
       }
     }
 
-    function handleSingleAction(type, name, recordId) {
+    // ── 10.4 官方无集数信息剧集：删除源端并刷新 ─────────────────
+    let currentDeleteSourceRecId = null;
+
+    function promptDeleteSourceShow(recId) {
+      currentDeleteSourceRecId = recId;
+      const item = findItemByRecordId(recId);
+      const name = item ? item.show : '未知剧集';
+      const path = item ? (item.pathA || '') : '';
+      document.getElementById('deleteSourceShowName').textContent = name;
+      document.getElementById('deleteSourceShowPath').textContent = `源端目标路径: ${path}`;
+      openModal('deleteSourceShowModal');
+    }
+
+    async function executeDeleteSourceShow() {
+      if (!currentDeleteSourceRecId) return;
+      closeModal('deleteSourceShowModal');
+      try {
+        const res = await api('/api/archive/delete-source-show', {
+          method: 'POST',
+          body: JSON.stringify({ season_record_id: currentDeleteSourceRecId }),
+        });
+        alert(res.message || '源端剧集目录已删除并完成目录刷新！');
+        const task = taskList.find(t => t.id === currentTaskId);
+        if (task) task._seasonsLoaded = false;
+        await loadTasks();
+        if (currentTaskId) selectTask(currentTaskId);
+      } catch (e) {
+        alert(`删除源端失败: ${e.message}`);
+      }
+    }
+
+    function handleSingleAction(type, arg2, arg3) {
+      // 灵活兼容：handleSingleAction(type, recordId) 或 handleSingleAction(type, name, recordId)
+      let recordId = arg3 ? arg3 : arg2;
+      let name = arg3 ? arg2 : null;
       currentActionRecordId = recordId;
-      if (type === 'archive') {
+      if (!name) {
+        const item = findItemByRecordId(recordId);
+        name = item ? `${item.show} - ${item.season}` : '';
+      }
+
+      if (type === 'calibrate') {
+        openCalibrateModal(recordId);
+      } else if (type === 'archive') {
         openModal('archiveModal');
         document.getElementById('archiveModalTitle').textContent = `单季归档预检确认: ${name}`;
       } else if (type.startsWith('review') || type === 'clean') {

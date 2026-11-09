@@ -102,6 +102,9 @@ class MoviePilotClient:
     async def get_douban_detail(self, douban_id: str) -> dict:
         return await self._get(f"/api/v1/douban/{douban_id}")
 
+    async def get_douban_media_info(self, douban_id: str, type_name: str = "电视剧") -> dict:
+        return await self._get(f"/api/v1/media/douban:{douban_id}", type_name=type_name)
+
     # ── TMDB 剧集信息 ────────────────────────────────────
     async def get_tmdb_seasons(self, tmdb_id: int) -> list[dict]:
         return await self._get(f"/api/v1/tmdb/seasons/{tmdb_id}")

@@ -1,64 +1,17 @@
 @echo off
 chcp 65001 >nul
-title MediaFlow - Windows ·þÎñ¿ØÖÆÌ¨
+title MediaFlow æŽ§åˆ¶å°
 color 0B
 
 echo ======================================================================
-echo          MediaFlow Ã½Ìå¿âÖÇÄÜÕûÀíÓë¹éµµ¹¤×÷Ì¨ (Windows Ô­Éú°æ)
+echo          MediaFlow åª’ä½“åº“æ™ºèƒ½æ•´ç†ä¸Žå½’æ¡£å·¥ä½œå°
 echo ======================================================================
 echo.
 
 cd /d "%~dp0"
 
-:: 1. ¼ì²é Python »·¾³
-python --version >nul 2>&1
-if %errorlevel% neq 0 (
-    echo [´íÎó] Î´¼ì²âµ½ Python »·¾³£¡
-    echo ÇëÏÈ°²×° Python 3.10 »ò¸ü¸ß°æ±¾£¬²¢ÔÚ°²×°Ê±¹´Ñ¡ "Add python.exe to PATH"¡£
-    echo ÏÂÔØµØÖ·: https://www.python.org/downloads/
-    echo.
-    pause
-    exit /b 1
-)
-
-:: 2. ¼ì²é»ò´´½¨ÐéÄâ»·¾³
-if not exist ".venv" (
-    echo [³õÊ¼»¯] ÕýÔÚ´´½¨ Python ÐéÄâ»·¾³ (.venv)...
-    python -m venv .venv
-    if %errorlevel% neq 0 (
-        echo [´íÎó] ´´½¨ÐéÄâ»·¾³Ê§°Ü£¬Çë¼ì²é Python È¨ÏÞ£¡
-        pause
-        exit /b 1
-    )
-)
-
-:: 3. ¼¤»îÐéÄâ»·¾³²¢°²×°ÒÀÀµ
-echo [»·¾³] ¼¤»îÐéÄâ»·¾³...
-call .venv\Scripts\activate.bat
-
-echo [¼ì²é] ÕýÔÚÐ£ÑéºËÐÄÒÀÀµ¿â...
-pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple --quiet
-
-:: 4. ¼ì²é .env ÅäÖÃÎÄ¼þ
-if not exist ".env" (
-    echo [ÌáÊ¾] Î´¼ì²âµ½ .env ÅäÖÃÎÄ¼þ£¬ÕýÔÚ×Ô¶¯´Ó .env.example ¸´ÖÆÄ£°å...
-    copy .env.example .env >nul
-    echo.
-    echo ======================================================================
-    echo [ÖØÒªÌáÊ¾] ÒÑÎªÄúÉú³É .env ÅäÖÃÎÄ¼þ£¡
-    echo Çë´ò¿ªµ±Ç°Ä¿Â¼ÏÂµÄ .env ÎÄ¼þ£¬ÌîÐ´ÕæÊµµÄ CloudDrive2 ºÍ MoviePilot ÅäÖÃºóÖØÐÂÆô¶¯¡£
-    echo ======================================================================
-    echo.
-    notepad .env
-    pause
-    exit /b 0
-)
-
-:: 5. Æô¶¯·þÎñ
-echo.
-echo [Æô¶¯] ÕýÔÚÆô¶¯ MediaFlow ·þÎñ½ø³Ì (¼àÌý¶Ë¿Ú: 8080)...
-echo [ÌáÊ¾] ÍøÒ³¹¤×÷Ì¨µØÖ·: http://127.0.0.1:8080
-echo [ÌáÊ¾] °´ Ctrl+C ¿ÉÍ£Ö¹·þÎñ
+echo [å¯åŠ¨] æ­£åœ¨å¯åŠ¨ MediaFlow æœåŠ¡è¿›ç¨‹ (ç›‘å¬ç«¯å£: 8080)...
+echo [æç¤º] ç½‘é¡µå·¥ä½œå°åœ°å€: http://127.0.0.1:8080
 echo.
 
 start "" "http://127.0.0.1:8080"

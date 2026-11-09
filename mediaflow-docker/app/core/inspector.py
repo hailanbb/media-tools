@@ -123,7 +123,7 @@ def diagnose_season(
     Returns:
         (status, detail) 元组
     """
-    if total_episodes is None:
+    if total_episodes is None or total_episodes <= 0:
         return "unknown", "无法获取该季的官方集数信息"
 
     recognized_set = set(recognized)
@@ -256,9 +256,21 @@ async def run_inspection(
             tmdb_id_num = int(tmdb_match.group(1))
 
         if mp_client:
+            # 1. 优先尝试本地指定的 TMDB ID
             if tmdb_id_num:
                 tmdb_seasons_data = await _fetch_seasons_by_tmdb_id(mp_client, tmdb_id_num, log)
-            else:
+
+            # 2. 若 TMDB 无季度信息（或本地无 TMDB ID）：触发豆瓣智能多维深度兜底
+            if not tmdb_seasons_data:
+                db_id, db_seasons = await _fetch_seasons_via_douban(mp_client, show_name, log)
+                if db_seasons:
+                    tmdb_seasons_data = db_seasons
+                    if log:
+                        log.info("剧集 %s TMDB无集数，通过豆瓣 (douban_id=%s) 成功兜底获取到 %d 季集数: %s",
+                                 show_name, db_id, len(db_seasons), {k: v.get("total") for k, v in db_seasons.items()})
+
+            # 3. 若依然无信息且本地未指定 tmdb_id，尝试标题关键词检索 TMDB
+            if not tmdb_seasons_data and not tmdb_id_num:
                 tmdb_id_num, tmdb_seasons_data = await _fetch_tmdb_via_mp(mp_client, show_name, log)
 
         for season_num, season_item in sorted(season_dirs, key=lambda x: x[0]):
@@ -311,7 +323,7 @@ async def run_inspection(
             if total_eps and total_eps > 0:
                 missing = [ep for ep in range(1, total_eps + 1) if ep not in recognized]
 
-            # 跨库查重校验
+            # 跨库查重校验（集数级深入比对，严防孤本被误删）
             if archive_target and status != "airing":
                 try:
                     target_parent = archive_target.rsplit("/", 1)[0]
@@ -328,8 +340,40 @@ async def run_inspection(
                     )
 
                     if exists_in_archive:
-                        status = "already_archived"
-                        detail = f"归档库对应目录已存在 ({archive_target})，归类为异常剧集（归档库已有）"
+                        # 深入到归档库季目录内部，读取已归档的视频文件集数
+                        try:
+                            archived_season_items = await cd2_client.list_files(archive_target)
+                            archived_eps: set[int] = set()
+                            for af in archived_season_items:
+                                if not af.get("isDirectory") and is_video_file(af.get("name", "")):
+                                    p_af = parse_episode(af.get("name", ""), af.get("path", ""), af.get("size", 0))
+                                    if not p_af.is_extra:
+                                        archived_eps.update(p_af.episode_numbers)
+
+                            source_eps = set(recognized)
+                            unarchived_source_eps = sorted(source_eps - archived_eps)
+
+                            if source_eps and source_eps.issubset(archived_eps):
+                                # 源端所有集数在归档库中均已存在：真·归档后残留，可安全清理源端
+                                status = "already_archived"
+                                detail = f"归档库已完整包含源端所有集数 (归档库已有: {sorted(archived_eps)})，源端为历史冗余残留，可安全清理"
+                            elif unarchived_source_eps:
+                                # 源端含有归档库没有的增量集数（如源端有 E02，归档只有 E01）：绝不是冗余！绝对禁止清理源端！
+                                combined = sorted(source_eps | archived_eps)
+                                if total_eps and len(combined) >= total_eps:
+                                    status = "archive_ready"
+                                    detail = f"跨库增量就绪：归档库已有 {sorted(archived_eps)}，源端含增量集 {unarchived_source_eps}，跨库汇聚后已集齐，可执行增量归档"
+                                else:
+                                    missing_combined = [e for e in range(1, (total_eps or 0) + 1) if e not in combined]
+                                    status = "download_needed"
+                                    detail = f"跨库分散待补：归档库已有 {sorted(archived_eps)}，源端含增量集 {unarchived_source_eps}，全剧仍缺 {missing_combined}，严禁误删源端"
+                            else:
+                                status = "already_archived"
+                                detail = f"归档库对应目录已存在 ({archive_target})，归类为异常剧集（归档库已有）"
+                        except Exception as af_err:
+                            log.warning("读取归档库季目录集数失败 %s: %s", archive_target, af_err)
+                            status = "already_archived"
+                            detail = f"归档库对应目录已存在 ({archive_target})，归类为异常剧集（归档库已有）"
                 except Exception as arc_err:
                     log.warning("跨库感知查重探测失败 %s: %s", archive_target, arc_err)
 
@@ -625,3 +669,50 @@ async def _fetch_tmdb_via_mp(
         log.warning("搜索 %s 的 TMDB 信息失败: %s", show_name, e)
 
     return tmdb_id, seasons_data
+
+async def _fetch_seasons_via_douban(
+    mp_client, show_name: str, log
+) -> tuple[str | None, dict[int, dict]]:
+    """通过 MoviePilot 搜索豆瓣并获取真实季集数据（支持日韩剧、国产剧、综艺等）。
+
+    Returns:
+        (douban_id, {season_num: {"total": N, "finished": bool}})
+    """
+    douban_id: str | None = None
+    seasons_data: dict[int, dict] = {}
+
+    clean_name = re.sub(r"\s*[\(\[（].*?[\)\]）]\s*", " ", show_name).strip()
+    clean_name = re.sub(r"\s*\(\d{4}\)\s*", " ", clean_name).strip()
+    clean_name = re.sub(r"\s+\d{4}$", "", clean_name).strip()
+    if not clean_name:
+        clean_name = show_name
+
+    try:
+        results = await mp_client.search_media(clean_name, source="douban")
+        if results and isinstance(results, list):
+            first = results[0]
+            if isinstance(first, dict):
+                douban_id = str(first.get("douban_id") or first.get("media_id") or "")
+                if douban_id and douban_id != "None":
+                    try:
+                        detail = await mp_client.get_douban_media_info(douban_id, type_name="电视剧")
+                        seasons_dict = detail.get("seasons") or {}
+                        if isinstance(seasons_dict, dict):
+                            for s_str, eps in seasons_dict.items():
+                                try:
+                                    sn = int(s_str)
+                                    if isinstance(eps, list) and eps:
+                                        seasons_data[sn] = {
+                                            "total": len(eps),
+                                            "finished": True,
+                                        }
+                                except Exception:
+                                    pass
+                    except Exception as det_err:
+                        if log:
+                            log.warning("获取豆瓣 douban_id=%s 详情失败: %s", douban_id, det_err)
+    except Exception as e:
+        if log:
+            log.warning("豆瓣搜索 %s 失败: %s", show_name, e)
+
+    return douban_id, seasons_data
