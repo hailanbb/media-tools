@@ -846,6 +846,52 @@
     </div>
   </div>
 
+  <!-- 弹窗：批量补缺实时流水线面板 -->
+  <div id="downloadProgressModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+    <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-2xl w-full p-6 space-y-4 border border-slate-200 dark:border-slate-800 shadow-2xl flex flex-col max-h-[85vh]">
+      <div class="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
+        <div class="flex items-center space-x-2.5">
+          <div class="w-8 h-8 rounded-xl bg-blue-100 dark:bg-blue-900/40 text-blue-600 dark:text-blue-400 flex items-center justify-center text-sm shadow-sm">
+            <i class="fa-solid fa-cloud-arrow-down" id="dlProgressIcon"></i>
+          </div>
+          <div>
+            <h3 class="text-sm font-bold text-slate-900 dark:text-white" id="dlProgressTitle">批量推送 MoviePilot 补缺任务</h3>
+            <p class="text-[11px] text-slate-500" id="dlProgressSubtitle">正在准备流水线任务...</p>
+          </div>
+        </div>
+        <div class="text-xs font-mono font-bold text-blue-600 dark:text-blue-400" id="dlProgressPercent">0%</div>
+      </div>
+
+      <!-- 进度条 -->
+      <div class="space-y-1.5">
+        <div class="w-full bg-slate-100 dark:bg-slate-800 rounded-full h-2.5 overflow-hidden">
+          <div id="dlProgressBar" class="bg-gradient-to-r from-blue-500 to-indigo-600 h-2.5 rounded-full transition-all duration-300" style="width: 0%"></div>
+        </div>
+        <div class="flex justify-between text-[11px] text-slate-400">
+          <span id="dlProgressCurrentItem" class="truncate max-w-[400px]">等待开始...</span>
+          <span id="dlProgressStats" class="font-mono">0 / 0</span>
+        </div>
+      </div>
+
+      <!-- 实时日志流 -->
+      <div class="flex-1 min-h-[220px] max-h-[360px] overflow-y-auto p-3.5 rounded-xl bg-slate-950 text-slate-200 font-mono text-[11px] space-y-1.5 border border-slate-800 select-text" id="dlProgressLogContainer">
+      </div>
+
+      <!-- 底部控制 -->
+      <div class="flex justify-between items-center pt-2 border-t border-slate-100 dark:border-slate-800">
+        <span class="text-[11px] text-slate-400" id="dlProgressFooterHint">流水线执行期间请保持页面打开</span>
+        <div class="flex gap-2">
+          <button id="dlCancelBtn" onclick="cancelBatchDownload()" class="px-3.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-xs font-semibold transition">
+            <i class="fa-solid fa-stop text-xs mr-1 text-rose-500"></i> 中止后续任务
+          </button>
+          <button id="dlCloseBtn" onclick="finishBatchDownload()" disabled class="px-4 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold shadow-md shadow-blue-500/20 transition">
+            完成并关闭
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
 
   <!-- ================= 交互逻辑脚本（真实 API 版） ================= -->
   <script>
@@ -2186,38 +2232,137 @@
       } catch (e) { alert(`清理失败: ${e.message}`); }
     }
 
+    let isBatchDownloadCancelled = false;
+
+    function cancelBatchDownload() {
+      isBatchDownloadCancelled = true;
+      const cancelBtn = document.getElementById('dlCancelBtn');
+      if (cancelBtn) {
+        cancelBtn.disabled = true;
+        cancelBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin text-xs mr-1"></i> 正在中止...';
+      }
+    }
+
+    async function finishBatchDownload() {
+      closeModal('downloadProgressModal');
+      const task = taskList.find(t => t.id === currentTaskId);
+      if (task) task._seasonsLoaded = false;
+      await loadTasks();
+      if (currentTaskId) selectTask(currentTaskId);
+    }
+
     async function confirmDownloadDone() {
       closeModal('downloadModal');
       const ids = currentActionRecordId ? [currentActionRecordId] : [...document.querySelectorAll('input[name="itemCheck"]:checked')].map(cb => cb.value);
       if (ids.length === 0) { alert('未选择任何需要补缺的剧集'); return; }
 
-      try {
-        const result = await api('/api/moviepilot/download-gap-fill', {
-          method: 'POST',
-          body: JSON.stringify({ season_record_ids: ids })
-        });
+      isBatchDownloadCancelled = false;
+      openModal('downloadProgressModal');
 
-        if (result.ok) {
-          let detailMsg = result.message;
-          if (result.submitted && result.submitted.length > 0) {
-            const listStr = result.submitted.map(s => {
-              const cleanPart = s.cleared_transfer_records_count > 0 ? ` [已清理 ${s.cleared_transfer_records_count} 条旧整理记录]` : '';
-              return `• [${s.site}] ${s.title} (${s.plan_desc || '补缺'}, 做种: ${s.seeds})${cleanPart}`;
-            }).join('\n');
-            detailMsg += `\n\n已成功提交至 MoviePilot 下载队列：\n${listStr}`;
-          }
-          alert(detailMsg);
-        } else {
-          alert(`推送提醒: ${result.message || '未能成功提交下载'}`);
+      const progressBar = document.getElementById('dlProgressBar');
+      const progressPercent = document.getElementById('dlProgressPercent');
+      const progressStats = document.getElementById('dlProgressStats');
+      const currentItemText = document.getElementById('dlProgressCurrentItem');
+      const logContainer = document.getElementById('dlProgressLogContainer');
+      const dlCloseBtn = document.getElementById('dlCloseBtn');
+      const dlCancelBtn = document.getElementById('dlCancelBtn');
+      const dlProgressTitle = document.getElementById('dlProgressTitle');
+      const dlProgressSubtitle = document.getElementById('dlProgressSubtitle');
+      const dlProgressFooterHint = document.getElementById('dlProgressFooterHint');
+
+      dlCloseBtn.disabled = true;
+      dlCancelBtn.disabled = false;
+      dlCancelBtn.innerHTML = '<i class="fa-solid fa-stop text-xs mr-1 text-rose-500"></i> 中止后续任务';
+      logContainer.innerHTML = '';
+      progressBar.style.width = '0%';
+      progressPercent.textContent = '0%';
+      progressStats.textContent = `0 / ${ids.length}`;
+      dlProgressTitle.textContent = `批量推送 MoviePilot 补缺任务 (${ids.length} 项)`;
+      dlProgressSubtitle.textContent = `流水线已启动，正在逐项进行智能选种与解绑推送...`;
+      dlProgressFooterHint.textContent = '流水线执行中，请勿关闭页面...';
+
+      function appendLog(htmlContent) {
+        const div = document.createElement('div');
+        div.innerHTML = htmlContent;
+        logContainer.appendChild(div);
+        logContainer.scrollTop = logContainer.scrollHeight;
+      }
+
+      function getNow() {
+        return new Date().toLocaleTimeString('zh-CN', { hour12: false });
+      }
+
+      appendLog(`<span class="text-slate-400">[${getNow()}] 🚀 批量补缺流水线启动，共选定 <b>${ids.length}</b> 个待补剧季，开始逐项评估做种与定向补缺...</span>`);
+
+      let successCount = 0;
+      let skippedCount = 0;
+      let failCount = 0;
+
+      for (let i = 0; i < ids.length; i++) {
+        if (isBatchDownloadCancelled) {
+          appendLog(`<span class="text-amber-400 font-bold">[${getNow()}] 🛑 用户已手动中止后续任务，已处理 ${i}/${ids.length} 项。</span>`);
+          break;
         }
 
-        const task = taskList.find(t => t.id === currentTaskId);
-        if (task) task._seasonsLoaded = false;
-        await loadTasks();
-        if (currentTaskId) selectTask(currentTaskId);
-      } catch (e) {
-        alert(`推送补缺失败: ${e.message}`);
+        const recId = ids[i];
+        const currentTask = taskList.find(t => t.id === currentTaskId);
+        let showDisplayName = `剧季记录 #${recId.slice(0, 8)}`;
+        if (currentTask && currentTask.categories) {
+          const allItems = [
+            ...(currentTask.categories.download || []),
+            ...(currentTask.categories.review || []),
+            ...(currentTask.categories.anomaly || []),
+            ...(currentTask.categories.airing || []),
+            ...(currentTask.categories.archive || [])
+          ];
+          const matched = allItems.find(it => it.id === recId);
+          if (matched) {
+            showDisplayName = `${matched.show_name} S${String(matched.season_number).padStart(2, '0')}`;
+          }
+        }
+
+        const pct = Math.round(((i + 1) / ids.length) * 100);
+        progressBar.style.width = `${pct}%`;
+        progressPercent.textContent = `${pct}%`;
+        progressStats.textContent = `${i + 1} / ${ids.length}`;
+        currentItemText.textContent = `[${i + 1}/${ids.length}] 正在处理: ${showDisplayName}`;
+
+        appendLog(`<span class="text-blue-300">[${getNow()}] [${i + 1}/${ids.length}] 正在检索做种并评估: <b class="text-white">${showDisplayName}</b> ...</span>`);
+
+        try {
+          const res = await api('/api/moviepilot/download-gap-fill', {
+            method: 'POST',
+            body: JSON.stringify({ season_record_ids: [recId] })
+          });
+
+          if (res.ok && res.submitted && res.submitted.length > 0) {
+            successCount += res.submitted.length;
+            res.submitted.forEach(sub => {
+              const cleanPart = sub.cleared_transfer_records_count > 0 ? ` <span class="text-amber-400">[已联动清理${sub.cleared_transfer_records_count}条历史整理记录]</span>` : '';
+              appendLog(`<span class="text-emerald-400 pl-3">✓ 成功推送下载: <b>[${sub.site || 'PT'}]</b> ${sub.title} (做种: ${sub.seeds}, ${sub.plan_desc || '补缺'})${cleanPart}</span>`);
+            });
+          } else if (res.ok) {
+            skippedCount++;
+            appendLog(`<span class="text-slate-400 pl-3">ℹ 提示: ${res.message || '无需下载或已在队列中'}</span>`);
+          } else {
+            failCount++;
+            appendLog(`<span class="text-rose-400 pl-3">✗ 推送未成功: ${res.message || '无合格资源'}</span>`);
+          }
+        } catch (err) {
+          failCount++;
+          appendLog(`<span class="text-rose-500 pl-3">✗ 接口请求异常: ${err.message}</span>`);
+        }
       }
+
+      progressBar.style.width = '100%';
+      progressPercent.textContent = '100%';
+      currentItemText.textContent = isBatchDownloadCancelled ? '流水线已中止' : '全部任务处理完毕';
+      dlProgressSubtitle.textContent = `流水线已结束。成功推送: ${successCount} 个资源，无需下载: ${skippedCount} 个，未成功: ${failCount} 个`;
+      dlProgressFooterHint.textContent = '处理完毕，点击右侧按钮关闭并刷新看板';
+      dlCancelBtn.disabled = true;
+      dlCloseBtn.disabled = false;
+
+      appendLog(`<span class="text-emerald-400 font-bold">[${getNow()}] 🏁 批量推送流水线结束！成功推送: ${successCount} 个，无需操作: ${skippedCount} 个，无合格资源: ${failCount} 个</span>`);
     }
 
     // ── 11. 目录浏览器（真实 CD2 API）────────────────────────
