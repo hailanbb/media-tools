@@ -20,6 +20,8 @@ from __future__ import annotations
 import asyncio
 
 import json
+import urllib.parse
+import httpx
 import re
 from dataclasses import dataclass, field
 
@@ -198,6 +200,15 @@ async def run_inspection(
         log.warning("未提供 CD2 客户端，返回空结果")
         return result
 
+    local_tmdb_client = None
+    if tmdb_client is None:
+        try:
+            from app.clients.tmdb import TMDBClient
+            local_tmdb_client = TMDBClient()
+        except Exception:
+            local_tmdb_client = None
+    active_tmdb = tmdb_client or local_tmdb_client
+
     # ── 1. 递归发现剧集目录 ──────────────────────────────
     # 目录结构可能是多级分类：源根/电视剧/国产剧/XXX (2024)/Season 1/
     # 需要递归直到找到含 Season 子目录或视频文件的目录
@@ -255,23 +266,15 @@ async def run_inspection(
         if tmdb_match:
             tmdb_id_num = int(tmdb_match.group(1))
 
-        if mp_client:
-            # 1. 优先尝试本地指定的 TMDB ID
-            if tmdb_id_num:
-                tmdb_seasons_data = await _fetch_seasons_by_tmdb_id(mp_client, tmdb_id_num, log)
-
-            # 2. 若 TMDB 无季度信息（或本地无 TMDB ID）：触发豆瓣智能多维深度兜底
-            if not tmdb_seasons_data:
-                db_id, db_seasons = await _fetch_seasons_via_douban(mp_client, show_name, log)
-                if db_seasons:
-                    tmdb_seasons_data = db_seasons
-                    if log:
-                        log.info("剧集 %s TMDB无集数，通过豆瓣 (douban_id=%s) 成功兜底获取到 %d 季集数: %s",
-                                 show_name, db_id, len(db_seasons), {k: v.get("total") for k, v in db_seasons.items()})
-
-            # 3. 若依然无信息且本地未指定 tmdb_id，尝试标题关键词检索 TMDB
-            if not tmdb_seasons_data and not tmdb_id_num:
-                tmdb_id_num, tmdb_seasons_data = await _fetch_tmdb_via_mp(mp_client, show_name, log)
+        needed_seasons = [sn for sn, _ in season_dirs]
+        tmdb_seasons_data = await _resolve_show_metadata(
+            show_name=show_name,
+            needed_seasons=needed_seasons,
+            tmdb_id_num=tmdb_id_num,
+            mp_client=mp_client,
+            tmdb_client=active_tmdb,
+            log=log,
+        )
 
         for season_num, season_item in sorted(season_dirs, key=lambda x: x[0]):
             season_path = season_item["path"]
@@ -452,6 +455,11 @@ async def run_inspection(
         result.airing_count,
         result.already_archived_count,
     )
+    if local_tmdb_client:
+        try:
+            await local_tmdb_client.close()
+        except Exception:
+            pass
     return result
 
 
@@ -721,28 +729,47 @@ def _parse_season_from_text(text: str) -> int | None:
     return None
 
 
-def _generate_douban_queries(show_name: str) -> list[str]:
-    """生成豆瓣智能搜索的多轮候选词（含副标题切分与殿/传等变体字纠偏）。"""
-    clean = re.sub(r"\s*[\(\[（].*?[\)\]）]\s*", " ", show_name).strip()
+def _generate_search_queries(show_name: str, file_hints: list[str] | None = None) -> list[str]:
+    """生成 TMDB 与豆瓣多维智能搜索的候选关键词。"""
+    clean = re.sub(r"\s*\[.*?\]\s*", " ", show_name)
+    clean = re.sub(r"\s*[\(\[（].*?[\)\]）]\s*", " ", clean).strip()
     clean = re.sub(r"\s*\(\d{4}\)\s*", " ", clean).strip()
     clean = re.sub(r"\s+\d{4}$", "", clean).strip()
+    if not clean:
+        clean = show_name
 
-    queries = [clean]
+    # 中英文粘连拆分: Inside百万奖金真人秀 -> Inside 百万奖金真人秀
+    spaced = re.sub(r"([a-zA-Z]+)([\u4e00-\u9fa5])", r"\1 \2", clean)
+    spaced = re.sub(r"([\u4e00-\u9fa5])([a-zA-Z]+)", r"\1 \2", spaced)
 
-    for orig_char, replacements in _DOUBAN_SUFFIX_VARIANTS.items():
-        if orig_char in clean:
-            for rep in replacements:
-                variant = clean.replace(orig_char, rep)
-                if variant not in queries:
-                    queries.append(variant)
+    # 标点符号统一与归一化
+    norm = spaced.replace("：", ": ").replace("，", ", ")
+    no_punct = re.sub(r"[:：\-_·,，!！?？]+", " ", spaced).strip()
+    no_punct = re.sub(r"\s+", " ", no_punct)
 
-    parts = [p.strip() for p in re.split(r"[:：\-_·\s]+", clean) if p.strip()]
+    queries: list[str] = []
+    for cand in [clean, spaced, norm, no_punct]:
+        c_str = cand.strip()
+        if c_str and c_str not in queries:
+            queries.append(c_str)
+
+    # 变体字替换 (殿 <-> 传, 篇 <-> 季)
+    for q_base in list(queries):
+        for orig_char, replacements in _DOUBAN_SUFFIX_VARIANTS.items():
+            if orig_char in q_base:
+                for rep in replacements:
+                    var = q_base.replace(orig_char, rep)
+                    if var not in queries:
+                        queries.append(var)
+
+    # 主次成分拆分
+    parts = [p.strip() for p in re.split(r"[:：\-_·\s]+", spaced) if p.strip()]
     if len(parts) >= 2:
         main_part = parts[0]
         sub_part = parts[1]
-        sp_space = f"{main_part} {sub_part}"
-        if sp_space not in queries:
-            queries.append(sp_space)
+        combo = f"{main_part} {sub_part}"
+        if combo not in queries:
+            queries.append(combo)
         for orig_char, replacements in _DOUBAN_SUFFIX_VARIANTS.items():
             if orig_char in sub_part:
                 for rep in replacements:
@@ -752,40 +779,70 @@ def _generate_douban_queries(show_name: str) -> list[str]:
                     var_combo = f"{main_part} {var_sub}"
                     if var_combo not in queries:
                         queries.append(var_combo)
-        if sub_part not in queries:
+        if sub_part not in queries and len(sub_part) >= 2:
             queries.append(sub_part)
         if len(sub_part) > 2 and sub_part[:-1] not in queries:
             queries.append(sub_part[:-1])
-        if main_part not in queries:
+        if main_part not in queries and len(main_part) >= 2:
             queries.append(main_part)
+
+    # 提取纯中文片段
+    cn_parts = re.findall(r"[\u4e00-\u9fa5]{2,}", spaced)
+    for cp in cn_parts:
+        if cp not in queries:
+            queries.append(cp)
+
+    # 提取纯英文片段
+    en_parts = re.findall(r"[a-zA-Z]{3,}(?:\s+[a-zA-Z]{3,})*", spaced)
+    for ep in en_parts:
+        if ep not in queries:
+            queries.append(ep)
+
+    if file_hints:
+        for fh in file_hints:
+            if fh and fh not in queries:
+                queries.append(fh)
 
     return queries
 
+_generate_douban_queries = _generate_search_queries
+
 
 async def _fetch_seasons_via_douban(
-    mp_client, show_name: str, log
+    mp_client,
+    show_name: str,
+    log=None,
+    needed_seasons: list[int] | None = None,
+    extra_queries: list[str] | None = None,
 ) -> tuple[str | None, dict[int, dict]]:
-    """通过 MoviePilot 搜索豆瓣并获取真实季集数据。
-    
-    具备行业领先的：
-    1. 多季独立条目聚合（解决综艺/日韩剧各季独立条目问题）；
-    2. 副标题变体纠偏（殿 <-> 传 / 篇等）；
-    3. 又名与别名深度季号映射（解决《三时三餐 高敞篇》实际为第三季的问题）。
-
-    Returns:
-        (douban_id, {season_num: {"total": N, "finished": bool}})
-    """
+    """通过豆瓣获取真实季集数据（双轨驱动：豆瓣 Suggest 极速探测 + MoviePilot 媒体详情代理）。"""
     douban_id: str | None = None
     seasons_data: dict[int, dict] = {}
 
-    year_match = re.search(r"\((\d{4})\)", show_name)
-    target_year = year_match.group(1) if year_match else ""
+    queries = list(extra_queries or [])
+    for q in _generate_search_queries(show_name):
+        if q not in queries:
+            queries.append(q)
 
-    queries = _generate_douban_queries(show_name)
+    candidate_items: list[dict] = []
     seen_did = set()
-    candidate_items = []
 
     for q in queries:
+        # A: 豆瓣公开 Suggest API（轻量快速，免登录）
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as http_c:
+                sug_url = f"https://movie.douban.com/j/subject_suggest?q={urllib.parse.quote(q)}"
+                resp = await http_c.get(sug_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+                if resp.status_code == 200:
+                    for it in resp.json():
+                        did = str(it.get("id") or "")
+                        if did and did not in seen_did:
+                            seen_did.add(did)
+                            candidate_items.append({"douban_id": did, "title": it.get("title") or "", "year": it.get("year")})
+        except Exception:
+            pass
+
+        # B: MoviePilot 代理源搜索
         try:
             res = await mp_client.search_media(q, source="douban")
             if isinstance(res, list):
@@ -798,22 +855,16 @@ async def _fetch_seasons_via_douban(
             if log:
                 log.warning("豆瓣搜索关键词 '%s' 出错: %s", q, e)
 
-        if candidate_items:
-            has_strong = any(
-                str(it.get("year")) == target_year or queries[0] in str(it.get("title") or "")
-                for it in candidate_items
-            )
-            if has_strong and len(candidate_items) >= 4:
-                break
+        if len(candidate_items) >= 8:
+            break
 
     # 多季条目深度解析与别名季号映射
-    for it in candidate_items[:10]:
+    for it in candidate_items[:12]:
         did = str(it.get("douban_id") or it.get("media_id") or "")
         it_title = str(it.get("title") or "")
         try:
             detail = await mp_client.get_douban_media_info(did, type_name="电视剧")
 
-            # 确定该豆瓣条目的真实季号
             real_sn = None
             if it.get("season"):
                 try:
@@ -837,7 +888,6 @@ async def _fetch_seasons_via_douban(
                     try:
                         if not isinstance(eps, list) or not eps:
                             continue
-                        # 如果从标题/别名中识别出了明确的季号且原键为 1，则将其归入真实季号
                         target_sn = real_sn if (real_sn is not None and s_str == "1") else int(s_str)
                         if target_sn not in seasons_data:
                             seasons_data[target_sn] = {
@@ -851,10 +901,130 @@ async def _fetch_seasons_via_douban(
                                     "从豆瓣条目 [%s] (ID=%s, 别名=%s) 成功解析第 S%02d 季共 %d 集",
                                     it_title, did, detail.get("names"), target_sn, len(eps)
                                 )
+                        # 单季独立衍生剧映射（如本地目录为 S03/S04，豆瓣为独立衍生条目且标注为第 1 季）
+                        elif needed_seasons and len(needed_seasons) == 1 and s_str == "1":
+                            req_sn = needed_seasons[0]
+                            if req_sn not in seasons_data:
+                                seasons_data[req_sn] = {
+                                    "total": len(eps),
+                                    "finished": True,
+                                }
+                                if not douban_id:
+                                    douban_id = did
+                                if log:
+                                    log.info(
+                                        "从豆瓣单季衍生条目 [%s] (ID=%s) 映射第 S%02d 季共 %d 集",
+                                        it_title, did, req_sn, len(eps)
+                                    )
                     except Exception:
                         pass
+            elif detail.get("number_of_episodes"):
+                try:
+                    total_eps = int(detail["number_of_episodes"])
+                    target_sn = real_sn or (needed_seasons[0] if needed_seasons and len(needed_seasons) == 1 else 1)
+                    if target_sn not in seasons_data and total_eps > 0:
+                        seasons_data[target_sn] = {
+                            "total": total_eps,
+                            "finished": True,
+                        }
+                        if not douban_id:
+                            douban_id = did
+                        if log:
+                            log.info("从豆瓣条目 [%s] (ID=%s) 获取总集数: %d 集", it_title, did, total_eps)
+                except Exception:
+                    pass
         except Exception as det_err:
             if log:
                 log.warning("获取豆瓣条目 ID=%s 详情失败: %s", did, det_err)
 
     return douban_id, seasons_data
+
+
+async def _resolve_show_metadata(
+    show_name: str,
+    needed_seasons: list[int],
+    tmdb_id_num: int | None,
+    mp_client,
+    tmdb_client=None,
+    log=None,
+) -> dict[int, dict]:
+    """多层闭环媒体元数据解析引擎：
+    Pass 1: 本地指定的 TMDB ID 查询
+    Pass 2: TMDB 标题级检索与母系列/跨语种识别（补齐缺失季）
+    Pass 3: 豆瓣双轨深度检索（公开 Suggest API + MoviePilot 代理，支持别名/变体/衍生剧映射）
+    """
+    seasons_data: dict[int, dict] = {}
+
+    def is_complete() -> bool:
+        if not needed_seasons:
+            return bool(seasons_data)
+        for sn in needed_seasons:
+            if sn not in seasons_data or not (seasons_data[sn].get("total") or 0) > 0:
+                return False
+        return True
+
+    # 1. 优先尝试本地指定的 TMDB ID
+    if mp_client and tmdb_id_num:
+        seasons_data = await _fetch_seasons_by_tmdb_id(mp_client, tmdb_id_num, log)
+        if is_complete():
+            return seasons_data
+
+    # 2. TMDB 标题与母系列检索（补齐缺失季度）
+    queries = _generate_search_queries(show_name)
+    discovered_cn: list[str] = []
+
+    if tmdb_client and not is_complete():
+        missing_seasons = [sn for sn in needed_seasons if sn not in seasons_data or not (seasons_data[sn].get("total") or 0) > 0]
+        for q in queries:
+            try:
+                cands = await tmdb_client.search_tv(q)
+                for cand in cands[:5]:
+                    cid = cand.get("id")
+                    if not cid:
+                        continue
+                    cname = cand.get("name") or ""
+                    if cname and cname not in discovered_cn:
+                        discovered_cn.append(cname)
+                    detail = await tmdb_client.get_tv_detail(cid)
+                    for s in detail.get("seasons", []):
+                        sn = s.get("season_number")
+                        cnt = s.get("episode_count") or 0
+                        if sn in missing_seasons and cnt > 0 and sn not in seasons_data:
+                            seasons_data[sn] = {"total": cnt, "finished": True}
+                            if log:
+                                log.info("剧集 %s 缺失第 S%02d 季，通过 TMDB 检索系列 [%s] (ID=%d) 成功补齐: %d 集",
+                                         show_name, sn, cname, cid, cnt)
+                if is_complete():
+                    break
+            except Exception as e:
+                if log:
+                    log.warning("TMDB 搜索 '%s' 异常: %s", q, e)
+            if is_complete():
+                break
+
+    # 3. 豆瓣双轨深度检索兜底
+    if mp_client and not is_complete():
+        db_id, db_seasons = await _fetch_seasons_via_douban(
+            mp_client=mp_client,
+            show_name=show_name,
+            log=log,
+            needed_seasons=needed_seasons,
+            extra_queries=discovered_cn,
+        )
+        if db_seasons:
+            for sn, info in db_seasons.items():
+                if sn not in seasons_data or not (seasons_data[sn].get("total") or 0) > 0:
+                    seasons_data[sn] = info
+            if log:
+                log.info("剧集 %s 通过豆瓣深度检索 (douban_id=%s) 成功兜底获取到季集信息: %s",
+                         show_name, db_id, {k: v.get("total") for k, v in db_seasons.items()})
+
+    # 4. 若依然无信息且未指定 tmdb_id，通过 MoviePilot 兜底检索
+    if not is_complete() and not tmdb_id_num and mp_client:
+        _, mp_tmdb_data = await _fetch_tmdb_via_mp(mp_client, show_name, log)
+        if mp_tmdb_data:
+            for sn, info in mp_tmdb_data.items():
+                if sn not in seasons_data or not (seasons_data[sn].get("total") or 0) > 0:
+                    seasons_data[sn] = info
+
+    return seasons_data

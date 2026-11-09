@@ -29,30 +29,38 @@ class TMDBClient:
         )
 
     async def _get(self, path: str, **extra_params: Any) -> Any:
-        resp = await self._client.get(f"{self.BASE_URL}{path}", params=extra_params)
-        resp.raise_for_status()
-        return resp.json()
+        try:
+            resp = await self._client.get(f"{self.BASE_URL}{path}", params=extra_params)
+            resp.raise_for_status()
+            return resp.json()
+        except Exception:
+            return None
 
     async def get_tv_detail(self, tv_id: int) -> dict:
         """获取电视剧详情（含季列表概要）。"""
-        return await self._get(f"/tv/{tv_id}")
+        res = await self._get(f"/tv/{tv_id}")
+        return res if isinstance(res, dict) else {}
 
     async def get_season_detail(self, tv_id: int, season_number: int) -> dict:
         """获取某一季的详细信息（含各集列表）。"""
-        return await self._get(f"/tv/{tv_id}/season/{season_number}")
+        res = await self._get(f"/tv/{tv_id}/season/{season_number}")
+        return res if isinstance(res, dict) else {}
 
     async def get_episode_detail(
         self, tv_id: int, season_number: int, episode_number: int
     ) -> dict:
         """获取单集详情。"""
-        return await self._get(
+        res = await self._get(
             f"/tv/{tv_id}/season/{season_number}/episode/{episode_number}"
         )
+        return res if isinstance(res, dict) else {}
 
     async def search_tv(self, query: str) -> list[dict]:
         """搜索电视剧。"""
         data = await self._get("/search/tv", query=query)
-        return data.get("results", [])
+        if isinstance(data, dict):
+            return data.get("results", [])
+        return []
 
     async def close(self) -> None:
         """关闭底层 HTTP 连接。"""

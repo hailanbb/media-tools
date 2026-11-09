@@ -150,11 +150,13 @@ async def execute_inspection(task_id: str, db: AsyncSession) -> InspectionResult
         # 3. 调用初检引擎 — 注入真实客户端
         from app.clients.clouddrive2 import CloudDrive2Client
         from app.clients.moviepilot import MoviePilotClient
+        from app.clients.tmdb import TMDBClient
         from app.config import get_settings
 
         settings = get_settings()
         cd2 = CloudDrive2Client()
         mp = MoviePilotClient()
+        tmdb = TMDBClient()
         TASK_CANCELLED.discard(task_id)
         control_event = get_task_control_event(task_id)
         control_event.set()
@@ -165,6 +167,7 @@ async def execute_inspection(task_id: str, db: AsyncSession) -> InspectionResult
                 source_path=task.source_path,
                 cd2_client=cd2,
                 mp_client=mp,
+                tmdb_client=tmdb,
                 archive_root=settings.archive_root,
                 global_source_root=settings.source_root,
                 progress_callback=_on_progress,
@@ -175,6 +178,7 @@ async def execute_inspection(task_id: str, db: AsyncSession) -> InspectionResult
         finally:
             await cd2.close()
             await mp.close()
+            await tmdb.close()
 
         # 4. 清除旧记录，写入新结果
         old_records = await db.execute(

@@ -7,7 +7,7 @@ from functools import lru_cache
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-VERSION = "2.5.1"
+VERSION = "2.5.2"
 
 
 
@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     mp_token: str = ""
 
     # ── TMDB ──────────────────────────────────────────────
-    tmdb_api_key: str = ""
+    tmdb_api_key: str = "ed74a00b26fb863a58d378b2e97131b1"
 
     # ── 路径映射 ──────────────────────────────────────────
     source_root: str = ""       # 源目录根路径，如 /115/Library_incs/nas
