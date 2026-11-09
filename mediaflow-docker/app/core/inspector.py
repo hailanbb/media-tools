@@ -273,7 +273,7 @@ async def run_inspection(
             tmdb_id_num = int(tmdb_match.group(1))
 
         needed_seasons = [sn for sn, _ in season_dirs]
-        tmdb_seasons_data = await _resolve_show_metadata(
+        resolved_tmdb_id, tmdb_seasons_data = await _resolve_show_metadata(
             show_name=show_name,
             needed_seasons=needed_seasons,
             tmdb_id_num=tmdb_id_num,
@@ -281,6 +281,8 @@ async def run_inspection(
             tmdb_client=active_tmdb,
             log=log,
         )
+        if resolved_tmdb_id:
+            tmdb_id_num = resolved_tmdb_id
 
         for season_num, season_item in sorted(season_dirs, key=lambda x: x[0]):
             season_path = season_item["path"]
@@ -315,6 +317,30 @@ async def run_inspection(
                 info = tmdb_seasons_data[season_num]
                 total_eps = info.get("total")
                 season_finished = info.get("finished", False)
+
+            # 超范围集数/缺失官方集数智能自愈校准保护 (Auto-Recalibrate on Overflow / Missing Total)
+            if recognized and (total_eps is None or max(recognized) > total_eps):
+                calib_total, calib_finished, calib_tmdb_id, calib_src = await auto_recalibrate_season(
+                    show_name=show_name,
+                    season_num=season_num,
+                    recognized=recognized,
+                    current_total=total_eps,
+                    current_tmdb_id=tmdb_id_num,
+                    tmdb_client=active_tmdb,
+                    mp_client=mp_client,
+                    log=log,
+                )
+                if calib_total and calib_total >= max(recognized):
+                    if log:
+                        log.info(
+                            "剧集 %s S%02d 触发超范围自愈校准：原集数 %s -> 校准为 %d 集 (来源: %s)",
+                            show_name, season_num, total_eps, calib_total, calib_src
+                        )
+                    total_eps = calib_total
+                    season_finished = calib_finished
+                    if calib_tmdb_id:
+                        tmdb_id_num = calib_tmdb_id
+                    tmdb_seasons_data[season_num] = {"total": total_eps, "finished": season_finished}
 
             status, detail = diagnose_season(
                 recognized=recognized,
@@ -963,6 +989,239 @@ async def _fetch_seasons_via_douban(
     return douban_id, seasons_data
 
 
+async def auto_recalibrate_season(
+    show_name: str,
+    season_num: int,
+    recognized: list[int],
+    current_total: int | None,
+    current_tmdb_id: int | None,
+    tmdb_client=None,
+    mp_client=None,
+    log=None,
+) -> tuple[int | None, bool, int | None, str | None]:
+    """对存在超范围集数 (Overflow) 或缺失官方集数的季度进行自动自愈校准。
+
+    核心逻辑：
+    1. 当本地已识别集数超过官方总集数（如本地 18 集，元数据仅 10 集）时，不武断报错；
+    2. 优先通过 TMDB 检索多候选条目，按照“集数拟合度（精确吻合 +80 分）+ 年份契合度 + 标题纯度”进行多维打分竞选；
+    3. 若 TMDB 无法满足，自动升轨至豆瓣双轨检索（Suggest API + MoviePilot 媒体详情代理），
+       定向检索对应季度条目，精准提取真实总集数；
+    4. 成功校准后，自动返回更新后的总集数、完结状态与真实 TMDB ID。
+
+    Returns:
+        (calibrated_total, is_finished, calibrated_tmdb_id, source_desc)
+    """
+    if not recognized:
+        return current_total, False, current_tmdb_id, None
+
+    target_count = max(len(recognized), max(recognized))
+    if target_count <= 0:
+        return current_total, False, current_tmdb_id, None
+
+    clean_title = re.sub(r"\s*\[.*?\]\s*", " ", show_name)
+    m_year = re.search(r"\((\d{4})\)", clean_title)
+    show_year = int(m_year.group(1)) if m_year else None
+    clean_title = re.sub(r"\s*\(\d{4}\)\s*", " ", clean_title).strip()
+    clean_title = re.sub(r"\s+\d{4}$", "", clean_title).strip()
+    if not clean_title:
+        clean_title = show_name
+
+    # ── 1. TMDB 多候选深度集数拟合竞选 ─────────────────────
+    if tmdb_client:
+        try:
+            queries = _generate_search_queries(show_name)
+            candidate_pool: list[dict] = []
+            seen_cids = set()
+
+            for q in queries:
+                try:
+                    cands = await tmdb_client.search_tv(q)
+                    for cand in cands[:8]:
+                        cid = cand.get("id")
+                        if not cid or cid in seen_cids:
+                            continue
+                        seen_cids.add(cid)
+                        candidate_pool.append(cand)
+                except Exception:
+                    pass
+                if len(candidate_pool) >= 12:
+                    break
+
+            best_cand = None
+            best_score = -9999
+
+            for cand in candidate_pool:
+                cid = cand.get("id")
+                cname = cand.get("name") or ""
+                air_date = cand.get("first_air_date") or ""
+                c_year = int(air_date[:4]) if len(air_date) >= 4 and air_date[:4].isdigit() else None
+
+                try:
+                    detail = await tmdb_client.get_tv_detail(cid)
+                    for s in detail.get("seasons", []):
+                        if s.get("season_number") == season_num:
+                            cnt = s.get("episode_count") or 0
+                            if cnt <= 0:
+                                continue
+
+                            score = 0
+                            # A: 集数拟合度（核心权重）
+                            if cnt == target_count:
+                                score += 80  # 完美全覆盖且不产生任何超范围
+                            elif cnt > target_count:
+                                score += 25  # 官方更多（可能连载中或含花絮加更）
+                            else:
+                                score -= (target_count - cnt) * 12  # 官方仍少于本地，仍会造成溢出，重罚
+
+                            # B: 年份契合度
+                            if show_year and c_year:
+                                if show_year == c_year:
+                                    score += 35
+                                elif abs(show_year - c_year) <= 1:
+                                    score += 15
+                                else:
+                                    score -= 20
+
+                            # C: 标题语义纯净度
+                            if clean_title == cname.strip():
+                                score += 25
+                            elif clean_title in cname:
+                                score += 15
+
+                            s_finished = False
+                            s_air = s.get("air_date") or ""
+                            if s_air:
+                                try:
+                                    from datetime import datetime as _dt
+                                    s_d = _dt.strptime(s_air, "%Y-%m-%d")
+                                    if (_dt.now() - s_d).days > 180:
+                                        s_finished = True
+                                except Exception:
+                                    pass
+
+                            if score > best_score:
+                                best_score = score
+                                best_cand = {
+                                    "tmdb_id": cid,
+                                    "name": cname,
+                                    "total": cnt,
+                                    "finished": s_finished,
+                                    "source": f"TMDB系列 [{cname}] (ID={cid})",
+                                }
+                except Exception:
+                    pass
+
+            if best_cand and best_score >= 50 and best_cand["total"] >= target_count:
+                if log:
+                    log.info(
+                        "剧集 %s S%02d TMDB 自愈校准优胜选出: %s, 官方集数 %d 集 (拟合得分=%d)",
+                        show_name, season_num, best_cand["source"], best_cand["total"], best_score
+                    )
+                return best_cand["total"], best_cand["finished"], best_cand["tmdb_id"], best_cand["source"]
+        except Exception as e:
+            if log:
+                log.warning("TMDB 自愈校准执行异常: %s", e)
+
+    # ── 2. 豆瓣权威双轨定向检索兜底 ───────────────────────
+    if mp_client:
+        try:
+            cn_season = {
+                1: "一", 2: "二", 3: "三", 4: "四", 5: "五",
+                6: "六", 7: "七", 8: "八", 9: "九", 10: "十",
+                11: "十一", 12: "十二"
+            }.get(season_num, str(season_num))
+
+            db_queries = [
+                f"{clean_title} 第{cn_season}季",
+                f"{clean_title} 第{season_num}季",
+                f"{clean_title} S{season_num:02d}",
+            ]
+            if show_year:
+                db_queries.append(f"{clean_title} {show_year}")
+            db_queries.append(clean_title)
+
+            candidate_dids: list[tuple[str, str]] = []
+            seen_dids = set()
+
+            async with httpx.AsyncClient(timeout=8.0) as http_c:
+                for q in db_queries:
+                    # 途径 A: 豆瓣公开 Suggest API
+                    try:
+                        sug_url = f"https://movie.douban.com/j/subject_suggest?q={urllib.parse.quote(q)}"
+                        resp = await http_c.get(sug_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+                        if resp.status_code == 200:
+                            for it in resp.json():
+                                did = str(it.get("id") or "")
+                                if did and did not in seen_dids:
+                                    seen_dids.add(did)
+                                    candidate_dids.append((did, it.get("title") or ""))
+                    except Exception:
+                        pass
+
+                    # 途径 B: MoviePilot 媒体搜索代理
+                    try:
+                        res = await mp_client.search_media(q, source="douban")
+                        if isinstance(res, list):
+                            for item in res:
+                                did = str(item.get("douban_id") or item.get("media_id") or item.get("id") or "")
+                                if did and did != "None" and did not in seen_dids:
+                                    seen_dids.add(did)
+                                    candidate_dids.append((did, item.get("title") or ""))
+                    except Exception:
+                        pass
+
+                    if len(candidate_dids) >= 12:
+                        break
+
+            for did, it_title in candidate_dids[:12]:
+                try:
+                    detail = await mp_client.get_douban_media_info(did, type_name="电视剧")
+                    if not detail:
+                        continue
+
+                    real_sn = _parse_season_from_text(it_title)
+                    if real_sn is None and isinstance(detail.get("names"), list):
+                        for alias in detail["names"]:
+                            sn_cand = _parse_season_from_text(alias)
+                            if sn_cand is not None:
+                                real_sn = sn_cand
+                                break
+
+                    seasons_dict = detail.get("seasons") or {}
+                    if isinstance(seasons_dict, dict) and seasons_dict:
+                        for s_key in [str(season_num), "1"]:
+                            if s_key in seasons_dict:
+                                eps = seasons_dict[s_key]
+                                if isinstance(eps, list) and len(eps) >= target_count:
+                                    if s_key == "1" and season_num != 1 and real_sn != season_num:
+                                        continue
+                                    source_desc = f"豆瓣权威条目 [{it_title}] (ID={did})"
+                                    if log:
+                                        log.info(
+                                            "剧集 %s S%02d 豆瓣自愈校准命中: %s, 官方集数 %d 集",
+                                            show_name, season_num, source_desc, len(eps)
+                                        )
+                                    return len(eps), True, None, source_desc
+
+                    num_eps = detail.get("number_of_episodes")
+                    if num_eps and int(num_eps) >= target_count:
+                        if real_sn == season_num or (season_num == 1 and real_sn is None):
+                            source_desc = f"豆瓣权威条目 [{it_title}] (ID={did})"
+                            if log:
+                                log.info(
+                                    "剧集 %s S%02d 豆瓣总集数自愈校准命中: %s, 共 %d 集",
+                                    show_name, season_num, source_desc, int(num_eps)
+                                )
+                            return int(num_eps), True, None, source_desc
+                except Exception:
+                    pass
+        except Exception as e:
+            if log:
+                log.warning("豆瓣自愈校准执行异常: %s", e)
+
+    return current_total, False, current_tmdb_id, None
+
+
 async def _resolve_show_metadata(
     show_name: str,
     needed_seasons: list[int],
@@ -970,13 +1229,18 @@ async def _resolve_show_metadata(
     mp_client,
     tmdb_client=None,
     log=None,
-) -> dict[int, dict]:
+) -> tuple[int | None, dict[int, dict]]:
     """多层闭环媒体元数据解析引擎：
-    Pass 1: 本地指定的 TMDB ID 查询
-    Pass 2: TMDB 标题级检索与母系列/跨语种识别（补齐缺失季）
+    Pass 1: 本地指定的 TMDB ID 查询 (若有效则保留，若返回 404/空则重置待纠偏)
+    Pass 2: TMDB 标题级多维智能打分检索与母系列/跨语种识别（综合年份、标题纯度、季度覆盖优胜劣汰）
     Pass 3: 豆瓣双轨深度检索（公开 Suggest API + MoviePilot 代理，支持别名/变体/衍生剧映射）
+    Pass 4: MoviePilot TMDB 兜底检索
+
+    Returns:
+        (resolved_tmdb_id, seasons_data)
     """
     seasons_data: dict[int, dict] = {}
+    resolved_id: int | None = tmdb_id_num
 
     def is_complete() -> bool:
         if not needed_seasons:
@@ -990,48 +1254,105 @@ async def _resolve_show_metadata(
     if mp_client and tmdb_id_num:
         seasons_data = await _fetch_seasons_by_tmdb_id(mp_client, tmdb_id_num, log)
         if is_complete():
-            return seasons_data
+            return resolved_id, seasons_data
+        elif seasons_data:
+            # 至少获取到了部分季度
+            pass
+        else:
+            # tmdb_id_num 完全失效 (例如 404 历史死链或已被删除合并)
+            if log:
+                log.warning("本地目录指定的 tmdb_id=%d 未获取到任何季信息，重置为待纠偏状态", tmdb_id_num)
+            resolved_id = None
 
     # 2. TMDB 标题与母系列检索（补齐缺失季度）
     queries = _generate_search_queries(show_name)
     discovered_cn: list[str] = []
 
+    clean_name = re.sub(r"\s*\[.*?\]\s*", " ", show_name)
+    m_year = re.search(r"\((\d{4})\)", clean_name)
+    show_year = int(m_year.group(1)) if m_year else None
+    clean_name = re.sub(r"\s*\(\d{4}\)\s*", " ", clean_name).strip()
+    clean_name = re.sub(r"\s+\d{4}$", "", clean_name).strip()
+
     if tmdb_client and not is_complete():
         missing_seasons = [sn for sn in needed_seasons if sn not in seasons_data or not (seasons_data[sn].get("total") or 0) > 0]
+
+        candidate_pool: list[dict] = []
+        seen_cids = set()
+
         for q in queries:
             try:
                 cands = await tmdb_client.search_tv(q)
-                for cand in cands[:5]:
+                for cand in cands[:8]:
                     cid = cand.get("id")
-                    if not cid:
+                    if not cid or cid in seen_cids:
                         continue
+                    seen_cids.add(cid)
                     cname = cand.get("name") or ""
-                    if cname and cname not in discovered_cn:
-                        discovered_cn.append(cname)
-                    detail = await tmdb_client.get_tv_detail(cid)
-                    for s in detail.get("seasons", []):
-                        sn = s.get("season_number")
-                        cnt = s.get("episode_count") or 0
-                        if sn in missing_seasons and cnt > 0 and sn not in seasons_data:
-                            s_finished = False
-                            s_air = s.get("air_date") or ""
-                            if s_air:
-                                try:
-                                    from datetime import datetime as _dt
-                                    s_d = _dt.strptime(s_air, "%Y-%m-%d")
-                                    if (_dt.now() - s_d).days > 180:
-                                        s_finished = True
-                                except Exception:
-                                    pass
-                            seasons_data[sn] = {"total": cnt, "finished": s_finished}
-                            if log:
-                                log.info("剧集 %s 缺失第 S%02d 季，通过 TMDB 检索系列 [%s] (ID=%d) 成功补齐: %d 集",
-                                         show_name, sn, cname, cid, cnt)
-                if is_complete():
-                    break
+                    air_date = cand.get("first_air_date") or ""
+                    c_year = int(air_date[:4]) if len(air_date) >= 4 and air_date[:4].isdigit() else None
+
+                    # 候选条目初评打分
+                    cand_score = 0
+                    if show_year and c_year:
+                        if show_year == c_year:
+                            cand_score += 40
+                        elif abs(show_year - c_year) <= 1:
+                            cand_score += 20
+                        else:
+                            cand_score -= 20
+
+                    if clean_name and cname.strip() == clean_name:
+                        cand_score += 30
+                    elif clean_name and clean_name in cname:
+                        cand_score += 15
+
+                    candidate_pool.append({
+                        "id": cid,
+                        "name": cname,
+                        "score": cand_score,
+                        "year": c_year,
+                    })
             except Exception as e:
                 if log:
                     log.warning("TMDB 搜索 '%s' 异常: %s", q, e)
+            if len(candidate_pool) >= 12:
+                break
+
+        # 按打分优胜劣汰，优先评估高分候选
+        candidate_pool.sort(key=lambda x: x["score"], reverse=True)
+
+        for cand in candidate_pool:
+            cid = cand["id"]
+            cname = cand["name"]
+            if cname and cname not in discovered_cn:
+                discovered_cn.append(cname)
+            try:
+                detail = await tmdb_client.get_tv_detail(cid)
+                matched_any = False
+                for s in detail.get("seasons", []):
+                    sn = s.get("season_number")
+                    cnt = s.get("episode_count") or 0
+                    if sn in missing_seasons and cnt > 0 and sn not in seasons_data:
+                        s_finished = False
+                        s_air = s.get("air_date") or ""
+                        if s_air:
+                            try:
+                                from datetime import datetime as _dt
+                                s_d = _dt.strptime(s_air, "%Y-%m-%d")
+                                if (_dt.now() - s_d).days > 180:
+                                    s_finished = True
+                            except Exception:
+                                pass
+                        seasons_data[sn] = {"total": cnt, "finished": s_finished}
+                        matched_any = True
+                        if log:
+                            log.info("剧集 %s 缺失第 S%02d 季，通过 TMDB 检索系列 [%s] (ID=%d, 得分=%d) 成功补齐: %d 集",
+                                     show_name, sn, cname, cid, cand["score"], cnt)
+                if matched_any and not resolved_id:
+                    resolved_id = cid
+            except Exception:
+                pass
             if is_complete():
                 break
 
@@ -1053,11 +1374,13 @@ async def _resolve_show_metadata(
                          show_name, db_id, {k: v.get("total") for k, v in db_seasons.items()})
 
     # 4. 若依然无信息且未指定 tmdb_id，通过 MoviePilot 兜底检索
-    if not is_complete() and not tmdb_id_num and mp_client:
-        _, mp_tmdb_data = await _fetch_tmdb_via_mp(mp_client, show_name, log)
+    if not is_complete() and not resolved_id and mp_client:
+        mp_tid, mp_tmdb_data = await _fetch_tmdb_via_mp(mp_client, show_name, log)
         if mp_tmdb_data:
             for sn, info in mp_tmdb_data.items():
                 if sn not in seasons_data or not (seasons_data[sn].get("total") or 0) > 0:
                     seasons_data[sn] = info
+            if mp_tid and not resolved_id:
+                resolved_id = mp_tid
 
-    return seasons_data
+    return resolved_id, seasons_data

@@ -144,6 +144,100 @@ class TestInspectionEngine(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_08_auto_recalibrate_season_on_overflow(self):
+        """测试超范围异常自愈校准：本地 18 集但元数据误判为 10 集时，自动校准为 18 集可归档."""
+        import asyncio
+        from unittest.mock import AsyncMock
+        from app.core.inspector import auto_recalibrate_season
+
+        mock_tmdb = AsyncMock()
+        mock_mp = AsyncMock()
+
+        # 模拟 TMDB 搜索返回 2 个候选：渔村篇 (2015, S2=10集) 与 旌善篇 (2014, S2=18集)
+        mock_tmdb.search_tv.return_value = [
+            {"id": 68157, "name": "三时三餐 渔村篇", "first_air_date": "2015-01-23"},
+            {"id": 68156, "name": "三时三餐 旌善篇", "first_air_date": "2014-10-17"},
+        ]
+
+        async def get_tv_detail_mock(tv_id):
+            if tv_id == 68157:
+                return {"id": 68157, "name": "三时三餐 渔村篇", "seasons": [{"season_number": 2, "episode_count": 10, "air_date": "2015-10-09"}]}
+            elif tv_id == 68156:
+                return {"id": 68156, "name": "三时三餐 旌善篇", "seasons": [{"season_number": 2, "episode_count": 18, "air_date": "2015-05-15"}]}
+            return {}
+
+        mock_tmdb.get_tv_detail.side_effect = get_tv_detail_mock
+
+        async def run():
+            # 本地实测 18 集，原元数据为 10 集 (触发超范围异常)
+            new_tot, is_fin, new_tid, src = await auto_recalibrate_season(
+                show_name="三时三餐 (2014) [tmdbid=211502]",
+                season_num=2,
+                recognized=list(range(1, 19)),
+                current_total=10,
+                current_tmdb_id=211502,
+                tmdb_client=mock_tmdb,
+                mp_client=mock_mp,
+            )
+            # 必须精准选拔出 18 集的 68156
+            self.assertEqual(new_tot, 18)
+            self.assertEqual(new_tid, 68156)
+            self.assertTrue(is_fin)
+            self.assertIn("68156", src)
+
+            # 诊断应直接变为 archive_ready
+            diag_status, diag_detail = diagnose_season(
+                recognized=list(range(1, 19)),
+                total_episodes=new_tot,
+                season_finished=is_fin,
+                has_duplicates=False,
+            )
+            self.assertEqual(diag_status, "archive_ready")
+            self.assertIn("可归档", diag_detail)
+
+        asyncio.run(run())
+
+    def test_09_resolve_show_metadata_candidate_scoring(self):
+        """测试元数据解析引擎的候选打分竞选：年份吻合的条目必须优先胜出."""
+        import asyncio
+        from unittest.mock import AsyncMock
+        from app.core.inspector import _resolve_show_metadata
+
+        mock_tmdb = AsyncMock()
+        mock_mp = AsyncMock()
+
+        # 模拟 MP 对无效 ID 211502 返回空
+        mock_mp.get_tmdb_seasons.return_value = []
+
+        # 模拟 TMDB 返回候选（2015 年条目排在前面，2014 年条目排在后面）
+        mock_tmdb.search_tv.return_value = [
+            {"id": 68157, "name": "三时三餐 渔村篇", "first_air_date": "2015-01-23"},
+            {"id": 68156, "name": "三时三餐 旌善篇", "first_air_date": "2014-10-17"},
+        ]
+
+        async def get_tv_detail_mock(tv_id):
+            if tv_id == 68157:
+                return {"id": 68157, "name": "三时三餐 渔村篇", "seasons": [{"season_number": 1, "episode_count": 9, "air_date": "2015-01-23"}]}
+            elif tv_id == 68156:
+                return {"id": 68156, "name": "三时三餐 旌善篇", "seasons": [{"season_number": 1, "episode_count": 11, "air_date": "2014-10-17"}]}
+            return {}
+
+        mock_tmdb.get_tv_detail.side_effect = get_tv_detail_mock
+
+        async def run():
+            resolved_id, seasons = await _resolve_show_metadata(
+                show_name="三时三餐 (2014) [tmdbid=211502]",
+                needed_seasons=[1],
+                tmdb_id_num=211502,
+                mp_client=mock_mp,
+                tmdb_client=mock_tmdb,
+            )
+            # 因为 2014 年份匹配，68156 得分更高，必须优先被选中
+            self.assertEqual(resolved_id, 68156)
+            self.assertEqual(seasons[1]["total"], 11)
+
+        asyncio.run(run())
+
 
 if __name__ == "__main__":
     unittest.main()
