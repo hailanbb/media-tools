@@ -678,6 +678,48 @@ _DOUBAN_SUFFIX_VARIANTS = {
     "录": ["志", "传", "记"],
 }
 
+_CN_SEASON_NUMS = {
+    "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+    "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10
+}
+
+
+def _parse_season_from_text(text: str) -> int | None:
+    """从剧集标题、别名（又名）或描述文本中推断季号（支持中文数字与阿拉伯数字）。"""
+    if not text:
+        return None
+
+    # 1. 阿拉伯数字匹配: 第3季, 第03季, Season 3, S3
+    m1 = re.search(r"第\s*(\d{1,2})\s*[季部辑期]", text)
+    if m1:
+        return int(m1.group(1))
+
+    m2 = re.search(r"[Ss]eason\s*(\d{1,2})", text, re.IGNORECASE)
+    if m2:
+        return int(m2.group(1))
+
+    m3 = re.search(r"[Ss](\d{1,2})(?:\s|$|[-_])", text)
+    if m3:
+        return int(m3.group(1))
+
+    # 2. 中文数字匹配: 第一季, 第二季, 第三季, 第十季, 第十二季, 第二十一季
+    m_cn = re.search(r"第\s*([一二两三四五六七八九十]+)\s*[季部辑期]", text)
+    if m_cn:
+        cn_str = m_cn.group(1)
+        if len(cn_str) == 1 and cn_str in _CN_SEASON_NUMS:
+            return _CN_SEASON_NUMS[cn_str]
+        elif cn_str.startswith("十"):
+            if len(cn_str) == 1:
+                return 10
+            elif len(cn_str) == 2 and cn_str[1] in _CN_SEASON_NUMS:
+                return 10 + _CN_SEASON_NUMS[cn_str[1]]
+        elif len(cn_str) == 2 and cn_str[1] == "十" and cn_str[0] in _CN_SEASON_NUMS:
+            return _CN_SEASON_NUMS[cn_str[0]] * 10
+        elif len(cn_str) == 3 and cn_str[1] == "十" and cn_str[0] in _CN_SEASON_NUMS and cn_str[2] in _CN_SEASON_NUMS:
+            return _CN_SEASON_NUMS[cn_str[0]] * 10 + _CN_SEASON_NUMS[cn_str[2]]
+
+    return None
+
 
 def _generate_douban_queries(show_name: str) -> list[str]:
     """生成豆瓣智能搜索的多轮候选词（含副标题切分与殿/传等变体字纠偏）。"""
@@ -723,7 +765,12 @@ def _generate_douban_queries(show_name: str) -> list[str]:
 async def _fetch_seasons_via_douban(
     mp_client, show_name: str, log
 ) -> tuple[str | None, dict[int, dict]]:
-    """通过 MoviePilot 搜索豆瓣并获取真实季集数据（支持日韩剧、国产剧、多季综艺与变体字纠偏）。
+    """通过 MoviePilot 搜索豆瓣并获取真实季集数据。
+    
+    具备行业领先的：
+    1. 多季独立条目聚合（解决综艺/日韩剧各季独立条目问题）；
+    2. 副标题变体纠偏（殿 <-> 传 / 篇等）；
+    3. 又名与别名深度季号映射（解决《三时三餐 高敞篇》实际为第三季的问题）。
 
     Returns:
         (douban_id, {season_num: {"total": N, "finished": bool}})
@@ -759,27 +806,51 @@ async def _fetch_seasons_via_douban(
             if has_strong and len(candidate_items) >= 4:
                 break
 
-    # 多季条目并发解析并汇聚（如《三时三餐》各季条目是独立的 subject）
-    for it in candidate_items[:8]:
+    # 多季条目深度解析与别名季号映射
+    for it in candidate_items[:10]:
         did = str(it.get("douban_id") or it.get("media_id") or "")
         it_title = str(it.get("title") or "")
         try:
             detail = await mp_client.get_douban_media_info(did, type_name="电视剧")
+
+            # 确定该豆瓣条目的真实季号
+            real_sn = None
+            if it.get("season"):
+                try:
+                    real_sn = int(it["season"])
+                except Exception:
+                    pass
+            if real_sn is None:
+                real_sn = _parse_season_from_text(it_title)
+            if real_sn is None and isinstance(detail.get("names"), list):
+                for alias in detail["names"]:
+                    sn_cand = _parse_season_from_text(alias)
+                    if sn_cand is not None:
+                        real_sn = sn_cand
+                        break
+            if real_sn is None and detail.get("overview"):
+                real_sn = _parse_season_from_text(detail["overview"][:300])
+
             seasons_dict = detail.get("seasons") or {}
             if isinstance(seasons_dict, dict) and seasons_dict:
                 for s_str, eps in seasons_dict.items():
                     try:
-                        sn = int(s_str)
-                        if isinstance(eps, list) and eps:
-                            if sn not in seasons_data:
-                                seasons_data[sn] = {
-                                    "total": len(eps),
-                                    "finished": True,
-                                }
-                                if not douban_id:
-                                    douban_id = did
-                                if log:
-                                    log.info("从豆瓣条目 [%s] (ID=%s) 成功解析第 S%02d 季共 %d 集", it_title, did, sn, len(eps))
+                        if not isinstance(eps, list) or not eps:
+                            continue
+                        # 如果从标题/别名中识别出了明确的季号且原键为 1，则将其归入真实季号
+                        target_sn = real_sn if (real_sn is not None and s_str == "1") else int(s_str)
+                        if target_sn not in seasons_data:
+                            seasons_data[target_sn] = {
+                                "total": len(eps),
+                                "finished": True,
+                            }
+                            if not douban_id:
+                                douban_id = did
+                            if log:
+                                log.info(
+                                    "从豆瓣条目 [%s] (ID=%s, 别名=%s) 成功解析第 S%02d 季共 %d 集",
+                                    it_title, did, detail.get("names"), target_sn, len(eps)
+                                )
                     except Exception:
                         pass
         except Exception as det_err:
