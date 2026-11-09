@@ -2121,19 +2121,42 @@
       closeModal('cleanRedundantModal');
       const ids = currentActionRecordId ? [currentActionRecordId] : [...document.querySelectorAll('input[name="itemCheck"]:checked')].map(cb => cb.value);
       if (ids.length === 0) { alert('未选择任何剧季'); return; }
-      try {
-        const result = await api('/api/archive/clean-source-redundant', {
-          method: 'POST',
-          body: JSON.stringify({ season_record_ids: ids })
-        });
-        alert(result.message || '源端冗余残留已成功清理！');
-        const task = taskList.find(t => t.id === currentTaskId);
-        if (task) task._seasonsLoaded = false;
-        await loadTasks();
-        if (currentTaskId) selectTask(currentTaskId);
-      } catch (e) {
-        alert(`清理源端失败: ${e.message}`);
-      }
+
+      const items = ids.map(id => ({ id, name: findShowDisplayName(id) }));
+
+      await runBatchPipeline({
+        title: `批量清理源端冗余残留 (${items.length} 项)`,
+        subtitle: '目标归档库已完整拥有，正在安全释放源端磁盘空间并刷新网盘...',
+        iconClass: 'fa-trash-can',
+        iconWrapClass: 'bg-purple-100 dark:bg-purple-950/70 text-purple-600 dark:text-purple-400',
+        barGradientClass: 'from-purple-500 to-indigo-600',
+        items,
+        processItem: async (item, i, total, appendLog) => {
+          appendLog(`<span class="text-slate-400">[${getNowTimestamp()}] 🗑️ 正在清理源端残留: <b>【${item.name}】</b>...</span>`);
+          try {
+            const res = await api('/api/archive/clean-source-redundant', {
+              method: 'POST',
+              body: JSON.stringify({ season_record_ids: [item.id] })
+            });
+            if (res.ok) {
+              appendLog(`<span class="text-purple-400 font-bold">[${getNowTimestamp()}] ✓ 清理完成: 【${item.name}】源端残留目录已安全清除并刷新目录</span>`);
+              return { success: true };
+            } else {
+              appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] ✗ 清理失败: 【${item.name}】${res.message || '未能清理源端'}</span>`);
+              return { success: false };
+            }
+          } catch (err) {
+            appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] ✗ 清理失败: 【${item.name}】${err.message}</span>`);
+            return { success: false };
+          }
+        },
+        onFinish: async () => {
+          const task = taskList.find(t => t.id === currentTaskId);
+          if (task) task._seasonsLoaded = false;
+          await loadTasks();
+          if (currentTaskId) selectTask(currentTaskId);
+        }
+      });
     }
 
     function findItemByRecordId(recId) {
@@ -2288,7 +2311,6 @@
         dlCancelBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin text-xs mr-1"></i> 正在安全停机...';
       }
     }
-    // 兼容历史调用名
     function cancelBatchDownload() { cancelBatchPipeline(); }
 
     async function finishBatchPipeline() {
@@ -2299,7 +2321,6 @@
         await fn();
       }
     }
-    // 兼容历史调用名
     function finishBatchDownload() { finishBatchPipeline(); }
 
     function getNowTimestamp() {
@@ -2314,9 +2335,6 @@
       return `剧季 #${recId ? String(recId).slice(0, 8) : ''}`;
     }
 
-    /**
-     * 通用批量操作流水线核心驱动器
-     */
     async function runBatchPipeline({
       title,
       subtitle,
@@ -2347,7 +2365,6 @@
       const dlProgressIcon = document.getElementById('dlProgressIcon');
       const dlProgressIconWrap = document.getElementById('dlProgressIconWrap');
 
-      // 1. 初始化看板视觉
       if (dlProgressTitle) dlProgressTitle.textContent = title;
       if (dlProgressSubtitle) dlProgressSubtitle.textContent = subtitle || '流水线已启动，正在逐项进行智能处理...';
       if (dlProgressIcon && iconClass) dlProgressIcon.className = `fa-solid ${iconClass}`;
@@ -2388,7 +2405,6 @@
       let failCount = 0;
       let skippedCount = 0;
 
-      // 2. 逐项流水线循环推进
       for (let i = 0; i < items.length; i++) {
         if (isBatchPipelineCancelled) {
           appendLog(`<span class="text-amber-400 font-bold">[${getNowTimestamp()}] 🛑 用户已手动中止后续任务，已处理 ${i}/${items.length} 项。</span>`);
@@ -2418,11 +2434,9 @@
           appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] 💥 执行异常: 【${itemDisplayName}】${err.message || err}</span>`);
         }
 
-        // 适度微延迟，保证 UI 流畅渲染与平滑视觉过渡
         await new Promise(r => setTimeout(r, 100));
       }
 
-      // 3. 统计汇总与状态切换
       const cancelText = isBatchPipelineCancelled ? ' (已提前中止)' : '';
       appendLog(`<div class="pt-2 border-t border-slate-800 text-xs font-bold text-slate-300">` +
         `[${getNowTimestamp()}] 🏁 流水线执行结束${cancelText}: 成功 <span class="text-emerald-400">${successCount}</span> 项 | ` +
@@ -2439,7 +2453,6 @@
       }
     }
 
-    // ── 10.1 批量归档 ─────────────────────────────────────────
     async function confirmArchiveDone() {
       closeModal('archiveModal');
       const ids = currentActionRecordId ? [currentActionRecordId] : [...document.querySelectorAll('input[name="itemCheck"]:checked')].map(cb => cb.value);
@@ -2482,7 +2495,6 @@
       });
     }
 
-    // ── 10.2 批量清理冗余 ─────────────────────────────────────
     async function confirmReviewDone() {
       closeModal('reviewModal');
       const ids = currentActionRecordId ? [currentActionRecordId] : [...document.querySelectorAll('input[name="itemCheck"]:checked')].map(cb => cb.value);
@@ -2525,50 +2537,6 @@
       });
     }
 
-    // ── 10.3 批量清理源端残留 ──────────────────────────────────
-    async function confirmCleanRedundantDone() {
-      closeModal('cleanRedundantModal');
-      const ids = currentActionRecordId ? [currentActionRecordId] : [...document.querySelectorAll('input[name="itemCheck"]:checked')].map(cb => cb.value);
-      if (ids.length === 0) { alert('未选择任何剧季'); return; }
-
-      const items = ids.map(id => ({ id, name: findShowDisplayName(id) }));
-
-      await runBatchPipeline({
-        title: `批量清理源端冗余残留 (${items.length} 项)`,
-        subtitle: '目标归档库已完整拥有，正在安全释放源端磁盘空间并刷新网盘...',
-        iconClass: 'fa-trash-can',
-        iconWrapClass: 'bg-purple-100 dark:bg-purple-950/70 text-purple-600 dark:text-purple-400',
-        barGradientClass: 'from-purple-500 to-indigo-600',
-        items,
-        processItem: async (item, i, total, appendLog) => {
-          appendLog(`<span class="text-slate-400">[${getNowTimestamp()}] 🗑️ 正在清理源端残留: <b>【${item.name}】</b>...</span>`);
-          try {
-            const res = await api('/api/archive/clean-source-redundant', {
-              method: 'POST',
-              body: JSON.stringify({ season_record_ids: [item.id] })
-            });
-            if (res.ok) {
-              appendLog(`<span class="text-purple-400 font-bold">[${getNowTimestamp()}] ✓ 清理完成: 【${item.name}】源端残留目录已安全清除并刷新目录</span>`);
-              return { success: true };
-            } else {
-              appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] ✗ 清理失败: 【${item.name}】${res.message || '未能清理源端'}</span>`);
-              return { success: false };
-            }
-          } catch (err) {
-            appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] ✗ 清理失败: 【${item.name}】${err.message}</span>`);
-            return { success: false };
-          }
-        },
-        onFinish: async () => {
-          const task = taskList.find(t => t.id === currentTaskId);
-          if (task) task._seasonsLoaded = false;
-          await loadTasks();
-          if (currentTaskId) selectTask(currentTaskId);
-        }
-      });
-    }
-
-    // ── 10.4 批量推送 MP 补缺 ──────────────────────────────────
     async function confirmDownloadDone() {
       closeModal('downloadModal');
       const ids = currentActionRecordId ? [currentActionRecordId] : [...document.querySelectorAll('input[name="itemCheck"]:checked')].map(cb => cb.value);
@@ -2622,308 +2590,7 @@
         }
       });
     }
-
-    function findItemByRecordId(recId) {
-      if (!currentTaskId) return null;
-      const task = taskList.find(t => t.id === currentTaskId);
-      if (!task || !task.categories) return null;
-      for (const catKey of Object.keys(task.categories)) {
-        const list = task.categories[catKey];
-        if (Array.isArray(list)) {
-          const found = list.find(i => String(i.id) === String(recId));
-          if (found) return found;
-        }
-      }
-      return null;
-    }
-
-    function cleanSourceRedundantSingle(recordId, name) {
-      currentActionRecordId = recordId;
-      if (!name) {
-        const item = findItemByRecordId(recordId);
-        name = item ? `${item.show} - ${item.season}` : '';
-      }
-      openModal('cleanRedundantModal');
-      document.getElementById('cleanRedundantTitle').textContent = `源端冗余清理确认: ${name}`;
-    }
-
-    // ── 10.3 人工校准官方总集数 ──────────────────────────────
-    let currentCalibrateRecId = null;
-    let currentCalibrateMaxRec = null;
-
-    function openCalibrateModal(recId, showTitle, maxRec, currentTotal) {
-      currentCalibrateRecId = recId;
-      if (!showTitle) {
-        const item = findItemByRecordId(recId);
-        if (item) {
-          showTitle = `${item.show} - ${item.season}`;
-          maxRec = item.maxRec;
-          currentTotal = item.totalEpisodes;
-        }
-      }
-      currentCalibrateMaxRec = maxRec;
-      document.getElementById('calibrateShowTitle').textContent = showTitle || '剧集名称';
-      document.getElementById('calibrateTotalInput').value = (currentTotal && currentTotal > 0 && currentTotal < 900) ? currentTotal : (maxRec || '');
-      openModal('calibrateModal');
-    }
-
-    function setCalibrateFromLocalMax() {
-      if (currentCalibrateMaxRec) {
-        document.getElementById('calibrateTotalInput').value = currentCalibrateMaxRec;
-      }
-    }
-
-    async function submitCalibrateTotal() {
-      const val = parseInt(document.getElementById('calibrateTotalInput').value);
-      if (!val || val <= 0) {
-        alert('请输入大于 0 的有效总集数');
-        return;
-      }
-      try {
-        const res = await api('/api/archive/calibrate-episodes', {
-          method: 'POST',
-          body: JSON.stringify({
-            season_record_id: currentCalibrateRecId,
-            total_episodes: val
-          })
-        });
-        closeModal('calibrateModal');
-        alert(res.message || '校准成功！');
-        const task = taskList.find(item => item.id === currentTaskId);
-        if (task) task._seasonsLoaded = false;
-        await loadTasks();
-        selectTask(currentTaskId);
-      } catch (e) {
-        alert(`校准失败: ${e.message}`);
-      }
-    }
-
-    // ── 10.4 官方无集数信息剧集：删除源端并刷新 ─────────────────
-    let currentDeleteSourceRecId = null;
-
-    function promptDeleteSourceShow(recId) {
-      currentDeleteSourceRecId = recId;
-      const item = findItemByRecordId(recId);
-      const name = item ? item.show : '未知剧集';
-      const path = item ? (item.pathA || '') : '';
-      document.getElementById('deleteSourceShowName').textContent = name;
-      document.getElementById('deleteSourceShowPath').textContent = `源端目标路径: ${path}`;
-      openModal('deleteSourceShowModal');
-    }
-
-    async function executeDeleteSourceShow() {
-      if (!currentDeleteSourceRecId) return;
-      closeModal('deleteSourceShowModal');
-      try {
-        const res = await api('/api/archive/delete-source-show', {
-          method: 'POST',
-          body: JSON.stringify({ season_record_id: currentDeleteSourceRecId }),
-        });
-        alert(res.message || '源端剧集目录已删除并完成目录刷新！');
-        const task = taskList.find(t => t.id === currentTaskId);
-        if (task) task._seasonsLoaded = false;
-        await loadTasks();
-        if (currentTaskId) selectTask(currentTaskId);
-      } catch (e) {
-        alert(`删除源端失败: ${e.message}`);
-      }
-    }
-
-    function handleSingleAction(type, arg2, arg3) {
-      // 灵活兼容：handleSingleAction(type, recordId) 或 handleSingleAction(type, name, recordId)
-      let recordId = arg3 ? arg3 : arg2;
-      let name = arg3 ? arg2 : null;
-      currentActionRecordId = recordId;
-      if (!name) {
-        const item = findItemByRecordId(recordId);
-        name = item ? `${item.show} - ${item.season}` : '';
-      }
-
-      if (type === 'calibrate') {
-        openCalibrateModal(recordId);
-      } else if (type === 'archive') {
-        openModal('archiveModal');
-        document.getElementById('archiveModalTitle').textContent = `单季归档预检确认: ${name}`;
-      } else if (type.startsWith('review') || type === 'clean') {
-        openModal('reviewModal');
-        document.getElementById('reviewModalTitle').textContent = `复核清理确认: ${name}`;
-      } else if (type === 'clean_redundant') {
-        openModal('cleanRedundantModal');
-        document.getElementById('cleanRedundantTitle').textContent = `清理源端冗余确认: ${name}`;
-      } else if (type.startsWith('download')) {
-        openModal('downloadModal');
-        document.getElementById('downloadModalTitle').textContent = `补缺/修复确认: ${name}`;
-      }
-    }
-
-    function executeBatchArchive() { currentActionRecordId = null; openModal('archiveModal'); }
-    function executeBatchReview() { currentActionRecordId = null; openModal('reviewModal'); }
-    function executeBatchDownload() { currentActionRecordId = null; openModal('downloadModal'); }
-
-    function openModal(id) { document.getElementById(id).classList.remove('hidden'); }
-    function closeModal(id) { document.getElementById(id).classList.add('hidden'); }
-
-    async function confirmArchiveDone() {
-      closeModal('archiveModal');
-      const ids = currentActionRecordId ? [currentActionRecordId] : [...document.querySelectorAll('input[name="itemCheck"]:checked')].map(cb => cb.value);
-      if (ids.length === 0) { alert('未选择任何剧季'); return; }
-      try {
-        const result = await api('/api/archive/execute', { method: 'POST', body: JSON.stringify({ season_record_ids: ids }) });
-        alert(result.message || '归档执行成功！');
-        const task = taskList.find(t => t.id === currentTaskId);
-        if (task) task._seasonsLoaded = false;
-        await loadTasks();
-        if (currentTaskId) selectTask(currentTaskId);
-      } catch (e) { alert(`归档失败: ${e.message}`); }
-    }
-
-    async function confirmReviewDone() {
-      closeModal('reviewModal');
-      const ids = currentActionRecordId ? [currentActionRecordId] : [...document.querySelectorAll('input[name="itemCheck"]:checked')].map(cb => cb.value);
-      if (ids.length === 0) { alert('未选择任何剧季'); return; }
-      try {
-        const result = await api('/api/archive/clean', { method: 'POST', body: JSON.stringify({ season_record_ids: ids }) });
-        alert(result.message || '清理成功！');
-        const task = taskList.find(t => t.id === currentTaskId);
-        if (task) task._seasonsLoaded = false;
-        await loadTasks();
-        if (currentTaskId) selectTask(currentTaskId);
-      } catch (e) { alert(`清理失败: ${e.message}`); }
-    }
-
-    let isBatchDownloadCancelled = false;
-
-    function cancelBatchDownload() {
-      isBatchDownloadCancelled = true;
-      const cancelBtn = document.getElementById('dlCancelBtn');
-      if (cancelBtn) {
-        cancelBtn.disabled = true;
-        cancelBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin text-xs mr-1"></i> 正在中止...';
-      }
-    }
-
-    async function finishBatchDownload() {
-      closeModal('downloadProgressModal');
-      const task = taskList.find(t => t.id === currentTaskId);
-      if (task) task._seasonsLoaded = false;
-      await loadTasks();
-      if (currentTaskId) selectTask(currentTaskId);
-    }
-
-    async function confirmDownloadDone() {
-      closeModal('downloadModal');
-      const ids = currentActionRecordId ? [currentActionRecordId] : [...document.querySelectorAll('input[name="itemCheck"]:checked')].map(cb => cb.value);
-      if (ids.length === 0) { alert('未选择任何需要补缺的剧集'); return; }
-
-      isBatchDownloadCancelled = false;
-      openModal('downloadProgressModal');
-
-      const progressBar = document.getElementById('dlProgressBar');
-      const progressPercent = document.getElementById('dlProgressPercent');
-      const progressStats = document.getElementById('dlProgressStats');
-      const currentItemText = document.getElementById('dlProgressCurrentItem');
-      const logContainer = document.getElementById('dlProgressLogContainer');
-      const dlCloseBtn = document.getElementById('dlCloseBtn');
-      const dlCancelBtn = document.getElementById('dlCancelBtn');
-      const dlProgressTitle = document.getElementById('dlProgressTitle');
-      const dlProgressSubtitle = document.getElementById('dlProgressSubtitle');
-      const dlProgressFooterHint = document.getElementById('dlProgressFooterHint');
-
-      dlCloseBtn.disabled = true;
-      dlCancelBtn.disabled = false;
-      dlCancelBtn.innerHTML = '<i class="fa-solid fa-stop text-xs mr-1 text-rose-500"></i> 中止后续任务';
-      logContainer.innerHTML = '';
-      progressBar.style.width = '0%';
-      progressPercent.textContent = '0%';
-      progressStats.textContent = `0 / ${ids.length}`;
-      dlProgressTitle.textContent = `批量推送 MoviePilot 补缺任务 (${ids.length} 项)`;
-      dlProgressSubtitle.textContent = `流水线已启动，正在逐项进行智能选种与解绑推送...`;
-      dlProgressFooterHint.textContent = '流水线执行中，请勿关闭页面...';
-
-      function appendLog(htmlContent) {
-        const div = document.createElement('div');
-        div.innerHTML = htmlContent;
-        logContainer.appendChild(div);
-        logContainer.scrollTop = logContainer.scrollHeight;
-      }
-
-      function getNow() {
-        return new Date().toLocaleTimeString('zh-CN', { hour12: false });
-      }
-
-      appendLog(`<span class="text-slate-400">[${getNow()}] 🚀 批量补缺流水线启动，共选定 <b>${ids.length}</b> 个待补剧季，开始逐项评估做种与定向补缺...</span>`);
-
-      let successCount = 0;
-      let skippedCount = 0;
-      let failCount = 0;
-
-      for (let i = 0; i < ids.length; i++) {
-        if (isBatchDownloadCancelled) {
-          appendLog(`<span class="text-amber-400 font-bold">[${getNow()}] 🛑 用户已手动中止后续任务，已处理 ${i}/${ids.length} 项。</span>`);
-          break;
-        }
-
-        const recId = ids[i];
-        const currentTask = taskList.find(t => t.id === currentTaskId);
-        let showDisplayName = `剧季记录 #${recId.slice(0, 8)}`;
-        if (currentTask && currentTask.categories) {
-          const allItems = [
-            ...(currentTask.categories.download || []),
-            ...(currentTask.categories.review || []),
-            ...(currentTask.categories.anomaly || []),
-            ...(currentTask.categories.airing || []),
-            ...(currentTask.categories.archive || [])
-          ];
-          const matched = allItems.find(it => it.id === recId);
-          if (matched) {
-            showDisplayName = `${matched.show_name} S${String(matched.season_number).padStart(2, '0')}`;
-          }
-        }
-
-        const pct = Math.round(((i + 1) / ids.length) * 100);
-        progressBar.style.width = `${pct}%`;
-        progressPercent.textContent = `${pct}%`;
-        progressStats.textContent = `${i + 1} / ${ids.length}`;
-        currentItemText.textContent = `[${i + 1}/${ids.length}] 正在处理: ${showDisplayName}`;
-
-        appendLog(`<span class="text-blue-300">[${getNow()}] [${i + 1}/${ids.length}] 正在检索做种并评估: <b class="text-white">${showDisplayName}</b> ...</span>`);
-
-        try {
-          const res = await api('/api/moviepilot/download-gap-fill', {
-            method: 'POST',
-            body: JSON.stringify({ season_record_ids: [recId] })
-          });
-
-          if (res.ok && res.submitted && res.submitted.length > 0) {
-            successCount += res.submitted.length;
-            res.submitted.forEach(sub => {
-              const cleanPart = sub.cleared_transfer_records_count > 0 ? ` <span class="text-amber-400">[已联动清理${sub.cleared_transfer_records_count}条历史整理记录]</span>` : '';
-              appendLog(`<span class="text-emerald-400 pl-3">✓ 成功推送下载: <b>[${sub.site || 'PT'}]</b> ${sub.title} (做种: ${sub.seeds}, ${sub.plan_desc || '补缺'})${cleanPart}</span>`);
-            });
-          } else if (res.ok) {
-            skippedCount++;
-            appendLog(`<span class="text-slate-400 pl-3">ℹ 提示: ${res.message || '无需下载或已在队列中'}</span>`);
-          } else {
-            failCount++;
-            appendLog(`<span class="text-rose-400 pl-3">✗ 推送未成功: ${res.message || '无合格资源'}</span>`);
-          }
-        } catch (err) {
-          failCount++;
-          appendLog(`<span class="text-rose-500 pl-3">✗ 接口请求异常: ${err.message}</span>`);
-        }
-      }
-
-      progressBar.style.width = '100%';
-      progressPercent.textContent = '100%';
-      currentItemText.textContent = isBatchDownloadCancelled ? '流水线已中止' : '全部任务处理完毕';
-      dlProgressSubtitle.textContent = `流水线已结束。成功推送: ${successCount} 个资源，无需下载: ${skippedCount} 个，未成功: ${failCount} 个`;
-      dlProgressFooterHint.textContent = '处理完毕，点击右侧按钮关闭并刷新看板';
-      dlCancelBtn.disabled = true;
-      dlCloseBtn.disabled = false;
-
-      appendLog(`<span class="text-emerald-400 font-bold">[${getNow()}] 🏁 批量推送流水线结束！成功推送: ${successCount} 个，无需操作: ${skippedCount} 个，无合格资源: ${failCount} 个</span>`);
-    }
-
+    
     // ── 11. 目录浏览器（真实 CD2 API）────────────────────────
     let currentBrowsePath = '';
     let selectedTargetPath = '';
