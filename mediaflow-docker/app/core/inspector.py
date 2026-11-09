@@ -106,12 +106,59 @@ def compute_archive_target(show_path: str, season_path: str, archive_root: str, 
     return f"{arch_norm}/{parts[-1]}"
 
 
+def separate_outliers(ep_nums: list[int], expected_max: int | None = None) -> tuple[list[int], list[int]]:
+    """将断崖式孤立异常集号（如正片为 1..12，跳空至 56）从正片集号序列中剥离。
+
+    规则与底线保护：
+    1. 只要集号在官方总集数内（ep <= expected_max），绝对属于正片范围，严禁作为 outlier 剥离；
+    2. 只有当集号超出官方总集数（ep > expected_max），且与前一段连续集号出现严重断崖（gap >= 8 或跳空到 50+）时，
+       或者在无官方集数时出现严重突兀跳空（gap >= 15 且集号 >= 50 且仅 1~2 个孤立集），才判定为孤立断崖花絮予以剥离。
+
+    Returns:
+        (regular_ep_nums, outlier_ep_nums)
+    """
+    if not ep_nums:
+        return [], []
+    sorted_eps = sorted(set(ep_nums))
+    if len(sorted_eps) <= 1:
+        return sorted_eps, []
+
+    regular: list[int] = []
+    outliers: list[int] = []
+
+    for i, ep in enumerate(sorted_eps):
+        if i == 0:
+            regular.append(ep)
+            continue
+        prev = regular[-1]
+        gap = ep - prev
+        remaining = len(sorted_eps) - i
+
+        is_break = False
+        if expected_max and expected_max > 0:
+            if ep > expected_max:
+                if gap >= 8 or (ep >= 50 and gap >= 5) or (remaining <= 2 and gap >= 10):
+                    is_break = True
+        else:
+            if gap >= 15 and ep >= 50 and remaining <= 2:
+                is_break = True
+
+        if is_break:
+            outliers.extend(sorted_eps[i:])
+            break
+        else:
+            regular.append(ep)
+
+    return regular, outliers
+
+
 def diagnose_season(
     recognized: list[int],
     total_episodes: int | None,
     season_finished: bool,
     has_duplicates: bool,
     duplicate_episodes: list[int] | None = None,
+    allow_bonus_specials: bool = False,
 ) -> tuple[str, str]:
     """根据本地集号与官方数据做诊断。
 
@@ -121,6 +168,7 @@ def diagnose_season(
         season_finished: 该季是否已完结
         has_duplicates: 是否有重复集
         duplicate_episodes: 可选，具体重复的集数列表
+        allow_bonus_specials: 是否允许在正片全齐时容纳紧邻的 1~3 集加更特辑直接归档
 
     Returns:
         (status, detail) 元组
@@ -150,8 +198,12 @@ def diagnose_season(
         else:
             return "download_needed", f"已完结但缺失 {missing_text}，缺少已播出集：{missing}{out_desc}"
 
-    # 3. 超范围集号异常保护 (P1-4): 已齐但包含超范围集号，转复核人工确认
+    # 3. 超范围集号容错与异常保护 (P1-4):
     if out_of_range:
+        # 若允许加更特辑容错且官方总集数正常 (>=6)，超出部分紧邻总集数（<= total + 4 且数量 <= 3），无重复集，视为附随特辑直接就绪可归档
+        if allow_bonus_specials and total_episodes >= 6 and max(out_of_range) <= total_episodes + 4 and len(out_of_range) <= 3 and not has_duplicates:
+            extra_desc = f"（附带 {len(out_of_range)} 集加更/特辑: {out_of_range}）"
+            return "archive_ready", f"全 {total_episodes} 集齐全{extra_desc}，可归档"
         return "review_needed", f"全 {total_episodes} 集已齐，但存在超出官方范围的异常集号 ({out_of_range})，需人工核对后归档"
 
     # 4. 已完结且全部集数已就绪，但存在同集重复版本：进入复核清理
@@ -307,19 +359,63 @@ async def run_inspection(
             for ep in target_eps_list:
                 all_ep_nums.extend(ep.episode_numbers)
 
-            recognized = sorted(set(all_ep_nums))
-            ep_counter = Counter(all_ep_nums)
-            duplicates = sorted([n for n, cnt in ep_counter.items() if cnt > 1])
-
             total_eps: int | None = None
             season_finished = False
+            edition_note = ""
+            db_tot: int | None = None
+            tmdb_tot: int | None = None
+            is_split = False
             if season_num in tmdb_seasons_data:
                 info = tmdb_seasons_data[season_num]
                 total_eps = info.get("total")
                 season_finished = info.get("finished", False)
+                db_tot = info.get("douban_total")
+                tmdb_tot = info.get("tmdb_total") or total_eps
+                is_split = info.get("is_split_edition", False)
+
+            # 智能剥离断崖孤立集号（如正片 1..12，断崖孤立出现 56）
+            # 优先以参考集数作为 expected_max 阈值
+            ref_max = db_tot or total_eps
+            regular_nums, outlier_nums = separate_outliers(all_ep_nums, expected_max=ref_max)
+            recognized = sorted(set(regular_nums)) if regular_nums else sorted(set(all_ep_nums))
+            if not regular_nums:
+                outlier_nums = []
+
+            # 双重播出版型自适应选型（整期版 vs 拆分版）：基于纯净正片集号进行精准版型拟合
+            if is_split and db_tot and tmdb_tot:
+                max_rec = max(recognized) if recognized else 0
+                if max_rec <= db_tot + 4 and max_rec < tmdb_tot * 0.8:
+                    total_eps = db_tot
+                    edition_note = f" (自适应匹配官方整期版: 豆瓣 {db_tot} 集)"
+                    if log:
+                        log.info(
+                            "剧集 %s S%02d 本地集数 %d 自适应拟合为官方整期版: 豆瓣 %d 集 (已排除 TMDB 拆分版 %d 集干扰)",
+                            show_name, season_num, max_rec, db_tot, tmdb_tot
+                        )
+                elif max_rec >= tmdb_tot - 2:
+                    total_eps = tmdb_tot
+                    edition_note = f" (自适应匹配官方拆分版: TMDB {tmdb_tot} 集)"
+                    if log:
+                        log.info(
+                            "剧集 %s S%02d 本地集数 %d 自适应拟合为拆分版: TMDB %d 集",
+                            show_name, season_num, max_rec, tmdb_tot
+                        )
+
+            ep_counter = Counter(regular_nums if regular_nums else all_ep_nums)
+            duplicates = sorted([n for n, cnt in ep_counter.items() if cnt > 1])
 
             # 超范围集数/缺失官方集数智能自愈校准保护 (Auto-Recalibrate on Overflow / Missing Total)
-            if recognized and (total_eps is None or max(recognized) > total_eps):
+            need_calib = False
+            if recognized:
+                if total_eps is None:
+                    need_calib = True
+                elif max(recognized) > total_eps:
+                    expected_set = set(range(1, total_eps + 1))
+                    is_full_with_extras = expected_set.issubset(set(recognized)) and max(recognized) <= total_eps + 4
+                    if not is_full_with_extras:
+                        need_calib = True
+
+            if need_calib:
                 calib_total, calib_finished, calib_tmdb_id, calib_src = await auto_recalibrate_season(
                     show_name=show_name,
                     season_num=season_num,
@@ -348,7 +444,12 @@ async def run_inspection(
                 season_finished=season_finished,
                 has_duplicates=bool(duplicates),
                 duplicate_episodes=duplicates,
+                allow_bonus_specials=True,
             )
+            if edition_note:
+                detail = f"{detail}{edition_note}"
+            if outlier_nums:
+                detail = f"{detail}（已自动隔离断崖集: {outlier_nums}）"
 
             archive_target = ""
             if archive_root:
@@ -913,6 +1014,8 @@ async def _fetch_seasons_via_douban(
         it_title = str(it.get("title") or "")
         try:
             detail = await mp_client.get_douban_media_info(did, type_name="电视剧")
+            if not isinstance(detail, dict):
+                detail = {}
 
             real_sn = None
             if it.get("season"):
@@ -1176,6 +1279,8 @@ async def auto_recalibrate_season(
             for did, it_title in candidate_dids[:12]:
                 try:
                     detail = await mp_client.get_douban_media_info(did, type_name="电视剧")
+                    if not isinstance(detail, dict):
+                        detail = {}
                     if not detail:
                         continue
 
@@ -1253,16 +1358,16 @@ async def _resolve_show_metadata(
     # 1. 优先尝试本地指定的 TMDB ID
     if mp_client and tmdb_id_num:
         seasons_data = await _fetch_seasons_by_tmdb_id(mp_client, tmdb_id_num, log)
-        if is_complete():
-            return resolved_id, seasons_data
-        elif seasons_data:
-            # 至少获取到了部分季度
-            pass
-        else:
+        if not seasons_data:
             # tmdb_id_num 完全失效 (例如 404 历史死链或已被删除合并)
             if log:
                 log.warning("本地目录指定的 tmdb_id=%d 未获取到任何季信息，重置为待纠偏状态", tmdb_id_num)
             resolved_id = None
+        elif is_complete():
+            has_cn = bool(re.search(r"[\u4e00-\u9fa5]", show_name))
+            need_douban_check = has_cn or any((seasons_data.get(sn, {}).get("total") or 0) >= 12 for sn in needed_seasons)
+            if not need_douban_check:
+                return resolved_id, seasons_data
 
     # 2. TMDB 标题与母系列检索（补齐缺失季度）
     queries = _generate_search_queries(show_name)
@@ -1356,8 +1461,13 @@ async def _resolve_show_metadata(
             if is_complete():
                 break
 
-    # 3. 豆瓣双轨深度检索兜底
-    if mp_client and not is_complete():
+    # 3. 豆瓣双轨深度检索与交叉核对 (主动双轨驱动，解决拆分版与整期版口径冲突)
+    has_cn = bool(re.search(r"[\u4e00-\u9fa5]", show_name))
+    need_douban_check = (mp_client is not None) and (
+        not is_complete() or has_cn or any((seasons_data.get(sn, {}).get("total") or 0) >= 12 for sn in needed_seasons)
+    )
+
+    if need_douban_check and mp_client:
         db_id, db_seasons = await _fetch_seasons_via_douban(
             mp_client=mp_client,
             show_name=show_name,
@@ -1367,11 +1477,28 @@ async def _resolve_show_metadata(
         )
         if db_seasons:
             for sn, info in db_seasons.items():
+                db_total = info.get("total") or 0
                 if sn not in seasons_data or not (seasons_data[sn].get("total") or 0) > 0:
                     seasons_data[sn] = info
+                else:
+                    tmdb_tot = seasons_data[sn].get("total") or 0
+                    seasons_data[sn]["tmdb_total"] = tmdb_tot
+                    seasons_data[sn]["douban_total"] = db_total
+                    seasons_data[sn]["douban_id"] = db_id
+
+                    if db_total > 0 and (tmdb_tot >= int(db_total * 1.5) or db_total >= int(tmdb_tot * 1.5)):
+                        seasons_data[sn]["is_split_edition"] = True
+                        seasons_data[sn]["split_info"] = f"TMDB: {tmdb_tot}集, 豆瓣: {db_total}集"
+                        if log:
+                            log.info(
+                                "剧集 %s S%02d 双轨核验发现版型口径差异: TMDB=%d集 vs 豆瓣=%d集 (已标记支持自适应拟合)",
+                                show_name, sn, tmdb_tot, db_total
+                            )
             if log:
-                log.info("剧集 %s 通过豆瓣深度检索 (douban_id=%s) 成功兜底获取到季集信息: %s",
-                         show_name, db_id, {k: v.get("total") for k, v in db_seasons.items()})
+                log.info(
+                    "剧集 %s 豆瓣核对完成 (douban_id=%s): %s",
+                    show_name, db_id, {k: v.get("total") for k, v in db_seasons.items()}
+                )
 
     # 4. 若依然无信息且未指定 tmdb_id，通过 MoviePilot 兜底检索
     if not is_complete() and not resolved_id and mp_client:

@@ -1,138 +1,86 @@
-# MediaFlow (Docker 容器版)
+# MediaFlow — 媒体库智能整理系统
 
-> **工业级云原生媒体库整理与归档微服务**  
-> 专为群晖 (Synology)、威联通 (QNAP)、Unraid、极空间、绿联等 NAS 系统及自建 Linux 云服务器深度定制。
+自动化管理网盘剧集/动漫媒体库的 Docker Web 应用。通过 CloudDrive2 扫描网盘目录，结合 TMDB/MoviePilot 智能诊断，实现一键归档、冗余清理、缺集补缺的完整工作流。
 
----
+## 核心功能
 
-## 📖 核心特性与架构优势
+| 功能 | 说明 |
+|------|------|
+| **智能初检** | 递归扫描 CD2 目录，自动识别 Season 结构，解析集号，匹配 TMDB 官方数据 |
+| **精准诊断** | 🟢齐全可归档 🟡重复需复核 🔴缺集待补 🔵连载中 — 一目了然 |
+| **安全归档** | 按季增量移动，tvshow.nfo 和共享海报受保护留源 |
+| **冗余清理** | 自动识别最优版本（4K>1080p, HEVC>x264），字幕文件永不删除 |
+| **MoviePilot 联动** | 订阅管理、转移队列监控、资源搜索、一键推送补缺 |
 
-- **轻量高能**：基于 `python:3.12-slim` 构建，内置清华高速源、上海时区 (`Asia/Shanghai`) 与标准 UTF-8 语言环境，镜像体积精简。
-- **开箱即用**：标准 Docker Compose 编排，支持容器健康自检 (`HEALTHCHECK`)、异常自动拉起 (`restart: unless-stopped`)。
-- **全生态兼容**：无缝对接 CloudDrive2 与 MoviePilot 容器集群，支持容器网络互通 (`host` 模式或自定义 `bridge` 共享网络）。
-- **数据完全持久化**：SQLite 数据库与任务操作流水持久化映射至宿主机本地目录，容器销毁升级数据零丢失。
+## 快速部署
 
----
-
-## 🛠️ 环境要求
-
-- **宿主机系统**：群晖 DSM 7.2+、威联通 QTS/QuTS hero、Unraid 6.11+、Ubuntu 22.04+、Debian 11+ 等支持 Docker 的系统。
-- **Docker 引擎**：Docker Engine 20.10 及以上，支持 Docker Compose v2。
-
----
-
-## 🚀 极速安装与部署
-
-### 方法一：命令行 Docker Compose 部署（推荐）
-
-1. **进入部署目录**：
-   ```bash
-   cd mediaflow-docker
-   ```
-
-2. **配置环境变量**：
-   复制配置模板并编辑：
-   ```bash
-   cp .env.example .env
-   nano .env   # 或使用 vim / 宝塔文本编辑器
-   ```
-
-   **关键参数配置示例**：
-   ```ini
-   # ── 基础服务配置 ──────────────────────────────────────────
-   MF_DEBUG=false
-   MF_PORT=8080
-   MF_DATA_DIR=/app/data
-
-   # ── CloudDrive2 连接（必填）────────────────────────────
-   # 宿主机或局域网内 CD2 容器地址（注意：在桥接网络中不要写 localhost，应写 NAS 局域网真实 IP）
-   MF_CD2_URL=http://192.168.1.100:19798
-   MF_CD2_TOKEN=your-cd2-token-here
-
-   # ── MoviePilot 连接（必填）────────────────────────────
-   # MoviePilot 地址及 API 认证 Key
-   MF_MP_URL=https://mp.yourdomain.com:8920
-   MF_MP_TOKEN=your-moviepilot-api-key
-
-   # ── 路径映射配置（必填）────────────────────────────────
-   # 对应 CloudDrive2 网盘内的绝对路径
-   MF_SOURCE_ROOT=/115/Library_incs/nas
-   MF_ARCHIVE_ROOT=/115/Library_incs/nas.finish
-   MF_LIBRARY_ROOT=/115/Library_incs/nas.finish
-   ```
-
-3. **构建并后台启动容器**：
-   ```bash
-   chmod +x deploy.sh && ./deploy.sh
-   # 或者直接执行：
-   docker compose up -d --build
-   ```
-
-4. **访问 Web 控制台**：
-   打开浏览器，访问 `http://<NAS_IP>:8080` 即可开始使用！
-
----
-
-### 方法二：群晖 (Synology) Container Manager 图形界面部署
-
-1. 打开群晖 DSM 的 **Container Manager**。
-2. 在左侧菜单点击 **项目 (Project)** ➔ 点击 **新增 (Create)**：
-   - **项目名称**：`mediaflow`
-   - **路径**：选择一个存储卷目录（例如 `/docker/mediaflow`），并将本项目的所有文件上传到该目录下。
-   - **来源**：选择“创建 docker-compose.yml”并自动识别上传的 `docker-compose.yml`。
-3. 确保目录下已正确创建并配置好 `.env` 文件。
-4. 点击“下一步”直接构建并启动项目。
-
----
-
-### 方法三：Unraid 部署指引
-
-1. 在 Unraid 的 `appdata` 目录下创建 `mediaflow` 文件夹（如 `/mnt/user/appdata/mediaflow`）。
-2. 将项目文件放入该目录，并配置好 `.env`。
-3. 在 Unraid 终端中执行：
-   ```bash
-   cd /mnt/user/appdata/mediaflow
-   docker compose up -d --build
-   ```
-4. 容器将自动在 Docker 列表中呈现，并可通过 WebUI 直接跳转。
-
----
-
-## 🔧 容器运维与升级指南
-
-### 1. 查看容器实时日志
 ```bash
-docker compose logs -f mediaflow
+# 1. 克隆
+git clone https://github.com/hailanbb/media-tools.git
+cd media-tools/mediaflow
+
+# 2. 配置
+cp .env.example .env
+# 编辑 .env 填入真实的 CD2/MP 连接信息
+
+# 3. 启动
+docker compose up -d
+
+# 4. 访问
+# http://<服务器IP>:8080
 ```
 
-### 2. 检查健康检查状态
-```bash
-docker ps -f name=mediaflow
-# 正常运行时 STATUS 显示 (healthy)
+## 环境变量
+
+| 变量 | 必填 | 说明 |
+|------|------|------|
+| `MF_CD2_URL` | ✅ | CloudDrive2 gRPC-Web 地址 |
+| `MF_CD2_TOKEN` | ✅ | CD2 认证 Token |
+| `MF_MP_URL` | ✅ | MoviePilot API 地址 |
+| `MF_MP_TOKEN` | ✅ | MoviePilot API Key |
+| `MF_SOURCE_ROOT` | ✅ | 源目录根路径 |
+| `MF_ARCHIVE_ROOT` | ✅ | 归档目录根路径 |
+| `MF_LIBRARY_ROOT` | 否 | 媒体库根路径（默认同 archive_root） |
+| `MF_PORT` | 否 | 服务端口（默认 8080） |
+| `MF_AUTH_TOKEN` | 否 | API 鉴权 Token（留空则不启用） |
+| `MF_DEBUG` | 否 | 调试模式（默认 false） |
+
+## 技术栈
+
+- **后端**: Python 3.12 + FastAPI + SQLAlchemy 2.0 (async) + aiosqlite
+- **前端**: 单文件 HTML + Tailwind CSS + Font Awesome
+- **通信**: CD2 via gRPC-Web (原生 Protobuf)，MP via REST API
+- **部署**: Docker + docker-compose
+
+## 目录结构
+
+```
+mediaflow/
+├── app/
+│   ├── api/          # FastAPI 路由
+│   ├── clients/      # CD2/MP/TMDB 异步客户端
+│   ├── core/         # 初检引擎、集号解析
+│   ├── models/       # SQLAlchemy ORM
+│   ├── schemas/      # Pydantic 数据模型
+│   ├── services/     # 业务编排
+│   ├── config.py     # 配置管理
+│   ├── database.py   # 数据库初始化
+│   └── main.py       # 应用入口
+├── frontend/
+│   └── index.html    # 前端界面
+├── data/             # SQLite 数据库（运行时）
+├── Dockerfile
+├── docker-compose.yml
+├── requirements.txt
+└── .env.example
 ```
 
-### 3. 一键平滑更新
-由于业务数据、扫描记录均存储在挂载卷 `./data` 中，更新镜像绝不影响已有配置：
-```bash
-git pull
-docker compose down
-docker compose up -d --build
-```
+## 版本历史
 
-### 4. 容器内执行自动化测试
-如需验证容器内的运行完整性，可进入容器执行内置的 8 大全矩阵测试套件：
-```bash
-docker compose exec mediaflow python tests/run_all_tests.py
-```
-
----
-
-## 🛡️ 网络通信进阶技巧 (避坑指南)
-
-> [!TIP]
-> **容器间通信注意事项**：
-> 1. 如果你的 CloudDrive2、MoviePilot 和 MediaFlow 均运行在同一台 NAS 上，且使用 Docker 默认的 bridge 模式，**切忌将 `MF_CD2_URL` 填写为 `http://127.0.0.1:19798` 或 `http://localhost:19798`**，因为容器内部的 `localhost` 指向自身！
-> 2. **正确方案**：
->    - 填写 NAS 的局域网物理 IP（例如 `http://192.168.1.100:19798`）；
->    - 或者让 MediaFlow 使用 `network_mode: "host"` 直接共享宿主机网络栈；
->    - 或者将所有容器加入同一个 Docker 用户自定义网络，直接使用容器名互联（例如 `http://clouddrive:19798`）。
+- **v2.5.7** (2026-11-09):
+  - 核心突破：落实《MediaFlow剧季元数据交叉核对与纠错方案》，实现 TMDB 与豆瓣主动双轨交叉核验与自适应版型拟合（拆分版 vs 官方整期版）；
+  - 花絮/切片治理：扩展中英文花絮切片正则拦截（深度支持 `Cut`, `Clip`, `Tape`, `母带`, `切片`, `看点`, `加更`, `特辑` 等 18+ 模式）；
+  - 断崖集号智能剥离：引入 `separate_outliers` 算法，自动剥离孤立断崖花絮集号，杜绝虚假大面积缺集误报；
+  - 正片全齐加更特辑容错：支持正片齐全附带少量收官特辑直接就绪为 `archive_ready`；
+  - 前端异常打标纠偏：消除已自愈齐备剧集的误打标。
+- **v2.5.6** (2026-11-09): 初检引擎双轨校准与 MoviePilot 运维面板深度联动。

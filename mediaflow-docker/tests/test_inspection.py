@@ -238,6 +238,55 @@ class TestInspectionEngine(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_10_tape_cut_extra_detection(self):
+        """测试 Tape/Cut/母带/切片等花絮被精准识别为 is_extra."""
+        files = [
+            "Sister.Take.Over.S01E20.4k.Tape.01.2160p.WEB-DL.H265.AAC-OurTV.mp4",
+            "Sister.Take.Over.S01E25.4k.Cut.01.2160p.WEB-DL.H265.AAC-OurTV.mp4",
+            "Show.S02E01.切片.1080p.mp4",
+            "Show.S01E05.母带版.mkv",
+            "Show.S01E11.加更版.mp4",
+            "Show.S01E12.纯享版.mp4",
+        ]
+        for f in files:
+            ep = parse_episode(f, f"/path/{f}", 10000000)
+            self.assertTrue(ep.is_extra, f"文件 {f} 应当被识别为花絮 (is_extra=True)")
+
+    def test_11_separate_outliers(self):
+        """测试断崖式孤立集号剥离."""
+        from app.core.inspector import separate_outliers
+
+        # 案例1: 盒子里的猫 [1..12, 56]，expected_max=10
+        eps = list(range(1, 13)) + [56]
+        regular, outliers = separate_outliers(eps, expected_max=10)
+        self.assertEqual(regular, list(range(1, 13)))
+        self.assertEqual(outliers, [56])
+
+        # 案例2: 正常连续剧集 [1..12]，expected_max=12
+        regular2, outliers2 = separate_outliers(list(range(1, 13)), expected_max=12)
+        self.assertEqual(regular2, list(range(1, 13)))
+        self.assertEqual(outliers2, [])
+
+        # 案例3: 缺集剧集 [1, 24]，expected_max=24（官方正片内的跳号，绝不误剥离）
+        regular3, outliers3 = separate_outliers([1, 24], expected_max=24)
+        self.assertEqual(regular3, [1, 24])
+        self.assertEqual(outliers3, [])
+
+    def test_12_diagnose_season_bonus_specials_tolerance(self):
+        """测试正片齐全外加 1~4 集收官特辑/加更期直接判定为 archive_ready."""
+        # 官方 10 集，本地 1..10 齐全，附带 11, 12 两集加更特辑
+        status, detail = diagnose_season(
+            recognized=list(range(1, 13)),
+            total_episodes=10,
+            season_finished=True,
+            has_duplicates=False,
+            allow_bonus_specials=True,
+        )
+        self.assertEqual(status, "archive_ready")
+        self.assertIn("全 10 集齐全", detail)
+        self.assertIn("加更/特辑", detail)
+        self.assertIn("可归档", detail)
+
 
 if __name__ == "__main__":
     unittest.main()
