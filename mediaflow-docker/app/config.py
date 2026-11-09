@@ -7,6 +7,9 @@ from functools import lru_cache
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+VERSION = "2.5.1"
+
+
 
 class Settings(BaseSettings):
     """MediaFlow 全局配置。所有字段均可通过 MF_ 前缀的环境变量覆盖。"""

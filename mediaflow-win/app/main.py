@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
 
-from app.config import get_settings
+from app.config import get_settings, VERSION
 from app.database import init_db
 from app.api.router import api_router
 
@@ -65,7 +65,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 app = FastAPI(
     title=settings.app_name,
-    version="2.5.0",
+    version=VERSION,
     docs_url="/docs" if settings.debug else None,
     redoc_url=None,
     lifespan=lifespan,

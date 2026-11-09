@@ -5,10 +5,10 @@ from __future__ import annotations
 import time
 from fastapi import APIRouter, Query
 
-from app.config import get_settings
+from app.config import get_settings, VERSION
 
 router = APIRouter()
-_VERSION = "0.1.0"
+_VERSION = VERSION
 
 # 连通性探测缓存 (状态, 过期时间戳)
 _HEALTH_CACHE: dict[str, tuple[str, float]] = {}
