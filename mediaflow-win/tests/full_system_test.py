@@ -144,7 +144,7 @@ def test_frontend_delivery():
     r = requests.get(f"{BASE_URL}/", timeout=10)
     assert r.status_code == 200, f"Index.html deliver failed: {r.status_code}"
     html = r.text
-    assert "v2.5.3" in html, "Frontend does not contain v2.5.1 badge"
+    assert "v2.5.4" in html, "Frontend does not contain v2.5.1 badge"
     assert "loadTasks" in html, "Frontend does not contain loadTasks function"
     assert "taskTag" in html, "Frontend does not contain taskTag function"
     assert "openCalibrateModal" in html, "Frontend does not contain openCalibrateModal function"

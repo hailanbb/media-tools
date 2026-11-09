@@ -84,7 +84,7 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.3</span>
+              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.4</span>
             </div>
             <!-- 完善后的命名 -->
             <p class="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">智能媒体库整理与归档工作台</p>
@@ -886,7 +886,7 @@
     <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-2xl w-full p-6 space-y-4 border border-slate-200 dark:border-slate-800 shadow-2xl flex flex-col max-h-[90dvh] sm:max-h-[85vh]">
       <div class="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
         <div class="flex items-center space-x-2.5">
-          <div class="w-8 h-8 rounded-xl bg-blue-100 dark:bg-blue-900/40 text-blue-600 dark:text-blue-400 flex items-center justify-center text-sm shadow-sm">
+          <div class="w-8 h-8 rounded-xl bg-blue-100 dark:bg-blue-900/40 text-blue-600 dark:text-blue-400 flex items-center justify-center text-sm shadow-sm transition-colors" id="dlProgressIconWrap">
             <i class="fa-solid fa-cloud-arrow-down" id="dlProgressIcon"></i>
           </div>
           <div>
@@ -916,11 +916,11 @@
       <div class="flex justify-between items-center pt-2 border-t border-slate-100 dark:border-slate-800">
         <span class="text-[11px] text-slate-400" id="dlProgressFooterHint">流水线执行期间请保持页面打开</span>
         <div class="flex gap-2">
-          <button id="dlCancelBtn" onclick="cancelBatchDownload()" class="px-3.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-xs font-semibold transition">
+          <button id="dlCancelBtn" onclick="cancelBatchPipeline()" class="px-3.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-xs font-semibold transition">
             <i class="fa-solid fa-stop text-xs mr-1 text-rose-500"></i> 中止后续任务
           </button>
-          <button id="dlCloseBtn" onclick="finishBatchDownload()" disabled class="px-4 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold shadow-md shadow-blue-500/20 transition">
-            完成并关闭
+          <button id="dlCloseBtn" onclick="finishBatchPipeline()" disabled class="px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold shadow-md shadow-indigo-500/20 transition">
+            <i class="fa-solid fa-check text-xs mr-1"></i> 完成并刷新
           </button>
         </div>
       </div>
@@ -2276,6 +2276,493 @@
     function openModal(id) { document.getElementById(id).classList.remove('hidden'); }
     function closeModal(id) { document.getElementById(id).classList.add('hidden'); }
 
+    // ── 10. 通用批量操作流水线引擎 (Universal Batch Pipeline) ────────
+    let isBatchPipelineCancelled = false;
+    let batchPipelineOnFinish = null;
+
+    function cancelBatchPipeline() {
+      isBatchPipelineCancelled = true;
+      const dlCancelBtn = document.getElementById('dlCancelBtn');
+      if (dlCancelBtn) {
+        dlCancelBtn.disabled = true;
+        dlCancelBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin text-xs mr-1"></i> 正在安全停机...';
+      }
+    }
+    // 兼容历史调用名
+    function cancelBatchDownload() { cancelBatchPipeline(); }
+
+    async function finishBatchPipeline() {
+      closeModal('downloadProgressModal');
+      if (typeof batchPipelineOnFinish === 'function') {
+        const fn = batchPipelineOnFinish;
+        batchPipelineOnFinish = null;
+        await fn();
+      }
+    }
+    // 兼容历史调用名
+    function finishBatchDownload() { finishBatchPipeline(); }
+
+    function getNowTimestamp() {
+      return new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    }
+
+    function findShowDisplayName(recId) {
+      if (typeof findItemByRecordId === 'function') {
+        const item = findItemByRecordId(recId);
+        if (item) return `${item.show} ${item.season}`;
+      }
+      return `剧季 #${recId ? String(recId).slice(0, 8) : ''}`;
+    }
+
+    /**
+     * 通用批量操作流水线核心驱动器
+     */
+    async function runBatchPipeline({
+      title,
+      subtitle,
+      iconClass,
+      iconWrapClass,
+      barGradientClass,
+      items,
+      processItem,
+      onFinish
+    }) {
+      if (!items || items.length === 0) return;
+
+      isBatchPipelineCancelled = false;
+      batchPipelineOnFinish = onFinish;
+
+      openModal('downloadProgressModal');
+
+      const progressBar = document.getElementById('dlProgressBar');
+      const progressPercent = document.getElementById('dlProgressPercent');
+      const progressStats = document.getElementById('dlProgressStats');
+      const currentItemText = document.getElementById('dlProgressCurrentItem');
+      const logContainer = document.getElementById('dlProgressLogContainer');
+      const dlCloseBtn = document.getElementById('dlCloseBtn');
+      const dlCancelBtn = document.getElementById('dlCancelBtn');
+      const dlProgressTitle = document.getElementById('dlProgressTitle');
+      const dlProgressSubtitle = document.getElementById('dlProgressSubtitle');
+      const dlProgressFooterHint = document.getElementById('dlProgressFooterHint');
+      const dlProgressIcon = document.getElementById('dlProgressIcon');
+      const dlProgressIconWrap = document.getElementById('dlProgressIconWrap');
+
+      // 1. 初始化看板视觉
+      if (dlProgressTitle) dlProgressTitle.textContent = title;
+      if (dlProgressSubtitle) dlProgressSubtitle.textContent = subtitle || '流水线已启动，正在逐项进行智能处理...';
+      if (dlProgressIcon && iconClass) dlProgressIcon.className = `fa-solid ${iconClass}`;
+      if (dlProgressIconWrap && iconWrapClass) {
+        dlProgressIconWrap.className = `w-8 h-8 rounded-xl flex items-center justify-center text-sm shadow-sm transition-colors ${iconWrapClass}`;
+      }
+      if (progressBar) {
+        progressBar.style.width = '0%';
+        progressBar.className = `h-2.5 rounded-full transition-all duration-300 bg-gradient-to-r ${barGradientClass || 'from-indigo-500 to-purple-600'}`;
+      }
+
+      if (dlCloseBtn) {
+        dlCloseBtn.disabled = true;
+        dlCloseBtn.className = "px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold shadow-md shadow-indigo-500/20 transition";
+        dlCloseBtn.innerHTML = '<i class="fa-solid fa-check text-xs mr-1"></i> 完成并刷新';
+      }
+      if (dlCancelBtn) {
+        dlCancelBtn.disabled = false;
+        dlCancelBtn.innerHTML = '<i class="fa-solid fa-stop text-xs mr-1 text-rose-500"></i> 中止后续任务';
+      }
+
+      if (logContainer) logContainer.innerHTML = '';
+      if (progressPercent) progressPercent.textContent = '0%';
+      if (progressStats) progressStats.textContent = `0 / ${items.length}`;
+      if (dlProgressFooterHint) dlProgressFooterHint.textContent = '流水线执行中，请保持页面打开（可最小化浏览器）...';
+
+      function appendLog(htmlContent) {
+        if (!logContainer) return;
+        const div = document.createElement('div');
+        div.innerHTML = htmlContent;
+        logContainer.appendChild(div);
+        logContainer.scrollTop = logContainer.scrollHeight;
+      }
+
+      appendLog(`<span class="text-slate-400">[${getNowTimestamp()}] 🚀 批量流水线启动，共选定 <b>${items.length}</b> 个任务项，开始逐项执行...</span>`);
+
+      let successCount = 0;
+      let failCount = 0;
+      let skippedCount = 0;
+
+      // 2. 逐项流水线循环推进
+      for (let i = 0; i < items.length; i++) {
+        if (isBatchPipelineCancelled) {
+          appendLog(`<span class="text-amber-400 font-bold">[${getNowTimestamp()}] 🛑 用户已手动中止后续任务，已处理 ${i}/${items.length} 项。</span>`);
+          break;
+        }
+
+        const item = items[i];
+        const itemDisplayName = item.name || `项目 #${i + 1}`;
+
+        const pct = Math.round(((i + 1) / items.length) * 100);
+        if (progressBar) progressBar.style.width = `${pct}%`;
+        if (progressPercent) progressPercent.textContent = `${pct}%`;
+        if (progressStats) progressStats.textContent = `${i + 1} / ${items.length}`;
+        if (currentItemText) currentItemText.textContent = `[${i + 1}/${items.length}] 正在处理: ${itemDisplayName}`;
+
+        try {
+          const res = await processItem(item, i, items.length, appendLog);
+          if (res && res.success) {
+            successCount++;
+          } else if (res && res.skipped) {
+            skippedCount++;
+          } else {
+            failCount++;
+          }
+        } catch (err) {
+          failCount++;
+          appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] 💥 执行异常: 【${itemDisplayName}】${err.message || err}</span>`);
+        }
+
+        // 适度微延迟，保证 UI 流畅渲染与平滑视觉过渡
+        await new Promise(r => setTimeout(r, 100));
+      }
+
+      // 3. 统计汇总与状态切换
+      const cancelText = isBatchPipelineCancelled ? ' (已提前中止)' : '';
+      appendLog(`<div class="pt-2 border-t border-slate-800 text-xs font-bold text-slate-300">` +
+        `[${getNowTimestamp()}] 🏁 流水线执行结束${cancelText}: 成功 <span class="text-emerald-400">${successCount}</span> 项 | ` +
+        `暂缓/跳过 <span class="text-amber-400">${skippedCount}</span> 项 | ` +
+        `失败 <span class="text-rose-400">${failCount}</span> 项 / 共 ${items.length} 项</div>`);
+
+      if (dlProgressSubtitle) dlProgressSubtitle.textContent = `流水线执行已完结: 成功 ${successCount} 项, 失败 ${failCount} 项`;
+      if (currentItemText) currentItemText.textContent = `全部完成 (${successCount}/${items.length})`;
+      if (dlProgressFooterHint) dlProgressFooterHint.textContent = '执行完毕，点击右侧按钮应用变更并刷新';
+      if (dlCancelBtn) dlCancelBtn.disabled = true;
+      if (dlCloseBtn) {
+        dlCloseBtn.disabled = false;
+        dlCloseBtn.classList.remove('opacity-40', 'cursor-not-allowed');
+      }
+    }
+
+    // ── 10.1 批量归档 ─────────────────────────────────────────
+    async function confirmArchiveDone() {
+      closeModal('archiveModal');
+      const ids = currentActionRecordId ? [currentActionRecordId] : [...document.querySelectorAll('input[name="itemCheck"]:checked')].map(cb => cb.value);
+      if (ids.length === 0) { alert('未选择任何剧季'); return; }
+
+      const items = ids.map(id => ({ id, name: findShowDisplayName(id) }));
+
+      await runBatchPipeline({
+        title: `批量一键归档所选剧季 (${items.length} 项)`,
+        subtitle: '正在按季将媒体文件移入目标归档库并清理源端空壳...',
+        iconClass: 'fa-box-archive',
+        iconWrapClass: 'bg-emerald-100 dark:bg-emerald-950/70 text-emerald-600 dark:text-emerald-400',
+        barGradientClass: 'from-emerald-500 to-teal-600',
+        items,
+        processItem: async (item, i, total, appendLog) => {
+          appendLog(`<span class="text-slate-400">[${getNowTimestamp()}] 📦 正在归档: <b>【${item.name}】</b>...</span>`);
+          try {
+            const res = await api('/api/archive/execute', {
+              method: 'POST',
+              body: JSON.stringify({ season_record_ids: [item.id] })
+            });
+            if (res.ok) {
+              appendLog(`<span class="text-emerald-400 font-bold">[${getNowTimestamp()}] ✓ 归档成功: 【${item.name}】${res.message || '已搬移至归档库并同步削刮资产'}</span>`);
+              return { success: true };
+            } else {
+              appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] ✗ 归档受阻: 【${item.name}】${res.message || '未满足归档条件'}</span>`);
+              return { success: false };
+            }
+          } catch (err) {
+            appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] ✗ 归档失败: 【${item.name}】${err.message}</span>`);
+            return { success: false };
+          }
+        },
+        onFinish: async () => {
+          const task = taskList.find(t => t.id === currentTaskId);
+          if (task) task._seasonsLoaded = false;
+          await loadTasks();
+          if (currentTaskId) selectTask(currentTaskId);
+        }
+      });
+    }
+
+    // ── 10.2 批量清理冗余 ─────────────────────────────────────
+    async function confirmReviewDone() {
+      closeModal('reviewModal');
+      const ids = currentActionRecordId ? [currentActionRecordId] : [...document.querySelectorAll('input[name="itemCheck"]:checked')].map(cb => cb.value);
+      if (ids.length === 0) { alert('未选择任何剧季'); return; }
+
+      const items = ids.map(id => ({ id, name: findShowDisplayName(id) }));
+
+      await runBatchPipeline({
+        title: `批量一键清理冗余视频 (${items.length} 项)`,
+        subtitle: '正在按版本规则淘汰冗余文件，外挂字幕与海报100%保留...',
+        iconClass: 'fa-broom',
+        iconWrapClass: 'bg-amber-100 dark:bg-amber-950/70 text-amber-600 dark:text-amber-400',
+        barGradientClass: 'from-amber-500 to-orange-600',
+        items,
+        processItem: async (item, i, total, appendLog) => {
+          appendLog(`<span class="text-slate-400">[${getNowTimestamp()}] 🧹 正在清理冗余: <b>【${item.name}】</b>...</span>`);
+          try {
+            const res = await api('/api/archive/clean', {
+              method: 'POST',
+              body: JSON.stringify({ season_record_ids: [item.id] })
+            });
+            if (res.ok) {
+              appendLog(`<span class="text-emerald-400 font-bold">[${getNowTimestamp()}] ✓ 清理成功: 【${item.name}】${res.message || '冗余版本已淘汰，外挂字幕与海报已保护'}</span>`);
+              return { success: true };
+            } else {
+              appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] ✗ 暂缓清理: 【${item.name}】${res.message || '未满足清理安全条件'}</span>`);
+              return { success: false };
+            }
+          } catch (err) {
+            appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] ✗ 清理失败: 【${item.name}】${err.message}</span>`);
+            return { success: false };
+          }
+        },
+        onFinish: async () => {
+          const task = taskList.find(t => t.id === currentTaskId);
+          if (task) task._seasonsLoaded = false;
+          await loadTasks();
+          if (currentTaskId) selectTask(currentTaskId);
+        }
+      });
+    }
+
+    // ── 10.3 批量清理源端残留 ──────────────────────────────────
+    async function confirmCleanRedundantDone() {
+      closeModal('cleanRedundantModal');
+      const ids = currentActionRecordId ? [currentActionRecordId] : [...document.querySelectorAll('input[name="itemCheck"]:checked')].map(cb => cb.value);
+      if (ids.length === 0) { alert('未选择任何剧季'); return; }
+
+      const items = ids.map(id => ({ id, name: findShowDisplayName(id) }));
+
+      await runBatchPipeline({
+        title: `批量清理源端冗余残留 (${items.length} 项)`,
+        subtitle: '目标归档库已完整拥有，正在安全释放源端磁盘空间并刷新网盘...',
+        iconClass: 'fa-trash-can',
+        iconWrapClass: 'bg-purple-100 dark:bg-purple-950/70 text-purple-600 dark:text-purple-400',
+        barGradientClass: 'from-purple-500 to-indigo-600',
+        items,
+        processItem: async (item, i, total, appendLog) => {
+          appendLog(`<span class="text-slate-400">[${getNowTimestamp()}] 🗑️ 正在清理源端残留: <b>【${item.name}】</b>...</span>`);
+          try {
+            const res = await api('/api/archive/clean-source-redundant', {
+              method: 'POST',
+              body: JSON.stringify({ season_record_ids: [item.id] })
+            });
+            if (res.ok) {
+              appendLog(`<span class="text-purple-400 font-bold">[${getNowTimestamp()}] ✓ 清理完成: 【${item.name}】源端残留目录已安全清除并刷新目录</span>`);
+              return { success: true };
+            } else {
+              appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] ✗ 清理失败: 【${item.name}】${res.message || '未能清理源端'}</span>`);
+              return { success: false };
+            }
+          } catch (err) {
+            appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] ✗ 清理失败: 【${item.name}】${err.message}</span>`);
+            return { success: false };
+          }
+        },
+        onFinish: async () => {
+          const task = taskList.find(t => t.id === currentTaskId);
+          if (task) task._seasonsLoaded = false;
+          await loadTasks();
+          if (currentTaskId) selectTask(currentTaskId);
+        }
+      });
+    }
+
+    // ── 10.4 批量推送 MP 补缺 ──────────────────────────────────
+    async function confirmDownloadDone() {
+      closeModal('downloadModal');
+      const ids = currentActionRecordId ? [currentActionRecordId] : [...document.querySelectorAll('input[name="itemCheck"]:checked')].map(cb => cb.value);
+      if (ids.length === 0) { alert('未选择任何需要补缺的剧集'); return; }
+
+      const items = ids.map(id => ({ id, name: findShowDisplayName(id) }));
+
+      await runBatchPipeline({
+        title: `批量推送 MoviePilot 补缺任务 (${items.length} 项)`,
+        subtitle: '流水线已启动，正在逐项进行智能选种与解绑推送...',
+        iconClass: 'fa-cloud-arrow-down',
+        iconWrapClass: 'bg-blue-100 dark:bg-blue-900/40 text-blue-600 dark:text-blue-400',
+        barGradientClass: 'from-blue-500 to-indigo-600',
+        items,
+        processItem: async (item, i, total, appendLog) => {
+          appendLog(`<span class="text-slate-400">[${getNowTimestamp()}] 🔍 正在检索 MP 补缺做种: <b>【${item.name}】</b>...</span>`);
+          try {
+            const res = await api('/api/moviepilot/download-gap-fill', {
+              method: 'POST',
+              body: JSON.stringify({ record_ids: [item.id] })
+            });
+            const itemResult = (res.details && res.details.length > 0) ? res.details[0] : null;
+            if (itemResult) {
+              if (itemResult.success) {
+                let extra = '';
+                if (itemResult.seeders) extra += ` (做种: ${itemResult.seeders}, 站点: ${itemResult.site || 'PT'})`;
+                if (itemResult.cleaned_transfers_count > 0) extra += ` | 自动解绑清理 ${itemResult.cleaned_transfers_count} 条旧整理记录`;
+                appendLog(`<span class="text-emerald-400 font-bold">[${getNowTimestamp()}] ✓ 推送成功: 【${item.name}】已推送到下载器: ${itemResult.torrent_title || ''}${extra}</span>`);
+                return { success: true };
+              } else if (itemResult.skipped) {
+                appendLog(`<span class="text-amber-400 font-semibold">[${getNowTimestamp()}] ⚠️ 暂缓推送: 【${item.name}】${itemResult.message || '未找到健康做种资源(做种≥2)'}</span>`);
+                return { success: false, skipped: true };
+              } else {
+                appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] ✗ 推送失败: 【${item.name}】${itemResult.message || '未找到匹配资源'}</span>`);
+                return { success: false };
+              }
+            } else {
+              appendLog(`<span class="text-slate-300">[${getNowTimestamp()}] ℹ️ 【${item.name}】${res.message || '处理完成'}</span>`);
+              return { success: true };
+            }
+          } catch (err) {
+            appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] ✗ 推送异常: 【${item.name}】${err.message}</span>`);
+            return { success: false };
+          }
+        },
+        onFinish: async () => {
+          const task = taskList.find(t => t.id === currentTaskId);
+          if (task) task._seasonsLoaded = false;
+          await loadTasks();
+          if (currentTaskId) selectTask(currentTaskId);
+        }
+      });
+    }
+
+    function findItemByRecordId(recId) {
+      if (!currentTaskId) return null;
+      const task = taskList.find(t => t.id === currentTaskId);
+      if (!task || !task.categories) return null;
+      for (const catKey of Object.keys(task.categories)) {
+        const list = task.categories[catKey];
+        if (Array.isArray(list)) {
+          const found = list.find(i => String(i.id) === String(recId));
+          if (found) return found;
+        }
+      }
+      return null;
+    }
+
+    function cleanSourceRedundantSingle(recordId, name) {
+      currentActionRecordId = recordId;
+      if (!name) {
+        const item = findItemByRecordId(recordId);
+        name = item ? `${item.show} - ${item.season}` : '';
+      }
+      openModal('cleanRedundantModal');
+      document.getElementById('cleanRedundantTitle').textContent = `源端冗余清理确认: ${name}`;
+    }
+
+    // ── 10.3 人工校准官方总集数 ──────────────────────────────
+    let currentCalibrateRecId = null;
+    let currentCalibrateMaxRec = null;
+
+    function openCalibrateModal(recId, showTitle, maxRec, currentTotal) {
+      currentCalibrateRecId = recId;
+      if (!showTitle) {
+        const item = findItemByRecordId(recId);
+        if (item) {
+          showTitle = `${item.show} - ${item.season}`;
+          maxRec = item.maxRec;
+          currentTotal = item.totalEpisodes;
+        }
+      }
+      currentCalibrateMaxRec = maxRec;
+      document.getElementById('calibrateShowTitle').textContent = showTitle || '剧集名称';
+      document.getElementById('calibrateTotalInput').value = (currentTotal && currentTotal > 0 && currentTotal < 900) ? currentTotal : (maxRec || '');
+      openModal('calibrateModal');
+    }
+
+    function setCalibrateFromLocalMax() {
+      if (currentCalibrateMaxRec) {
+        document.getElementById('calibrateTotalInput').value = currentCalibrateMaxRec;
+      }
+    }
+
+    async function submitCalibrateTotal() {
+      const val = parseInt(document.getElementById('calibrateTotalInput').value);
+      if (!val || val <= 0) {
+        alert('请输入大于 0 的有效总集数');
+        return;
+      }
+      try {
+        const res = await api('/api/archive/calibrate-episodes', {
+          method: 'POST',
+          body: JSON.stringify({
+            season_record_id: currentCalibrateRecId,
+            total_episodes: val
+          })
+        });
+        closeModal('calibrateModal');
+        alert(res.message || '校准成功！');
+        const task = taskList.find(item => item.id === currentTaskId);
+        if (task) task._seasonsLoaded = false;
+        await loadTasks();
+        selectTask(currentTaskId);
+      } catch (e) {
+        alert(`校准失败: ${e.message}`);
+      }
+    }
+
+    // ── 10.4 官方无集数信息剧集：删除源端并刷新 ─────────────────
+    let currentDeleteSourceRecId = null;
+
+    function promptDeleteSourceShow(recId) {
+      currentDeleteSourceRecId = recId;
+      const item = findItemByRecordId(recId);
+      const name = item ? item.show : '未知剧集';
+      const path = item ? (item.pathA || '') : '';
+      document.getElementById('deleteSourceShowName').textContent = name;
+      document.getElementById('deleteSourceShowPath').textContent = `源端目标路径: ${path}`;
+      openModal('deleteSourceShowModal');
+    }
+
+    async function executeDeleteSourceShow() {
+      if (!currentDeleteSourceRecId) return;
+      closeModal('deleteSourceShowModal');
+      try {
+        const res = await api('/api/archive/delete-source-show', {
+          method: 'POST',
+          body: JSON.stringify({ season_record_id: currentDeleteSourceRecId }),
+        });
+        alert(res.message || '源端剧集目录已删除并完成目录刷新！');
+        const task = taskList.find(t => t.id === currentTaskId);
+        if (task) task._seasonsLoaded = false;
+        await loadTasks();
+        if (currentTaskId) selectTask(currentTaskId);
+      } catch (e) {
+        alert(`删除源端失败: ${e.message}`);
+      }
+    }
+
+    function handleSingleAction(type, arg2, arg3) {
+      // 灵活兼容：handleSingleAction(type, recordId) 或 handleSingleAction(type, name, recordId)
+      let recordId = arg3 ? arg3 : arg2;
+      let name = arg3 ? arg2 : null;
+      currentActionRecordId = recordId;
+      if (!name) {
+        const item = findItemByRecordId(recordId);
+        name = item ? `${item.show} - ${item.season}` : '';
+      }
+
+      if (type === 'calibrate') {
+        openCalibrateModal(recordId);
+      } else if (type === 'archive') {
+        openModal('archiveModal');
+        document.getElementById('archiveModalTitle').textContent = `单季归档预检确认: ${name}`;
+      } else if (type.startsWith('review') || type === 'clean') {
+        openModal('reviewModal');
+        document.getElementById('reviewModalTitle').textContent = `复核清理确认: ${name}`;
+      } else if (type === 'clean_redundant') {
+        openModal('cleanRedundantModal');
+        document.getElementById('cleanRedundantTitle').textContent = `清理源端冗余确认: ${name}`;
+      } else if (type.startsWith('download')) {
+        openModal('downloadModal');
+        document.getElementById('downloadModalTitle').textContent = `补缺/修复确认: ${name}`;
+      }
+    }
+
+    function executeBatchArchive() { currentActionRecordId = null; openModal('archiveModal'); }
+    function executeBatchReview() { currentActionRecordId = null; openModal('reviewModal'); }
+    function executeBatchDownload() { currentActionRecordId = null; openModal('downloadModal'); }
+
+    function openModal(id) { document.getElementById(id).classList.remove('hidden'); }
+    function closeModal(id) { document.getElementById(id).classList.add('hidden'); }
+
     async function confirmArchiveDone() {
       closeModal('archiveModal');
       const ids = currentActionRecordId ? [currentActionRecordId] : [...document.querySelectorAll('input[name="itemCheck"]:checked')].map(cb => cb.value);
@@ -3007,18 +3494,44 @@
         return;
       }
 
-      const subIds = toClean.map(s => s.id);
-      try {
-        const res = await api('/api/moviepilot/subscriptions/batch-delete', {
-          method: 'POST',
-          body: JSON.stringify({ sub_ids: subIds })
-        });
-        alert(res.message || `成功退订 ${subIds.length} 项订阅！`);
-        closeModal('subCleanModal');
-        await loadSubscriptions();
-      } catch (e) {
-        alert(`批量退订失败: ${e.message}`);
-      }
+      closeModal('subCleanModal');
+
+      const items = toClean.map(s => ({
+        id: s.id,
+        name: `${s.title || '影视'}${s.season ? ` S${s.season}` : ''}`,
+        reason: s.clean_reason || '已完结/无更新'
+      }));
+
+      await runBatchPipeline({
+        title: `批量退订 MoviePilot 订阅 (${items.length} 项)`,
+        subtitle: `正在按【${currentPreviewData.mode_name}】模式逐项退订并同步 MP...`,
+        iconClass: 'fa-tags',
+        iconWrapClass: 'bg-amber-100 dark:bg-amber-950/70 text-amber-600 dark:text-amber-400',
+        barGradientClass: 'from-amber-500 to-rose-600',
+        items,
+        processItem: async (item, i, total, appendLog) => {
+          appendLog(`<span class="text-slate-400">[${getNowTimestamp()}] 🏷️ 正在退订: <b>【${item.name}】</b> (原因: ${item.reason})...</span>`);
+          try {
+            const res = await api('/api/moviepilot/subscriptions/batch-delete', {
+              method: 'POST',
+              body: JSON.stringify({ sub_ids: [item.id] })
+            });
+            if (res.ok) {
+              appendLog(`<span class="text-emerald-400 font-bold">[${getNowTimestamp()}] ✓ 退订成功: 【${item.name}】</span>`);
+              return { success: true };
+            } else {
+              appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] ✗ 退订失败: 【${item.name}】${res.message || '接口调用异常'}</span>`);
+              return { success: false };
+            }
+          } catch (err) {
+            appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] ✗ 退订异常: 【${item.name}】${err.message}</span>`);
+            return { success: false };
+          }
+        },
+        onFinish: async () => {
+          await loadSubscriptions();
+        }
+      });
     }
 
     async function loadTransferQueue() {
