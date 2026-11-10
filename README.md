@@ -4,7 +4,7 @@
 
 > **面向家庭影院与云原生 NAS（115网盘 / CloudDrive2 / MoviePilot / Emby / Jellyfin）的新一代智能影视媒体整理、跨库无损归档与双轨运维治理系统。**
 
-[![Version](https://img.shields.io/badge/Release-v2.5.14-6366f1.svg?style=flat-square&logo=github)](https://github.com/hailanbb/media-tools/releases)
+[![Version](https://img.shields.io/badge/Release-v2.5.15-6366f1.svg?style=flat-square&logo=github)](https://github.com/hailanbb/media-tools/releases)
 [![Docker](https://img.shields.io/badge/Docker-Supported-2496ed.svg?style=flat-square&logo=docker)](mediaflow-docker/)
 [![Windows](https://img.shields.io/badge/Windows-Native-0078d4.svg?style=flat-square&logo=windows)](mediaflow-win/)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776ab.svg?style=flat-square&logo=python)](https://www.python.org/)
@@ -213,14 +213,26 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port 8080
 MediaFlow 的每一项核心机制均遵循严谨的第一性原理设计方案。您可在仓库中直接阅读完整的工程规范文档：
 
 * 📘 [《MediaFlow剧季元数据交叉核对与纠错方案》](MediaFlow剧季元数据交叉核对与纠错方案.md) —— 双轨主动核对、播出版型自适应与断崖剥离的核心理论模型；
-* 📗 [《MediaFlow综艺分段识别与订阅清理改进方案》](mediaflow-docker/MediaFlow综艺分段识别与订阅清理改进方案-2026-11-10.md) —— 复杂分段（PartA/B）解析、精准退订与资源核查实施规范；
-* 📕 [《MediaFlow全面核查与优化方案》](mediaflow-docker/MediaFlow全面核查与优化方案-2026-11-10.md) —— 跨目录剧季统一识别、播出资料深度校准技术报告。
+* 📗 [《MediaFlow批量一键归档加速与安全并发方案》](MediaFlow批量一键归档加速与安全并发方案-2026-11-10.md) —— 归档完成判断修正、无损同名跳过、剧级互斥锁与快照复用规范；
+* 📙 [《MediaFlow批量冗余清理加速与受控并发方案》](MediaFlow批量冗余清理加速与受控并发方案-2026-11-10.md) —— 单次实物重读双向核验、主视频优先从属删除与受控工作池；
+* 📕 [《MediaFlow批量推送MoviePilot补缺加速与优雅中止方案》](MediaFlow批量推送MoviePilot补缺加速与优雅中止方案-2026-11-10.md) —— 瞬时 AbortController 熔断、批次隔离与短时 TTL 队列快照。
 
 ---
 
 ## 📜 版本演进历史 (Changelog)
 
-### 🚀 最新稳定版：v2.5.14 (2026-11-10)
+### 🚀 最新稳定版：v2.5.15 (2026-11-11)
+
+* **批量一键归档加速、完成判断修正与安全并发体系**：
+  * **增量合并完成条件修正（P0）**：显式区分“读取成功且为空”与“读取失败”。当末次读取源季失败时，记为待核实，保存已处理文件并安全保留源季，坚决杜绝误标已归档或误删源目录；
+  * **杜绝盲目删除非视频伴生资产（P0）**：同名字幕、NFO、海报可能内容不同，默认两端保留并列出冲突，未知附件严格留源；
+  * **归档写入统一启用跳过同名策略（P0）**：整季移动、单文件增量移动及公共资产迁移统一使用 `skip_existing=True`，杜绝任何同名覆盖；
+  * **目标多候选安全熔断（P0）**：目标库匹配到多个候选季目录时安全停止，展示候选路径转入人工核实；
+  * **路径规范化红线（P0）**：写入前严格规范化源、目标及父路径，拒绝相同或互相包含的路径，严密保护平铺单季；
+  * **剧级后端互斥与父目录快照复用（P1）**：引入剧目级规范化路径互斥锁，同剧多季串行化并复用父目录与季名列表快照，剧根空壳检查合并在该剧全部所选季完成后安全执行一次；
+  * **前端多状态对账反馈**：细化呈现“已归档”、“部分归档”、“结果待核实”与“归档完成、源端仍有附件”，支持优雅中止并即时安全对账。
+
+#### v2.5.14 (2026-11-10)
 
 * **批量冗余清理加速与双向物理实物核验**：
   * 剪除连续两次强刷网盘的冗余 I/O，改为单次实物重读核验保留版本与消除版本，杜绝幽灵文件假成功；

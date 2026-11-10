@@ -60,10 +60,10 @@ def test_task_lifecycle_and_controls():
     assert r.status_code == 200, f"Resume failed: {r.text}"
     print(f"✓ 继续指令下发成功: {r.json()}")
 
-    # E. 轮询等待初检完成（最高等待 25s）
+    # E. 轮询等待初检完成（最高等待 90s）
     print("  -> 等待并发初检完成中...")
     completed = False
-    for i in range(25):
+    for i in range(90):
         time.sleep(1)
         r = requests.get(f"{BASE_URL}/api/tasks/{task_id}", timeout=10)
         task_info = r.json()

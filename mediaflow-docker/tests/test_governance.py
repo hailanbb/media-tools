@@ -54,6 +54,93 @@ class GovernanceTests(ManualActionsTest):
         disk.move_file.assert_awaited_once_with(verdict.season_path, "/qa/dst/Show", skip_existing=True)
         disk.delete_file.assert_not_awaited()
 
+    async def test_archive_incremental_merge_read_failure_protects_source(self):
+        """P0: 增量合并末次读取源季失败时，显式区分读取失败，保留源季绝不误删，状态记为待核实。"""
+        from app.models.season import SeasonRecord
+        disk = AsyncMock()
+        target_parent = "/qa/dst/Show"
+        existing_season_dir = {"name": "Season 1", "path": "/qa/dst/Show/Season 1", "isDirectory": True}
+        src_files = [
+            {"name": "Show.S01E03.mkv", "path": "/qa/src/Show/Season 1/Show.S01E03.mkv", "isDirectory": False, "size": 100}
+        ]
+        dest_files = [
+            {"name": "Show.S01E01.mkv", "path": "/qa/dst/Show/Season 1/Show.S01E01.mkv", "isDirectory": False, "size": 100},
+            {"name": "Show.S01E02.mkv", "path": "/qa/dst/Show/Season 1/Show.S01E02.mkv", "isDirectory": False, "size": 100}
+        ]
+        call_count = 0
+        async def fake_list_files(path, force_refresh=False):
+            nonlocal call_count
+            call_count += 1
+            if path == "/qa/src/Show/Season 1":
+                if call_count >= 4:
+                    raise RuntimeError("网盘网络中断：读取源季失败")
+                return src_files
+            elif path == "/qa/dst/Show":
+                return [existing_season_dir]
+            elif path == "/qa/dst/Show/Season 1":
+                return dest_files
+            return []
+
+        disk.list_files.side_effect = fake_list_files
+        disk.move_file.return_value = {"success": True}
+        disk.delete_file = AsyncMock()
+
+        async with async_session() as db:
+            season = await db.get(SeasonRecord, "ready")
+            season.status = "archive_ready"
+            season.season_path = "/qa/src/Show/Season 1"
+            season.show_path = "/qa/src/Show"
+            season.archive_target_path = "/qa/dst/Show/Season 1"
+            await db.commit()
+
+        with patch("app.api.archive.CloudDrive2Client", return_value=disk):
+            reply = await self.http.post("/api/archive/execute", json={"season_record_ids": ["ready"]})
+
+        disk.delete_file.assert_not_awaited()
+        async with async_session() as db:
+            updated = await db.get(SeasonRecord, "ready")
+            self.assertEqual(updated.status, "review_needed")
+            self.assertIn("读取源季失败", updated.status_detail)
+
+    async def test_archive_candidate_multiple_seasons_halt(self):
+        """P0: 目标季匹配到多个候选目录时安全停止并列出候选路径。"""
+        from app.models.season import SeasonRecord
+        disk = AsyncMock()
+        candidate_dirs = [
+            {"name": "Season 1", "path": "/qa/dst/Show/Season 1", "isDirectory": True},
+            {"name": "Season 01", "path": "/qa/dst/Show/Season 01", "isDirectory": True}
+        ]
+        src_files = [
+            {"name": "Show.S01E01.mkv", "path": "/qa/src/Show/Season 1/Show.S01E01.mkv", "isDirectory": False, "size": 100}
+        ]
+        async def fake_list(path, force_refresh=False):
+            if path == "/qa/src/Show/Season 1":
+                return src_files
+            elif path == "/qa/dst/Show":
+                return candidate_dirs
+            return []
+        disk.list_files.side_effect = fake_list
+        disk.move_file = AsyncMock()
+        disk.delete_file = AsyncMock()
+
+        async with async_session() as db:
+            season = await db.get(SeasonRecord, "ready")
+            season.status = "archive_ready"
+            season.season_path = "/qa/src/Show/Season 1"
+            season.show_path = "/qa/src/Show"
+            season.archive_target_path = "/qa/dst/Show/Season 1"
+            await db.commit()
+
+        with patch("app.api.archive.CloudDrive2Client", return_value=disk):
+            reply = await self.http.post("/api/archive/execute", json={"season_record_ids": ["ready"]})
+
+        disk.move_file.assert_not_awaited()
+        disk.delete_file.assert_not_awaited()
+        async with async_session() as db:
+            updated = await db.get(SeasonRecord, "ready")
+            self.assertEqual(updated.status, "review_needed")
+            self.assertIn("多个候选季目录", updated.status_detail)
+
     async def test_period_download_rejects_ambiguous_numbering(self):
         from app.models.season import SeasonRecord
         from app.services.download_service import execute_gap_fill_download

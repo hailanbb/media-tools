@@ -84,7 +84,7 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.14</span>
+              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.15</span>
             </div>
             <!-- 完善后的命名 -->
             <p class="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">智能媒体库整理与归档工作台</p>
@@ -2641,13 +2641,21 @@
               signal: abortSignal
             });
             if (res.ok) {
-              appendLog(`<span class="text-emerald-400 font-bold">[${getNowTimestamp()}] ✓ 归档成功: 【${item.name}】${res.message || '已搬移至归档库并同步削刮资产'}</span>`);
+              if (res.message && (res.message.includes('待核实') || res.message.includes('残留') || res.message.includes('附件') || res.message.includes('留存'))) {
+                appendLog(`<span class="text-amber-400 font-bold">[${getNowTimestamp()}] ⚠️ 归档待核实: 【${item.name}】${res.message}</span>`);
+              } else {
+                appendLog(`<span class="text-emerald-400 font-bold">[${getNowTimestamp()}] ✓ 归档成功: 【${item.name}】${res.message || '已搬移至归档库并同步削刮资产'}</span>`);
+              }
               return { success: true };
             } else {
               appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] ✗ 归档受阻: 【${item.name}】${res.message || '未满足归档条件'}</span>`);
               return { success: false };
             }
           } catch (err) {
+            if (abortSignal && abortSignal.aborted) {
+              appendLog(`<span class="text-amber-400 font-bold">[${getNowTimestamp()}] ⏹ 归档已中止: 【${item.name}】未开始已取消</span>`);
+              return { success: false, aborted: true };
+            }
             appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] ✗ 归档失败: 【${item.name}】${err.message}</span>`);
             return { success: false };
           }
