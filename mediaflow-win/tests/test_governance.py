@@ -79,6 +79,72 @@ class GovernanceTests(ManualActionsTest):
         mp.submit_download.assert_awaited_once_with(right["media_info"], right["torrent_info"])
         mp.clear_transfer_history_for_episodes.assert_not_awaited()
 
+    def test_queue_episode_field_excludes_season_and_title_numbers(self):
+        from app.services.download_service import parse_active_episodes
+        self.assertEqual(parse_active_episodes("24 in 24 S03E08 Part 1", 9), {8})
+        self.assertEqual(parse_active_episodes("E02-E03, E09", 9), {2, 3, 9})
+        self.assertEqual(parse_active_episodes("[2, 3, 9]", 9), {2, 3, 9})
+
+    async def test_numbered_episode_with_part_in_title_allows_other_gaps(self):
+        from app.services.download_service import execute_gap_fill_download
+        from app.models.season import SeasonRecord
+        mp, disk = self.clients()
+        disk.list_files.return_value = [self.file("Show.S03E08.Elevation.Part.1.mkv"),
+                                       self.file("unknown-Part2.nfo"), {**self.file("Part1"), "isDirectory": True}]
+        def candidate(title, numbers, tid=42, season=3):
+            return {"torrent_info": {"title": title, "seeders": 5}, "media_info": {"tmdb_id": tid},
+                    "meta_info": {"season_list": [season], "episode_list": numbers}}
+        good = [candidate(f"Show.S03E{n:02}" + (".Elevation.Part.2" if n == 9 else ""), [n])
+                for n in [2, 3, 9]]
+        # 站点只在结构化起止集号中给出 E02，节目名称中的 24 不能当成集号。
+        good[0] = candidate("24 in 24 Last Chef Standing", [])
+        good[0]["meta_info"].update(begin_episode=2, end_episode=2)
+        invalid = [candidate("Show.S03E08.Part1", [8]), candidate("Show.S03.Complete", list(range(1, 10))),
+                   candidate("Other.S03E02", [2], tid=55), candidate("Show.S02E02", [2], season=2),
+                   candidate("Show.S03E08.Part1", [9])]
+        mp.search_resources.return_value = invalid + good
+        mp.submit_download.return_value = {"success": True}
+        async with async_session() as db:
+            rec = await db.get(SeasonRecord, "gap")
+            rec.tmdb_id, rec.season_number, rec.total_episodes = "42", 3, 9
+            rec.season_path = rec.show_path + "/Season 3"
+            rec.missing_episodes_json = "[2,3,7,9]"
+            await db.commit()
+            fresh = SimpleNamespace(status="download_needed", tmdb_id=42, season_path=rec.season_path,
+                                    missing_episodes=[2,3,9], status_detail="缺 2、3、9")
+            with patch("app.services.download_service.MoviePilotClient", return_value=mp), patch(
+                    "app.clients.clouddrive2.CloudDrive2Client", return_value=disk), patch(
+                    "app.services.download_service.get_settings", return_value=SimpleNamespace(
+                        mp_url="test", mp_token="fixture", source_root="/qa/src", archive_root="/qa/dst")), patch(
+                    "app.core.inspector.run_inspection", new=AsyncMock(return_value=SimpleNamespace(seasons=[fresh]))):
+                result = await execute_gap_fill_download(["gap"], db)
+                self.assertTrue(result["ok"], result)
+                self.assertEqual({s["title"] for s in result["submitted"]}, {c["torrent_info"]["title"] for c in good})
+                mp.clear_transfer_history_for_episodes.assert_not_awaited()
+                mp.get_active_downloads.return_value = [{"tmdb_id":42,"season":3,"episode":"E02-E03","title":"Show"},
+                                                       {"tmdb_id":42,"season":3,"title":"Show.S03E09.Part2"}]
+                mp.search_resources.reset_mock()
+                result = await execute_gap_fill_download(["gap"], db)
+                self.assertTrue(result["skipped"], result)
+                self.assertIn("下载队列", result["message"])
+                mp.search_resources.assert_not_awaited()
+                mp.get_active_downloads.return_value = []
+                mp.get_media_info.return_value = {"original_title":"Show"}
+                mp.search_resources.side_effect = [[], []]
+                result = await execute_gap_fill_download(["gap"], db)
+                self.assertTrue(result["skipped"], result)
+                self.assertIn("未返回资源", result["message"])
+                mp.search_resources.side_effect = TimeoutError()
+                result = await execute_gap_fill_download(["gap"], db)
+                self.assertFalse(result["skipped"])
+                self.assertFalse(result["ok"])
+                disk.list_files.return_value.append(self.file("unidentified.Part.02.1080p.mkv"))
+                mp.search_resources.reset_mock()
+                result = await execute_gap_fill_download(["gap"], db)
+                self.assertTrue(result["skipped"])
+                self.assertIn("unidentified.Part.02.1080p.mkv", result["message"])
+                mp.search_resources.assert_not_awaited()
+
     def clients(self):
         sub = {"id": 7, "name": "示例", "season": 2, "tmdbid": 1, "total_episode": 2,
                "completed_episode": 1, "lack_episode": 1, "state": "P"}

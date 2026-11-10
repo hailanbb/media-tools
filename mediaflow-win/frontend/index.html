@@ -84,7 +84,7 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.12</span>
+              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.13</span>
             </div>
             <!-- 完善后的命名 -->
             <p class="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">智能媒体库整理与归档工作台</p>
@@ -2617,6 +2617,10 @@
               body: JSON.stringify({ season_record_ids: [item.id], record_ids: [item.id] })
             });
 
+            if (res.skipped === true) {
+              appendLog(`<span class="text-amber-400">[${getNowTimestamp()}] 暂缓 【${escapeHtml(item.name)}】${escapeHtml(res.message)}</span>`);
+              return { skipped: true };
+            }
             if (res.ok === false || res.success === false) {
               appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] ✗ 推送失败: 【${escapeHtml(item.name)}】${escapeHtml(res.message || '未找到合适资源')}</span>`);
               return { success: false, reason: res.message };
@@ -2638,6 +2642,9 @@
                   appendLog(`<span class="text-amber-400 font-bold">[${getNowTimestamp()}] ⚠️ 部分推送成功: 【${escapeHtml(item.name)}】成功 ${successes.length} 项，失败 ${failures.length} 项${extra}</span>`);
                 } else {
                   appendLog(`<span class="text-emerald-400 font-bold">[${getNowTimestamp()}] ✓ 推送成功: 【${escapeHtml(item.name)}】共提交 ${successes.length} 个下载任务${extra}</span>`);
+                }
+                for (const note of res.skip_reasons || []) {
+                  appendLog(`<span class="text-amber-400">${escapeHtml(note)}</span>`);
                 }
                 return { success: true };
               } else {

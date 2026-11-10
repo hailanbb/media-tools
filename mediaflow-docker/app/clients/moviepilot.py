@@ -130,11 +130,18 @@ class MoviePilotClient:
                 keyword = f"{keyword} S{str(season).zfill(2)}"
             res = await self._get("/api/v1/search/title", keyword=keyword)
 
+        if isinstance(res, dict) and res.get("success") is False:
+            message = str(res.get("message") or "")
+            if "未搜索到任何资源" in message:
+                return []
+            raise RuntimeError(message or "MoviePilot 资源检索失败")
         data = res.get("data") if isinstance(res, dict) and "data" in res else res
         if isinstance(data, list):
             return data
         if isinstance(data, dict):
-            return data.get("items") or data.get("results") or []
+            for key in ("items", "results"):
+                if isinstance(data.get(key), list):
+                    return data[key]
         raise RuntimeError("资源搜索返回未知格式")
 
     # ── 订阅管理 ──────────────────────────────────────────

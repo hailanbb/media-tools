@@ -323,6 +323,7 @@ async def run_inspection(
     control_event=None,
     cancelled_tasks=None,
     concurrency: int = 3,
+    only_season_path: str | None = None,
 ) -> InspectionResult:
     """执行初检流程 — 扫描 CD2 目录、解析集号、查询 TMDB、生成诊断。
 
@@ -415,6 +416,8 @@ async def run_inspection(
         if not single_season and not season_dirs and loose_files:
             season_dirs = [(1, {"name": show_name, "path": show_path, "isDirectory": True})]
 
+        if only_season_path is not None:
+            season_dirs = [(sn, item) for sn, item in season_dirs if item["path"] == only_season_path]
         if not season_dirs:
             return []
 

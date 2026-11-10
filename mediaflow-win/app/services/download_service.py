@@ -21,6 +21,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clients.moviepilot import MoviePilotClient
 from app.config import get_settings
+from app.core.episode_parser import is_video_file, parse_episode
+from app.core.segments import segment_number
 from app.models.operation import OperationLog
 from app.models.season import SeasonRecord
 
@@ -34,17 +36,15 @@ def parse_active_episodes(ep_str: str, total: int = 0) -> set[int]:
     ep_str = str(ep_str or "").strip()
     if not ep_str:
         return set(range(1, total + 1)) if total > 0 else set()
-    eps: set[int] = set()
-    for m in re.finditer(r"(?:E|EP|第)?(\d+)(?:\s*[-~～至到_\ufffd]\s*(?:E|EP|第)?(\d+))?", ep_str, re.IGNORECASE):
-        start = int(m.group(1))
-        if m.group(2):
-            end = int(m.group(2))
-            if start <= end:
-                eps.update(range(start, end + 1))
-            else:
-                eps.update(range(end, start + 1))
-        else:
-            eps.add(start)
+    # 去掉季号，再识别集号；例如 S03E08 只表示 E08。
+    value = re.sub(r"\bS\d{1,2}(?=E\d)", "", ep_str, flags=re.I)
+    numeric_only = re.fullmatch(r"[\d\s,，、\[\]\-~～至到]+", value)
+    prefix = r"(?:EP?|第)?" if numeric_only else r"(?:EP?|第)"
+    pattern = prefix + r"(\d{1,4})(?:\s*[-~～至到]\s*(?:EP?|第)?(\d{1,4}))?"
+    eps = set()
+    for match in re.finditer(pattern, value, re.I):
+        start, end = sorted((int(match[1]), int(match[2] or match[1])))
+        eps.update(range(max(1, start), min(end, total or end) + 1))
     return eps
 
 
@@ -119,6 +119,25 @@ def calculate_candidate_score(cand: dict[str, Any], hits: list[int], all_eps: li
     seeds_score = (200 + min(seeds, 50)) if seeds >= 5 else (seeds * 20)
 
     return net_gain + res_score + bitrate_score + cn_score + seeds_score
+
+
+def _targeted_episode_numbers(meta, title, parsed, missing):
+    """只接受集号明确且全部落在缺号内的散集或连集。片名里的年份、段号均不能充当集号。"""
+    explicit = re.search(r"(?:S\d{1,2}E\d|(?<![A-Za-z])EP?\d|第\s*\d+\s*[集话話])", title, re.I)
+    title_numbers = set(parsed.episode_numbers) if explicit else set()
+    numbers = meta.get("episode_list") or []
+    if not numbers and meta.get("begin_episode"):
+        first = str(meta["begin_episode"])
+        last = str(meta.get("end_episode") or first)
+        if not first.isdigit() or not last.isdigit() or not (0 < int(first) <= int(last) <= max(missing)):
+            return []
+        numbers = range(int(first), int(last) + 1)
+    if not all(str(n).isdigit() for n in numbers):
+        return []
+    coverage = {int(n) for n in numbers} or title_numbers
+    if not coverage <= set(missing) or (title_numbers and coverage != title_numbers):
+        return []
+    return sorted(coverage)
 
 
 def select_best_candidates(
@@ -214,6 +233,7 @@ async def execute_gap_fill_download(
     mp = MoviePilotClient()
     submitted_results: list[dict[str, Any]] = []
     errors: list[str] = []
+    skipped: list[str] = []
 
     try:
         # 【tv-workflow-win 工业级机制：预先拉取 MoviePilot 活跃下载队列】
@@ -226,30 +246,46 @@ async def execute_gap_fill_download(
             log.warning("获取 MoviePilot 活跃下载队列失败，继续直连检索: %s", q_err)
 
         for rec in records:
-            if rec.status in ("archive_check", "period_ready", "period_review", "identity_review", "already_archived", "manually_handled", "verified_complete"):
-                errors.append(f"{rec.show_name}：归档核对记录仅供查看")
+            if rec.status not in ("download_needed", "period_missing"):
+                skipped.append(f"{rec.show_name}：当前清单没有已确认的补缺任务")
                 continue
             from app.clients.clouddrive2 import CloudDrive2Client
-            from app.core.segments import segment_number
+            from app.core.inspector import run_inspection
             by_period = rec.status == "period_missing"
             disk = CloudDrive2Client()
             try:
-                source_files = await disk.list_files(rec.season_path, force_refresh=True)
-                if by_period:
-                    from app.core.inspector import run_inspection
-                    inspection = await run_inspection(rec.task_id, rec.show_path, disk, mp,
-                                                      archive_root=settings.archive_root,
-                                                      global_source_root=settings.source_root)
-                    fresh = next((s for s in inspection.seasons if s.season_path == rec.season_path
-                                  and s.status == "period_missing" and str(s.tmdb_id) == str(rec.tmdb_id)), None)
-                    if not fresh:
-                        errors.append(f"{rec.show_name}：缺期情况或作品信息已变化，请重新初检")
+                files = await disk.list_files(rec.season_path, force_refresh=True)
+                parts = []
+                for f in files:
+                    name = f["name"]
+                    if f.get("isDirectory") or not is_video_file(name) or not segment_number(name):
                         continue
+                    # 单独的 Part.01 是段号，不能被纯数字文件名规则当成 E01。
+                    stem = re.sub(r"(?i)part[ ._-]*(?:0?[123]|[abc])(?=[^a-z0-9]|$)", "", name)
+                    ep = parse_episode(stem, f.get("path", ""), f.get("size", 0))
+                    if not ep.is_extra and not ep.is_special and ep.season_number in (None, rec.season_number):
+                        parts.append((name, ep.episode_numbers))
+                # 旧清单、已入归档的文件和本季新增文件均按当前两端覆盖重新核对。
+                inspection = await run_inspection(rec.task_id, rec.show_path, disk, mp,
+                                                  only_season_path=rec.season_path,
+                                                  archive_root=settings.archive_root,
+                                                  global_source_root=settings.source_root)
+                fresh = next((s for s in inspection.seasons if s.season_path == rec.season_path), None)
+                if fresh is None:
+                    errors.append(f"{rec.show_name}：未能读取本季最新清单，请确认源目录可访问")
+                    continue
+                if fresh.status != rec.status or str(fresh.tmdb_id) != str(rec.tmdb_id):
+                    skipped.append(f"{rec.show_name}：复查结果已变化，{fresh.status_detail} 请重新初检")
+                    continue
+                unnumbered = next((name for name, numbers in parts if not numbers), None)
+                if unnumbered:
+                    skipped.append(f"{rec.show_name}：无法确定分段视频 {unnumbered} 属于哪一集，请补上集号")
+                    continue
+            except Exception as exc:
+                errors.append(f"{rec.show_name}：读取本季文件或资料失败（{type(exc).__name__}）")
+                continue
             finally:
                 await disk.close()
-            if not by_period and any(segment_number(f.get("name", "")) is not None for f in source_files):
-                errors.append(f"{rec.show_name}: 上下段文件需先核对，暂缓补缺")
-                continue
             show_name = rec.show_name
             season_num = rec.season_number
             tmdb_id_str = rec.tmdb_id
@@ -274,13 +310,12 @@ async def execute_gap_fill_download(
                 except Exception:
                     pass
 
-            if by_period:
-                missing_eps = sorted(set(missing_eps) & set(fresh.missing_episodes))
+            missing_eps = sorted(set(missing_eps) & set(fresh.missing_episodes))
             total_eps = rec.total_episodes or (max(missing_eps) if missing_eps else 0)
 
-            # 如果没有缺失集号，且状态不是 download_needed，跳过
-            if not missing_eps and rec.status != "download_needed":
-                errors.append(f"{clean_name} S{season_num:02d}: 未记录缺失集号")
+            # 仅补用户所选旧清单与本次复查均确认的缺号。
+            if not missing_eps:
+                skipped.append(f"{clean_name} S{season_num:02d}：原缺集现已覆盖，无需下载")
                 continue
 
             # 【tv-workflow-win 工业级机制：实时下载队列对齐】
@@ -288,22 +323,27 @@ async def execute_gap_fill_download(
             for dl in active_downloads:
                 dl_name = str(dl.get("title") or dl.get("name") or "")
                 # 剧名或 TMDB ID 匹配
-                if clean_name.lower() in dl_name.lower() or (tmdb_id_str and tmdb_id_str in dl_name):
+                dl_id = dl.get("tmdb_id") or dl.get("tmdbid")
+                if dl_id and tmdb_id_str and str(dl_id) != str(tmdb_id_str):
+                    continue
+                if (dl_id and str(dl_id) == str(tmdb_id_str)) or clean_name.casefold() in dl_name.casefold() or (tmdb_id_str and tmdb_id_str in dl_name):
                     dl_season = dl.get("season")
                     if dl_season is None:
                         s_match = re.search(r"S(\d{1,2})", dl_name, re.I)
                         dl_season = int(s_match.group(1)) if s_match else None
-                    if dl_season is None or dl_season == season_num:
+                    if dl_season is None or str(dl_season) == str(season_num):
                         ep_field = str(dl.get("episode") or "")
                         if by_period:
                             in_progress_eps.update(int(n) for n in re.findall(r"第\s*(\d+)\s*期", dl_name))
                         else:
-                            in_progress_eps.update(parse_active_episodes(ep_field or dl_name, total_eps))
+                            numbers = (parse_active_episodes(ep_field, total_eps) if ep_field else
+                                       parse_episode(dl_name).episode_numbers)
+                            in_progress_eps.update(numbers)
 
             actually_needed = [ep for ep in missing_eps if ep not in in_progress_eps]
             if in_progress_eps and not actually_needed:
                 log.info("%s S%02d 所缺集数 %s 已在 MoviePilot 活跃下载队列中，跳过重复提交", clean_name, season_num, missing_eps)
-                rec.status_detail = f"缺集 {missing_eps} 已在下载队列中，无需重复提交"
+                skipped.append(f"{clean_name}：缺集 {missing_eps} 已在下载队列中")
                 continue
             elif in_progress_eps:
                 log.info("%s S%02d 部分集数 %s 在下载队列中，仅补齐剩余缺失集: %s", clean_name, season_num, in_progress_eps, actually_needed)
@@ -318,17 +358,23 @@ async def execute_gap_fill_download(
 
             # 调用 MoviePilot 搜索资源
             try:
+                keyword_fallback = False
                 raw_results = await mp.search_resources(
                     tmdb_id=tmdb_id_num,
                     season=season_num,
                     title=clean_name,
                 )
+                if not raw_results and tmdb_id_num:
+                    media = await mp.get_media_info(tmdb_id_num)
+                    original = (media or {}).get("original_title") or clean_name
+                    raw_results = await mp.search_resources(title=original, season=season_num)
+                    keyword_fallback = True
             except Exception as se:
-                errors.append(f"{clean_name} S{season_num:02d}: 检索资源接口失败 - {se}")
+                errors.append(f"{clean_name} S{season_num:02d}：MoviePilot 检索未完成（{type(se).__name__}）")
                 continue
 
             if not raw_results or not isinstance(raw_results, list):
-                errors.append(f"{clean_name} S{season_num:02d}: 未检索到任何资源")
+                skipped.append(f"{clean_name} S{season_num:02d}：已搜索缺号 {missing_eps}，MoviePilot 本次未返回资源")
                 continue
 
             # 筛选做种数 >= 2 且季号匹配的合格资源
@@ -346,8 +392,26 @@ async def execute_gap_fill_download(
                 if seeds < 2:
                     continue
                 seasons = meta.get("season_list") or ([meta.get("begin_season")] if meta.get("begin_season") else [])
-                if seasons and seasons[0] != season_num:
+                season_ids = {str(s) for s in seasons}
+                candidate_id = m_info.get("tmdb_id")
+                if season_ids and season_ids != {str(season_num)}:
                     continue
+                if tmdb_id_num and candidate_id and str(candidate_id) != str(tmdb_id_num):
+                    continue
+                if keyword_fallback and str(candidate_id) != str(tmdb_id_num):
+                    continue
+                if (parts and not by_period) or keyword_fallback:
+                    parsed = parse_episode(str(t.get("title") or ""))
+                    if parsed.is_extra or parsed.is_special or parsed.season_number not in (None, season_num):
+                        continue
+                    if not season_ids and parsed.season_number != season_num:
+                        continue
+                    if parts and not by_period:
+                        # 只推已有分段以外的明确缺号，避免整季包重下已有部分或清掉其整理记录。
+                        numbers = _targeted_episode_numbers(meta, str(t.get("title") or ""), parsed, missing_eps)
+                        if not numbers:
+                            continue
+                        c = {**c, "meta_info": {**meta, "episode_list": numbers}}
                 if by_period:
                     title = str(t.get("title") or "")
                     period = re.findall(r"第\s*(\d+)\s*期", title)
@@ -361,15 +425,21 @@ async def execute_gap_fill_download(
 
             if not eligible:
                 reason = "未找到明确标期且作品、季号匹配的整期资源" if by_period else "无做种数≥2且季号匹配的资源"
-                errors.append(f"{clean_name} S{season_num:02d}: 检索到 {len(raw_results)} 条，{reason}")
+                if parts and not by_period:
+                    reason = f"没有满足做种条件且仅覆盖缺号 {missing_eps} 的同季资源"
+                skipped.append(f"{clean_name} S{season_num:02d}: 检索到 {len(raw_results)} 条，{reason}")
                 continue
 
             # 选种决策
             selected = select_best_candidates(eligible, missing_eps, total_eps, season_num)
             if not selected:
-                errors.append(f"{clean_name} S{season_num:02d}: 候选资源无法覆盖缺失集号")
+                skipped.append(f"{clean_name} S{season_num:02d}：候选资源未覆盖缺号 {missing_eps}")
                 continue
 
+            covered = {ep for _, numbers, _ in selected for ep in numbers}
+            uncovered = sorted(set(missing_eps) - covered)
+            if uncovered:
+                skipped.append(f"{clean_name}：缺号 {uncovered} 暂未匹配到可用资源")
             # 提交下载
             for cand, covered_eps, is_sp in selected:
                 cand_t = cand.get("torrent_info") or {}
@@ -383,7 +453,7 @@ async def execute_gap_fill_download(
                 cleared_info: dict[str, Any] = {"cleared_count": 0, "records": []}
                 try:
                     target_eps_for_clean = None if is_sp else set(covered_eps)
-                    clean_res = cleared_info if by_period else await mp.clear_transfer_history_for_episodes(
+                    clean_res = cleared_info if by_period or parts else await mp.clear_transfer_history_for_episodes(
                         title=clean_name,
                         season=season_num,
                         episodes=target_eps_for_clean,
@@ -400,7 +470,7 @@ async def execute_gap_fill_download(
                 log.info("向 MoviePilot 提交下载 [%s]: [%s] %s (做种: %d)", plan_desc, site, title, seeds)
                 try:
                     reply = await mp.submit_download(cand_m, cand_t)
-                    is_ok = bool(reply.get("success", False)) if isinstance(reply, dict) else True
+                    is_ok = isinstance(reply, dict) and reply.get("success") is True
                     msg = reply.get("message", "已提交") if isinstance(reply, dict) else "已提交"
 
                     submitted_results.append({
@@ -445,7 +515,10 @@ async def execute_gap_fill_download(
                         rec.status_detail = f"已推送 MP 下载: [{site}] {title[:50]} ({plan_desc}{clean_tip})"
 
                 except Exception as de:
-                    errors.append(f"提交下载失败 [{title}]: {de}")
+                    message = f"提交下载失败（{type(de).__name__}）"
+                    submitted_results.append({"show_name": clean_name, "season": season_num, "title": title,
+                                              "site": site, "status": "failed", "message": message,
+                                              "covered_episodes": covered_eps})
 
         await db.commit()
 
@@ -460,12 +533,17 @@ async def execute_gap_fill_download(
     if errors:
         summary_msg += f"，遇到 {len(errors)} 项提醒: {'; '.join(errors[:2])}"
 
+    if skipped:
+        summary_msg += "。暂缓：" + "；".join(skipped[:2])
+    refusals = [s["message"] for s in submitted_results if s["status"] == "failed"]
+    if refusals:
+        summary_msg += "。MoviePilot 拒绝提交：" + "；".join(str(m) for m in refusals[:2])
     # F03 契约增强：同时提供 details 与 submitted，双向兼容前端读取
     details_list = [
         {
             "success": s["status"] == "success",
             "seeders": s.get("seeds", 0),
-            "reason": s.get("plan_desc") or s.get("message", ""),
+            "reason": s.get("message", "") if s["status"] == "failed" else s.get("plan_desc", ""),
             "show_name": s.get("show_name", ""),
             "title": s.get("title", ""),
             "site": s.get("site", ""),
@@ -476,6 +554,8 @@ async def execute_gap_fill_download(
 
     return {
         "ok": success_count > 0,
+        "skipped": bool(skipped) and not submitted_results and not errors,
+        "skip_reasons": skipped,
         "message": summary_msg,
         "submitted": submitted_results,
         "details": details_list,
