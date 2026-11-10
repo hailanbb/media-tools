@@ -1,137 +1,62 @@
-# MediaFlow — 媒体库智能整理系统
+# 🐳 MediaFlow (Docker 容器化发行版)
 
-自动化管理网盘剧集/动漫媒体库的 Docker Web 应用。通过 CloudDrive2 扫描网盘目录，结合 TMDB/MoviePilot 智能诊断，实现一键归档、冗余清理、缺集补缺的完整工作流。
+> **面向家庭影院与云原生 NAS 的一键容器化部署版本。支持群晖 Synology、QNAP、TrueNAS、Unraid 及各类 Linux 主机。**
 
-## 核心功能
+[![Docker](https://img.shields.io/badge/Container-Docker%20Compose-2496ed.svg?style=flat-square&logo=docker)](#)
+[![Version](https://img.shields.io/badge/Release-v2.5.13-6366f1.svg?style=flat-square)](#)
 
-| 功能 | 说明 |
-|------|------|
-| **智能初检** | 递归扫描 CD2 目录，自动识别 Season 结构，解析集号，匹配 TMDB 官方数据 |
-| **精准诊断** | 🟢齐全可归档 🟡重复需复核 🔴缺集待补 🔵连载中 — 一目了然 |
-| **安全归档** | 按季增量移动，tvshow.nfo 和共享海报受保护留源 |
-| **冗余清理** | 自动识别最优版本（4K>1080p, HEVC>x264），字幕文件永不删除 |
-| **MoviePilot 联动** | 订阅管理、转移队列监控、资源搜索、一键推送补缺 |
+---
 
-### 归档核对
+## 🚀 极速部署指南
 
-初检分别核对资料总集数、源端正片和归档季文件。源季只剩 NFO、图片或字幕时，可在“归档核对”查看归档库实际覆盖的集数及源端残留。程序也会在同一归档分类内按目录标注的 TMDB ID 和季号核对别名。多个目录匹配、归档读取失败或源视频无法识别时，保留核对原因。该分类仅供查看。已有任务需在加载新版服务后重新初检。
-
-### 同一季度的集数来源
-
-初检按作品和季号交叉核对 TMDB、豆瓣及本地正片。资料只相差少数集时，也核对该季的豆瓣记录；文件名超过资料范围时，页面会列出待核实的集号。重复版本单独按集号显示。自动搜索缺少结果时，可以在 `app/core/douban_season_ids.json` 中按 TMDB 作品 ID、季号登记已确认的豆瓣条目 ID；服务重新加载后会读取条目详情，集数无需手填。已经保存的结果要重新初检才会更新。
-
-### 手动处理与源端删除
-
-“异常剧集”的“已手动处理”用于确认人工处置完成。点击后该季从当前任务的全部清单隐藏，同一任务重新初检也会保留标记。“真缺集待补”支持“删除源端”，会先确认整部剧集的源目录，执行后移除同一任务中该剧的所有季记录。
-
-## 快速部署
-
+### 1. 克隆代码与配置
 ```bash
-# 1. 克隆
 git clone https://github.com/hailanbb/media-tools.git
-cd media-tools/mediaflow
+cd media-tools/mediaflow-docker
 
-# 2. 配置
 cp .env.example .env
-# 编辑 .env 填入真实的 CD2/MP 连接信息
-
-# 3. 启动
-docker compose up -d
-
-# 4. 访问
-# http://<服务器IP>:8080
+vim .env
 ```
 
-## 环境变量
+### 2. 核心环境变量说明
+| 环境变量 | 必填 | 默认值 | 说明 |
+|---|:---:|:---:|---|
+| `MF_CD2_URL` | ✅ | `http://cd2:19798` | CloudDrive2 服务地址（容器间互通请使用服务名或局域网 IP） |
+| `MF_CD2_TOKEN` | ✅ | - | CD2 认证 JWT Token |
+| `MF_MP_URL` | ✅ | `http://moviepilot:3001` | MoviePilot API 服务地址 |
+| `MF_MP_TOKEN` | ✅ | - | MoviePilot API 密钥 (`X-API-KEY`) |
+| `MF_SOURCE_ROOT` | ✅ | `/115/Library_incs/nas` | 挂载在容器内的源待整理目录路径 |
+| `MF_ARCHIVE_ROOT` | ✅ | `/115/Library_incs/nas.finish` | 挂载在容器内的归档目标库路径 |
+| `MF_PORT` | 否 | `8080` | Web 端口映射 |
 
-| 变量 | 必填 | 说明 |
-|------|------|------|
-| `MF_CD2_URL` | ✅ | CloudDrive2 gRPC-Web 地址 |
-| `MF_CD2_TOKEN` | ✅ | CD2 认证 Token |
-| `MF_MP_URL` | ✅ | MoviePilot API 地址 |
-| `MF_MP_TOKEN` | ✅ | MoviePilot API Key |
-| `MF_SOURCE_ROOT` | ✅ | 源目录根路径 |
-| `MF_ARCHIVE_ROOT` | ✅ | 归档目录根路径 |
-| `MF_LIBRARY_ROOT` | 否 | 媒体库根路径（默认同 archive_root） |
-| `MF_PORT` | 否 | 服务端口（默认 8080） |
-| `MF_AUTH_TOKEN` | 否 | API 鉴权 Token（留空则不启用） |
-| `MF_DEBUG` | 否 | 调试模式（默认 false） |
-
-## 技术栈
-
-- **后端**: Python 3.12 + FastAPI + SQLAlchemy 2.0 (async) + aiosqlite
-- **前端**: 单文件 HTML + Tailwind CSS + Font Awesome
-- **通信**: CD2 via gRPC-Web (原生 Protobuf)，MP via REST API
-- **部署**: Docker + docker-compose
-
-## 目录结构
-
+### 3. 一键启动
+```bash
+docker compose up -d --build
 ```
-mediaflow/
-├── app/
-│   ├── api/          # FastAPI 路由
-│   ├── clients/      # CD2/MP/TMDB 异步客户端
-│   ├── core/         # 初检引擎、集号解析
-│   ├── models/       # SQLAlchemy ORM
-│   ├── schemas/      # Pydantic 数据模型
-│   ├── services/     # 业务编排
-│   ├── config.py     # 配置管理
-│   ├── database.py   # 数据库初始化
-│   └── main.py       # 应用入口
-├── frontend/
-│   └── index.html    # 前端界面
-├── data/             # SQLite 数据库（运行时）
-├── Dockerfile
-├── docker-compose.yml
-├── requirements.txt
-└── .env.example
+启动后在浏览器中访问：`http://<宿主机IP>:8080`
+
+---
+
+## 📂 容器卷与持久化挂载说明
+
+在 `docker-compose.yml` 中：
+```yaml
+services:
+  mediaflow:
+    build: .
+    container_name: mediaflow
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data                   # SQLite 数据库与任务状态持久化
+      - /your/cd2/mount:/115/Library_incs  # 云盘挂载点穿透映射
+    env_file:
+      - .env
 ```
 
-## 版本历史
+---
 
-- **v2.5.13** (2026-11-10)
-  - 按所选季重新核对缺号。普通分集标题含 Part 1/2 时，可直接搜索和推送其他明确缺集；分期综艺沿用按期核对。
-  - 只在有分段正片的季限制资源覆盖范围，保留已有文件及其整理记录。TMDB 搜索未命中时追加标题搜索并核对作品及季号。
-  - 批量推送区分已提交、暂无资源、已在队列和接口失败，部分匹配时列出仍待补的集号。
+## 📚 详细功能与架构
 
-- **v2.5.12** (2026-11-10)
-  - 直接选择独立季目录时使用上级剧名，只核对所选季。无作品标签的同名候选核对名称和年份，豆瓣与 TMDB 的编号分别处理。
-  - 各初检目录统一核对豆瓣季资料，英文短季也可发现季总数差异。数字续季名结合季年份或作品 ID 识别。
-  - TMDB 分集明细尚未列完时保留季表总数。有未来播出日期时继续留源。候选作品与目录标签不一致时保留原作品 ID 并提示核对。
-
-- **v2.5.11** (2026-11-10)
-  - 综艺同时核对整期、上下段和 TMDB 分段编号。核实缺期进入真缺集，分段齐全可保留各版本整季归档。
-  - 作品 ID 冲突、编号或越界文件进入待复核清理，显示判断依据。已绑定豆瓣季的计划期数优先于尚未收录完的分段表。
-  - 唯一同作品、同季归档已齐时可单独删除源季。执行前再次核验，字幕迁移失败、未知内容或源目录变化会中止。
-
-- **v2.5.10** (2026-11-10)
-  - 撤掉独立“文件核对”模块，需要人工判断的文件统一放入“异常剧集”。
-  - 异常卡片给出具体处理建议，支持处理说明和已手动处理。
-  - 分段不确定时显示编号口径待核对，避免逐段罗列造成缺集误解。
-
-
-- **v2.5.9** (2026-11-10)
-  - 识别按期命名的上下段，初检、归档、清理和补缺共同保护分段文件。
-  - “文件核对”显示下一步建议，连载状态采用静态留源提示。
-  - 订阅候选支持资源核查、仅退订、按确认清单退订并清理源视频。
-  - 操作快照持久保存，失败可在订阅页继续；字幕、NFO 和海报留存，目录身份变化时停止。
-  - CD2 响应增加协议终态及帧完整性检查，写请求停止自动重试。
-
-
-- **v2.5.8** (2026-11-10):
-  - 初检区分源端残留附件、视频集号解析问题和归档覆盖情况，增加只读“归档核对”分类。
-  - 同一归档分类内按显式 TMDB ID 和季号核对别名目录。
-  - 按作品和季度核对豆瓣资料，支持已确认条目 ID 绑定，修复少量越界集跳过核对的问题。
-  - 重复版本按具体集号显示，资料范围差异显示为待核实。
-  - 异常条目支持“已手动处理”，刷新和同任务重扫后保留隐藏标记。
-  - 真缺集条目支持删除源端整剧目录，确认框显示实际整剧路径。
-  - 增加真实 API 路由与页面渲染回归检查。
-
-
-- **v2.5.7** (2026-11-09):
-  - 核心突破：落实《MediaFlow剧季元数据交叉核对与纠错方案》，实现 TMDB 与豆瓣主动双轨交叉核验与自适应版型拟合（拆分版 vs 官方整期版）；
-  - 花絮/切片治理：扩展中英文花絮切片正则拦截（深度支持 `Cut`, `Clip`, `Tape`, `母带`, `切片`, `看点`, `加更`, `特辑` 等 18+ 模式）；
-  - 断崖集号智能剥离：引入 `separate_outliers` 算法，自动剥离孤立断崖花絮集号，杜绝虚假大面积缺集误报；
-  - 正片全齐加更特辑容错：支持正片齐全附带少量收官特辑直接就绪为 `archive_ready`；
-  - 前端异常打标纠偏：消除已自愈齐备剧集的误打标。
-- **v2.5.6** (2026-11-09): 初检引擎双轨校准与 MoviePilot 运维面板深度联动。
+关于智能初检、双轨拟合、分段解析与安全门禁的详细设计，请参阅 [项目主 README](../README.md)。
