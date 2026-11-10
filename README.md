@@ -4,7 +4,7 @@
 
 > **面向家庭影院与云原生 NAS（115网盘 / CloudDrive2 / MoviePilot / Emby / Jellyfin）的新一代智能影视媒体整理、跨库无损归档与双轨运维治理系统。**
 
-[![Version](https://img.shields.io/badge/Release-v2.5.13-6366f1.svg?style=flat-square&logo=github)](https://github.com/hailanbb/media-tools/releases)
+[![Version](https://img.shields.io/badge/Release-v2.5.14-6366f1.svg?style=flat-square&logo=github)](https://github.com/hailanbb/media-tools/releases)
 [![Docker](https://img.shields.io/badge/Docker-Supported-2496ed.svg?style=flat-square&logo=docker)](mediaflow-docker/)
 [![Windows](https://img.shields.io/badge/Windows-Native-0078d4.svg?style=flat-square&logo=windows)](mediaflow-win/)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776ab.svg?style=flat-square&logo=python)](https://www.python.org/)
@@ -220,8 +220,19 @@ MediaFlow 的每一项核心机制均遵循严谨的第一性原理设计方案�
 
 ## 📜 版本演进历史 (Changelog)
 
-### 🚀 最新稳定版：v2.5.13 (2026-11-10)
+### 🚀 最新稳定版：v2.5.14 (2026-11-10)
 
+* **批量冗余清理加速与双向物理实物核验**：
+  * 剪除连续两次强刷网盘的冗余 I/O，改为单次实物重读核验保留版本与消除版本，杜绝幽灵文件假成功；
+  * 确立“主视频优先、伴生文件严格从属”的安全删除顺序，主视频删除失败严格保留单集 NFO 与海报，外挂字幕 100% 免死保护；
+  * 前端批量冗余清理升级为受控 Worker Pool 调度（`concurrency = 2`），平滑消除串行等待；
+* **MoviePilot 补缺任务加速与优雅中止机制**：
+  * 前端接入 `AbortController` 级联瞬时网络熔断，中止时 10ms 内释放挂起请求，彻底根治转圈伪死锁并立即解禁关闭按钮；
+  * 分配独立 `batchId` 与 Session 隔离控制器，杜绝跨批次回调与日志污染；
+  * 规范数学不变量结算（成功 + 暂缓 + 取消 + 失败 === 总数，单季多种子按 1 季成功结算）；
+  * 后端引入活跃下载队列 30s TTL 共享快照，并建立本地已受理待确认清单（`_recently_submitted_tasks`），彻底杜绝并发推送时的重复提交。
+
+#### v2.5.13 (2026-11-10)
 * **精准按实际缺号推送补缺**：
   * 普通剧集文件名含 `Part 1/2` 等非分段标记者，不再阻断后续正片缺集检索，确保已编号资源可正常匹配；
   * 批量补缺清晰区分“已提交”、“暂无资源”、“队列已有”与“接口失败”，部分匹配时直观展示剩余待补集数；
