@@ -2169,12 +2169,13 @@
         iconWrapClass: 'bg-purple-100 dark:bg-purple-950/70 text-purple-600 dark:text-purple-400',
         barGradientClass: 'from-purple-500 to-indigo-600',
         items,
-        processItem: async (item, i, total, appendLog) => {
+        processItem: async (item, i, total, appendLog, abortSignal) => {
           appendLog(`<span class="text-slate-400">[${getNowTimestamp()}] 🗑️ 正在清理源端残留: <b>【${item.name}】</b>...</span>`);
           try {
             const res = await api('/api/archive/clean-source-redundant', {
               method: 'POST',
-              body: JSON.stringify({ season_record_ids: [item.id] })
+              body: JSON.stringify({ season_record_ids: [item.id] }),
+              signal: abortSignal
             });
             if (res.ok) {
               appendLog(`<span class="text-purple-400 font-bold">[${getNowTimestamp()}] ✓ 清理完成: 【${item.name}】源端残留目录已安全清除并刷新目录</span>`);
@@ -2360,13 +2361,28 @@
     // ── 10. 通用批量操作流水线引擎 (Universal Batch Pipeline) ────────
     let isBatchPipelineCancelled = false;
     let batchPipelineOnFinish = null;
+    let batchPipelineAbortController = null;
 
     function cancelBatchPipeline() {
       isBatchPipelineCancelled = true;
       const dlCancelBtn = document.getElementById('dlCancelBtn');
+      const dlCloseBtn = document.getElementById('dlCloseBtn');
       if (dlCancelBtn) {
         dlCancelBtn.disabled = true;
         dlCancelBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin text-xs mr-1"></i> 正在安全停机...';
+      }
+      // 立即触发网络层熔断，中断在途 HTTP 请求
+      if (batchPipelineAbortController) {
+        try {
+          batchPipelineAbortController.abort();
+        } catch (e) {
+          console.warn('AbortController abort error:', e);
+        }
+      }
+      // 立即释放关闭按钮控制权，防止用户界面被挂起锁死
+      if (dlCloseBtn) {
+        dlCloseBtn.disabled = false;
+        dlCloseBtn.classList.remove('opacity-40', 'cursor-not-allowed');
       }
     }
     function cancelBatchDownload() { cancelBatchPipeline(); }
@@ -2408,6 +2424,8 @@
 
       isBatchPipelineCancelled = false;
       batchPipelineOnFinish = onFinish;
+      batchPipelineAbortController = new AbortController();
+      const abortSignal = batchPipelineAbortController.signal;
 
       openModal('downloadProgressModal');
 
@@ -2494,7 +2512,7 @@
           updateUIProgress();
 
           try {
-            const res = await processItem(item, i, items.length, appendLog);
+            const res = await processItem(item, i, items.length, appendLog, abortSignal);
             if (res && res.success) {
               successCount++;
             } else if (res && res.skipped) {
@@ -2503,8 +2521,12 @@
               failCount++;
             }
           } catch (err) {
-            failCount++;
-            appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] 💥 执行异常: 【${itemDisplayName}】${err.message || err}</span>`);
+            if (err.name === 'AbortError' || isBatchPipelineCancelled) {
+              appendLog(`<span class="text-amber-400">[${getNowTimestamp()}] ⏸️ 任务已安全中止: 【${itemDisplayName}】</span>`);
+            } else {
+              failCount++;
+              appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] 💥 执行异常: 【${itemDisplayName}】${err.message || err}</span>`);
+            }
           } finally {
             activeTitles.delete(itemDisplayName);
             completedCount++;
@@ -2530,9 +2552,14 @@
         `失败 <span class="text-rose-400">${failCount}</span> 项 / 共 ${items.length} 项</div>`);
 
       if (dlProgressSubtitle) dlProgressSubtitle.textContent = `流水线执行已完结: 成功 ${successCount} 项, 失败 ${failCount} 项`;
-      if (currentItemText) currentItemText.textContent = `全部完成 (${successCount}/${items.length})`;
-      if (dlProgressFooterHint) dlProgressFooterHint.textContent = '执行完毕，点击右侧按钮应用变更并刷新';
-      if (dlCancelBtn) dlCancelBtn.disabled = true;
+      if (currentItemText) currentItemText.textContent = isBatchPipelineCancelled ? `已中止 (${completedCount}/${items.length})` : `全部完成 (${successCount}/${items.length})`;
+      if (dlProgressFooterHint) dlProgressFooterHint.textContent = isBatchPipelineCancelled ? '流水线已安全停止，可点击右侧按钮应用变更并刷新' : '执行完毕，点击右侧按钮应用变更并刷新';
+      if (dlCancelBtn) {
+        dlCancelBtn.disabled = true;
+        dlCancelBtn.innerHTML = isBatchPipelineCancelled
+          ? '<i class="fa-solid fa-ban text-xs mr-1 text-slate-400"></i> 已中止'
+          : '<i class="fa-solid fa-stop text-xs mr-1 text-slate-400"></i> 中止任务';
+      }
       if (dlCloseBtn) {
         dlCloseBtn.disabled = false;
         dlCloseBtn.classList.remove('opacity-40', 'cursor-not-allowed');
@@ -2553,12 +2580,13 @@
         iconWrapClass: 'bg-emerald-100 dark:bg-emerald-950/70 text-emerald-600 dark:text-emerald-400',
         barGradientClass: 'from-emerald-500 to-teal-600',
         items,
-        processItem: async (item, i, total, appendLog) => {
+        processItem: async (item, i, total, appendLog, abortSignal) => {
           appendLog(`<span class="text-slate-400">[${getNowTimestamp()}] 📦 正在归档: <b>【${item.name}】</b>...</span>`);
           try {
             const res = await api('/api/archive/execute', {
               method: 'POST',
-              body: JSON.stringify({ season_record_ids: [item.id] })
+              body: JSON.stringify({ season_record_ids: [item.id] }),
+              signal: abortSignal
             });
             if (res.ok) {
               appendLog(`<span class="text-emerald-400 font-bold">[${getNowTimestamp()}] ✓ 归档成功: 【${item.name}】${res.message || '已搬移至归档库并同步削刮资产'}</span>`);
@@ -2596,12 +2624,13 @@
         barGradientClass: 'from-amber-500 to-orange-600',
         concurrency: 2,
         items,
-        processItem: async (item, i, total, appendLog) => {
+        processItem: async (item, i, total, appendLog, abortSignal) => {
           appendLog(`<span class="text-slate-400">[${getNowTimestamp()}] 🧹 正在清理冗余: <b>【${item.name}】</b>...</span>`);
           try {
             const res = await api('/api/archive/clean', {
               method: 'POST',
-              body: JSON.stringify({ season_record_ids: [item.id] })
+              body: JSON.stringify({ season_record_ids: [item.id] }),
+              signal: abortSignal
             });
             if (res.ok) {
               appendLog(`<span class="text-emerald-400 font-bold">[${getNowTimestamp()}] ✓ 清理成功: 【${item.name}】${res.message || '冗余版本已淘汰，外挂字幕与海报已保护'}</span>`);
@@ -2637,13 +2666,15 @@
         iconClass: 'fa-cloud-arrow-down',
         iconWrapClass: 'bg-blue-100 dark:bg-blue-900/40 text-blue-600 dark:text-blue-400',
         barGradientClass: 'from-blue-500 to-indigo-600',
+        concurrency: 3,
         items,
-        processItem: async (item, i, total, appendLog) => {
+        processItem: async (item, i, total, appendLog, abortSignal) => {
           appendLog(`<span class="text-slate-400">[${getNowTimestamp()}] 🔍 正在检索 MP 补缺做种: <b>【${item.name}】</b>...</span>`);
           try {
             const res = await api('/api/moviepilot/download-gap-fill', {
               method: 'POST',
-              body: JSON.stringify({ season_record_ids: [item.id], record_ids: [item.id] })
+              body: JSON.stringify({ season_record_ids: [item.id], record_ids: [item.id] }),
+              signal: abortSignal
             });
 
             if (res.skipped === true) {
