@@ -84,7 +84,7 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.7</span>
+              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.8</span>
             </div>
             <!-- 完善后的命名 -->
             <p class="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">智能媒体库整理与归档工作台</p>
@@ -306,8 +306,8 @@
             </div>
           </div>
 
-          <!-- 五大核心结果分类卡片 (移动端横向滑动胶囊 snap-x / PC端5列经典栅格) -->
-          <div class="flex sm:grid sm:grid-cols-5 overflow-x-auto sm:overflow-x-visible pb-2 sm:pb-0 gap-2.5 sm:gap-3 mt-4 sm:mt-5 -mx-1 px-1 sm:mx-0 sm:px-0 no-scrollbar snap-x">
+          <!-- 初检结果分类 -->
+          <div class="flex sm:grid sm:grid-cols-3 xl:grid-cols-6 overflow-x-auto sm:overflow-x-visible pb-2 sm:pb-0 gap-2.5 sm:gap-3 mt-4 sm:mt-5 -mx-1 px-1 sm:mx-0 sm:px-0 no-scrollbar snap-x">
 
             <div onclick="filterResultCategory('review')" id="cat-card-review" class="cursor-pointer rounded-xl p-3 sm:p-3.5 border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 hover:border-amber-400 transition relative group flex-shrink-0 w-36 sm:w-auto snap-start shadow-sm">
               <div class="flex items-center justify-between text-xs font-medium text-amber-700 dark:text-amber-400 mb-1">
@@ -316,6 +316,12 @@
               </div>
               <div class="text-xl sm:text-2xl font-bold text-amber-600 dark:text-amber-400" id="catCountReview">0 <span class="text-xs font-normal">处需清理</span></div>
               <p class="text-[10px] sm:text-[11px] text-slate-500 dark:text-slate-400 mt-1 truncate">去重/纠偏处置 ➔</p>
+            </div>
+
+            <div onclick="filterResultCategory('archive_check')" id="cat-card-archive_check" class="cursor-pointer rounded-xl p-3 sm:p-3.5 border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 hover:border-teal-400 flex-shrink-0 w-36 sm:w-auto snap-start shadow-sm">
+              <div class="text-xs font-medium text-teal-700 dark:text-teal-400 mb-1">归档核对</div>
+              <div class="text-xl sm:text-2xl font-bold text-teal-700 dark:text-teal-400" id="catCountArchiveCheck">0</div>
+              <p class="text-[10px] sm:text-[11px] text-slate-500 mt-1">源端与归档集号</p>
             </div>
 
             <div onclick="filterResultCategory('anomaly')" id="cat-card-anomaly" class="cursor-pointer rounded-xl p-3 sm:p-3.5 border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 hover:border-rose-400 transition relative group flex-shrink-0 w-36 sm:w-auto snap-start shadow-sm">
@@ -1059,6 +1065,7 @@
       if (!s) return '初检完成';
       const parts = [];
       if (s.archive_ready) parts.push(`可归档 ${s.archive_ready}`);
+      if (s.archive_check) parts.push(`归档核对 ${s.archive_check}`);
       if (s.review_needed) parts.push(`待复核 ${s.review_needed}`);
       if (s.download_needed) parts.push(`待补集 ${s.download_needed}`);
       if (s.airing) parts.push(`连载中 ${s.airing}`);
@@ -1092,9 +1099,10 @@
             review: t.summary.review_needed || 0,
             download: t.summary.download_needed || 0,
             airing: t.summary.airing || 0,
+            archive_check: t.summary.archive_check || 0,
             already_archived: t.summary.already_archived || 0,
-          } : { archive: 0, review: 0, download: 0, airing: 0, already_archived: 0 },
-          categories: { archive: [], review: [], download: [], airing: [], anomaly: [] },
+          } : { archive: 0, review: 0, download: 0, airing: 0, archive_check: 0, already_archived: 0 },
+          categories: { archive: [], review: [], download: [], airing: [], anomaly: [], archive_check: [] },
         }));
         renderTaskList();
         if (taskList.length > 0) {
@@ -1103,7 +1111,7 @@
           const targetId = (currentTaskId && taskList.some(t => t.id === currentTaskId)) ? currentTaskId :
                            (savedId && taskList.some(t => t.id === savedId)) ? savedId :
                            taskList[0].id;
-          selectTask(targetId);
+          await selectTask(targetId);
         } else {
           clearTaskDetailView();
         }
@@ -1217,7 +1225,7 @@
       const checkTimeEl = document.getElementById('currentTaskCheckTime');
       if (checkTimeEl) checkTimeEl.textContent = '';
 
-      const catIds = ['catCountArchive', 'catCountReview', 'catCountAnomaly', 'catCountDownload', 'catCountAiring'];
+      const catIds = ['catCountArchive', 'catCountArchiveCheck', 'catCountReview', 'catCountAnomaly', 'catCountDownload', 'catCountAiring'];
       catIds.forEach(id => {
         const el = document.getElementById(id);
         if (el) el.innerHTML = `0 <span class="text-xs font-normal">项</span>`;
@@ -1264,6 +1272,13 @@
       triggerStopTask(currentTaskId);
     }
 
+    function seasonAnomaly(status, total, maxRecognized) {
+      if (status === 'already_archived') return 'already_archived';
+      if (status === 'unknown' || !total) return 'unknown_meta';
+      if (status !== 'archive_ready' && maxRecognized > total) return 'episode_overflow';
+      return '';
+    }
+
     async function selectTask(taskId) {
       currentTaskId = taskId;
       try { localStorage.setItem('mediaflow_selected_task_id', taskId); } catch(e) {}
@@ -1285,6 +1300,7 @@
         checkTimeEl.textContent = task.time ? `• 检查时间: ${task.time}` : '';
       }
 
+      document.getElementById('catCountArchiveCheck').textContent = task.counts.archive_check || 0;
       document.getElementById('catCountArchive').innerHTML = `${task.counts.archive} <span class="text-xs font-normal">季已齐</span>`;
       document.getElementById('catCountReview').innerHTML = `${task.counts.review} <span class="text-xs font-normal">处需清理</span>`;
       const alreadyEl = document.getElementById('catCountAnomaly');
@@ -1296,7 +1312,7 @@
       if (task.status === 'completed' && !task._seasonsLoaded) {
         try {
           const seasons = await api(`/api/tasks/${taskId}/seasons`);
-          task.categories = { archive: [], review: [], download: [], airing: [], anomaly: [] };
+          task.categories = { archive: [], review: [], download: [], airing: [], anomaly: [], archive_check: [] };
           for (const s of seasons) {
             const missing = s.missing_episodes || [];
             const dup = s.duplicate_episodes || [];
@@ -1306,23 +1322,21 @@
             const maxRec = recEps.length > 0 ? Math.max(...recEps) : 0;
 
             // 智能识别异常剧集（包括归档已有残留、官方集数失真/拆分冲突、官方未收录）
-            let isAnomaly = false;
-            let anomalySubtype = ''; // 'already_archived' | 'split_conflict' | 'unknown_meta'
-
-            if (s.status === 'already_archived') {
-              isAnomaly = true;
-              anomalySubtype = 'already_archived';
-            } else if (s.status === 'unknown' || total === null || total === 0) {
-              isAnomaly = true;
-              anomalySubtype = 'unknown_meta';
-            } else if (s.status !== 'archive_ready' && total && maxRec > total) {
-              // 本地集数编号超出官方总集数（例如本地有 24 集，TMDB 官方仅录入 12 集）且未达成齐全，判定为拆分冲突/官方失真
-              isAnomaly = true;
-              anomalySubtype = 'split_conflict';
-            } else if (s.status !== 'archive_ready' && (note.includes('[提示:') || note.includes('偏差大') || (note.includes('拆分') && !note.includes('自适应匹配')))) {
-              isAnomaly = true;
-              anomalySubtype = 'split_conflict';
+            // 旧初检只保存视频数量，不能据此推断归档集数或残留文件类型。
+            if (s.status === 'review_needed' && note.endsWith('但源端未识别到正片集号，需人工复核')) {
+              const sourceNote = s.local_episode_count === 0
+                ? '上次初检在源季目录本层找到 0 个支持的视频文件。'
+                : `上次初检在源季目录本层找到 ${s.local_episode_count} 个视频文件，未记录可用的正片集号。`;
+              const totalNote = total ? `资料总集数为 ${total} 集。` : '资料总集数未知。';
+              task.categories.archive_check.push({ ...s, status_detail: sourceNote + totalNote + '重新初检可核对归档集号及源端文件。' });
+              continue;
             }
+            if (s.status === 'archive_check') {
+              task.categories.archive_check.push(s);
+              continue;
+            }
+            const anomalySubtype = seasonAnomaly(s.status, total, maxRec);
+            const isAnomaly = Boolean(anomalySubtype);
 
             let catKey = 'airing';
             if (isAnomaly) {
@@ -1348,7 +1362,7 @@
             const uniqueCount = recEps.length;
             let statusText = `${uniqueCount}/${total || '?'}集`;
             if (dup && dup.length > 0) {
-              statusText += ` (含${dup.length}集重复)`;
+              statusText += `，第 ${dup.join("、")} 集有多个版本`;
             }
 
             task.categories[catKey].push({
@@ -1378,6 +1392,10 @@
         }
       }
 
+      if (task._seasonsLoaded) {
+        document.getElementById('catCountReview').textContent = task.categories.review.length + ' 处需复核';
+        document.getElementById('catCountArchiveCheck').textContent = task.categories.archive_check.length;
+      }
       const anomCount = (task.categories && task.categories.anomaly) ? task.categories.anomaly.length : (task.counts.already_archived || 0);
       const anomEl = document.getElementById('catCountAnomaly');
       if (anomEl) anomEl.innerHTML = `${anomCount} <span class="text-xs font-normal">季异常</span>`;
@@ -1791,7 +1809,7 @@
     // ── 10. 初检结果分类钻取 ──────────────────────────────────
     function filterResultCategory(cat) {
       currentCategory = cat;
-      ['archive', 'review', 'anomaly', 'download', 'airing'].forEach(c => {
+      ['archive', 'review', 'archive_check', 'anomaly', 'download', 'airing'].forEach(c => {
         const card = document.getElementById(`cat-card-${c}`);
         if (!card) return;
         if (c === cat) {
@@ -1813,6 +1831,35 @@
       const selectAll = document.getElementById('selectAllCheckbox');
       const selectAllLabel = document.getElementById('selectAllLabel');
       if (selectAll) selectAll.checked = false;
+
+      const readOnly = currentCategory === 'archive_check';
+      if (selectAll) selectAll.disabled = readOnly;
+      if (readOnly) {
+        batchContainer.replaceChildren();
+        if (selectAllLabel) selectAllLabel.textContent = '只读核对';
+        banner.className = 'p-3.5 rounded-xl text-xs bg-slate-50 dark:bg-slate-900';
+        banner.textContent = '按季核对资料总集数、源端文件和归档库正片。';
+        const records = task?.categories?.archive_check || [];
+        container.replaceChildren();
+        if (!records.length) container.textContent = '当前任务没有归档核对记录';
+        for (const s of records) {
+          const card = document.createElement('article');
+          card.className = 'app-card p-4 rounded-xl space-y-1';
+          const title = document.createElement('h3');
+          title.className = 'font-semibold';
+          title.textContent = s.show_name + ' · S' + String(s.season_number).padStart(2, '0');
+          card.append(title);
+          for (const line of [s.status_detail, '源端：' + s.season_path, '归档位置：' + (s.archive_target_path || '未知')]) {
+            const text = document.createElement('p');
+            text.className = 'text-xs break-all';
+            text.textContent = line;
+            card.append(text);
+          }
+          container.append(card);
+        }
+        updateSelection();
+        return;
+      }
 
       // 动态 banner 与 batch 按钮（按分类切换）
       if (currentCategory === 'archive') {
@@ -1899,9 +1946,8 @@
         } else if (isPending) {
           emptyMsg = '初检引擎正在扫描分析中，请稍候...';
           emptyIcon = 'fa-spinner fa-spin text-blue-500';
-        } else if (task && task.status === 'completed' && task.counts.archive === 0 && task.counts.review === 0 && task.counts.download === 0 && task.counts.airing === 0) {
-          emptyMsg = '初检完成，暂无诊断数据。初检引擎将在后续版本中逐步完善。';
-          emptyIcon = 'fa-flask text-indigo-400';
+        } else if (task?.status === 'completed') {
+          emptyMsg = '当前分类没有待处理项目';
         }
         container.innerHTML = `
           <div class="p-8 text-center text-slate-400 dark:text-slate-500">
@@ -1928,8 +1974,8 @@
         if (item.isAnomaly) {
           if (item.anomalySubtype === 'already_archived') {
             anomalyTagHtml = `<span class="text-[10px] px-1.5 py-0.5 rounded bg-purple-100 dark:bg-purple-950/70 text-purple-700 dark:text-purple-400 font-semibold border border-purple-200">归档库已有残留</span>`;
-          } else if (item.anomalySubtype === 'split_conflict') {
-            anomalyTagHtml = `<span class="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-950/70 text-amber-700 dark:text-amber-400 font-semibold border border-amber-200">官方集数失真/拆分冲突</span>`;
+          } else if (item.anomalySubtype === 'episode_overflow') {
+            anomalyTagHtml = `<span class="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-950/70 text-amber-700 dark:text-amber-400 font-semibold border border-amber-200">本地集号超出当前资料</span>`;
           } else if (item.anomalySubtype === 'unknown_meta') {
             anomalyTagHtml = `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 font-semibold border border-slate-200">官方无集数信息</span>`;
           }
@@ -1962,7 +2008,12 @@
               </div>
             </div>
             <div class="flex items-center space-x-2 flex-shrink-0 self-end sm:self-center flex-wrap gap-y-1">
-              ${(item.isAnomaly && item.anomalySubtype === 'unknown_meta') ? `
+              ${currentCategory === 'anomaly' ? `
+                <button onclick="markSeasonHandled('${item.id}', this)" class="px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 text-slate-600 dark:text-slate-300 text-xs font-semibold disabled:opacity-50">
+                  <i class="fa-solid fa-check mr-1"></i>已手动处理
+                </button>
+              ` : ''}
+              ${((item.isAnomaly && item.anomalySubtype === 'unknown_meta') || currentCategory === 'download') ? `
                 <button onclick="promptDeleteSourceShow('${item.id}')" class="px-2.5 py-1.5 rounded-lg border border-rose-200 dark:border-rose-800 bg-rose-50 dark:bg-rose-950/40 text-rose-600 dark:text-rose-400 text-xs font-semibold hover:bg-rose-100 dark:hover:bg-rose-900/40 transition flex items-center gap-1 shadow-sm" title="彻底删除源端整个剧集目录及其所有文件，并在删除后立即强制刷新源目录">
                   <i class="fa-solid fa-trash-can text-xs"></i>
                   <span>删除源端</span>
@@ -2262,14 +2313,30 @@
       }
     }
 
-    // ── 10.4 官方无集数信息剧集：删除源端并刷新 ─────────────────
+    async function markSeasonHandled(recordId, button) {
+      const taskId = currentTaskId;
+      button.disabled = true;
+      try {
+        const res = await api(`/api/tasks/${taskId}/seasons/${recordId}/handled`, { method: 'POST' });
+        if (!res.ok) throw new Error(res.message || '标记失败');
+        const task = taskList.find(t => t.id === taskId);
+        if (task) task._seasonsLoaded = false;
+        await loadTasks();
+      } catch (e) {
+        alert(`标记手动处理失败: ${e.message}`);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    // ── 删除源端整剧目录并刷新 ─────────────────
     let currentDeleteSourceRecId = null;
 
     function promptDeleteSourceShow(recId) {
       currentDeleteSourceRecId = recId;
       const item = findItemByRecordId(recId);
       const name = item ? item.show : '未知剧集';
-      const path = item ? (item.pathA || '') : '';
+      const path = item ? (item.raw?.show_path || item.pathA || '') : '';
       document.getElementById('deleteSourceShowName').textContent = name;
       document.getElementById('deleteSourceShowPath').textContent = `源端目标路径: ${path}`;
       openModal('deleteSourceShowModal');

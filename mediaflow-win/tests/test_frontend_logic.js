@@ -20,33 +20,15 @@ const htmlPath = fs.existsSync(path.join(__dirname, 'frontend/index.html'))
 
 const htmlContent = fs.readFileSync(htmlPath, 'utf-8');
 
-// 2. 模拟前端核心分类函数（完全镜像 index.html 中的算法契约）
+// 从实际页面载入分类条件，避免测试与 UI 各自维护一套异常判定。
+const anomalyFn = htmlContent.match(/function seasonAnomaly\([^]*?\n    \}/)[0];
+const seasonAnomaly = require('node:vm').runInNewContext('(' + anomalyFn + ')');
 function classifySeason(s) {
-  const missing = s.missing_episodes || [];
   const dup = s.duplicate_episodes || [];
   const total = s.total_episodes || null;
-  let note = s.status_detail || '';
   const recEps = s.recognized_episodes || [];
-  const maxRec = recEps.length > 0 ? Math.max(...recEps) : 0;
-
-  let isAnomaly = false;
-  let anomalySubtype = ''; // 'already_archived' | 'split_conflict' | 'unknown_meta'
-
-  if (s.status === 'already_archived') {
-    isAnomaly = true;
-    anomalySubtype = 'already_archived';
-  } else if (s.status === 'unknown' || total === null || total === 0) {
-    isAnomaly = true;
-    anomalySubtype = 'unknown_meta';
-  } else if (total && maxRec > total) {
-    // 本地集数编号超出官方总集数
-    isAnomaly = true;
-    anomalySubtype = 'split_conflict';
-  } else if (note.includes('[提示:') || note.includes('偏差大') || note.includes('拆分')) {
-    isAnomaly = true;
-    anomalySubtype = 'split_conflict';
-  }
-
+  const anomalySubtype = seasonAnomaly(s.status, total, Math.max(0, ...recEps));
+  const isAnomaly = Boolean(anomalySubtype);
   let catKey = 'airing';
   if (isAnomaly) {
     catKey = 'anomaly';
@@ -63,7 +45,7 @@ function classifySeason(s) {
   const uniqueCount = recEps.length;
   let statusText = `${uniqueCount}/${total || '?'}集`;
   if (dup && dup.length > 0) {
-    statusText += ` (含${dup.length}集重复)`;
+    statusText += `，第 ${dup.join("、")} 集有多个版本`;
   }
 
   return {
@@ -116,7 +98,7 @@ console.log("===================================================================
   assert.strictEqual(res.catKey, "download", "缺集剧集必须归入 download 分类！");
   assert.strictEqual(res.isAnomaly, false);
   // 核心断言：绝对不能显示为 20/20集，必须去伪存真显示去重后集数并标注重复
-  assert.strictEqual(res.statusText, "19/20集 (含1集重复)", "statusText 必须如实反映 19 集和重复情况！");
+  assert.strictEqual(res.statusText, "19/20集，第 15 集有多个版本", "statusText 必须如实反映 19 集和重复情况！");
   assert.strictEqual(res.hasCleanPreviewButton, true, "缺集分类中含重复集的卡片必须挂载清理预览按钮！");
   console.log("  ✓ [Test 02] 缺集属实优先进待补缺与 statusText 去伪存真：通过");
 }
@@ -136,7 +118,7 @@ console.log("===================================================================
   };
   const res = classifySeason(s);
   assert.strictEqual(res.isAnomaly, true);
-  assert.strictEqual(res.anomalySubtype, "split_conflict", "本地集数超出官方总集数必须捕获为 split_conflict！");
+  assert.strictEqual(res.anomalySubtype, "episode_overflow", "本地集数超出官方总集数必须捕获为 split_conflict！");
   assert.strictEqual(res.catKey, "anomaly");
   console.log("  ✓ [Test 03] 本地超出官方总集数拆分冲突精准捕获：通过");
 }
@@ -162,5 +144,40 @@ console.log("===================================================================
 }
 
 console.log("======================================================================");
-console.log("✨ 前端业务契约测试全部通过 (4/4 PASS)！");
+const corrected = classifySeason({status: "review_needed", total_episodes: 12,
+  recognized_episodes: Array.from({length: 12}, (_, i) => i + 1), duplicate_episodes: [2],
+  status_detail: "已核对资料，无需处理拆分"});
+assert.strictEqual(corrected.catKey, "review");
+assert.strictEqual(corrected.statusText, "12/12集，第 2 集有多个版本");
+console.log("✨ 前端业务契约测试全部通过 (5/5 PASS)！");
 console.log("======================================================================");
+
+// 执行实际卡片渲染函数，验证按钮位置和整剧删除确认路径。
+{
+  const vm = require('node:vm');
+  const source = name => htmlContent.match(new RegExp('(?:async )?function ' + name + '\\([^]*?\\n    \\}'))[0];
+  const nodes = new Map();
+  const getNode = id => {
+    if (!nodes.has(id)) nodes.set(id, {classList: {add() {}, remove() {}}, checked: false});
+    return nodes.get(id);
+  };
+  const item = {id: 'record', show: '示例', season: 'S02', statusText: '1/2集',
+    isAnomaly: true, anomalySubtype: 'episode_overflow', pathA: '/src/Show/Season 2',
+    raw: {show_path: '/src/Show'}};
+  const context = {document: {getElementById: getNode}, currentCategory: 'anomaly', currentTaskId: 'task',
+    taskList: [{id: 'task', categories: {anomaly: [item], download: [item]}, counts: {}}],
+    escapeHtml: String, updateSelection() {}, findItemByRecordId: () => item,
+    openModal: id => {context.openedModal = id;}};
+  vm.createContext(context);
+  vm.runInContext(source('renderEpisodesList') + ';renderEpisodesList()', context);
+  assert(getNode('episodeItemContainer').innerHTML.includes("markSeasonHandled('record', this)"));
+  context.currentCategory = 'download';
+  vm.runInContext('renderEpisodesList()', context);
+  const downloadCard = getNode('episodeItemContainer').innerHTML;
+  assert(downloadCard.includes("promptDeleteSourceShow('record')"));
+  assert(!downloadCard.includes('markSeasonHandled('));
+  vm.runInContext(source('promptDeleteSourceShow') + ";promptDeleteSourceShow('record')", context);
+  assert.strictEqual(getNode('deleteSourceShowPath').textContent, '源端目标路径: /src/Show');
+  assert.strictEqual(context.openedModal, 'deleteSourceShowModal');
+  console.log('✓ 手动处理按钮、缺集删除按钮及整剧确认路径通过');
+}

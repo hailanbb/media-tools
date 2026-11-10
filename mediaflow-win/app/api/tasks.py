@@ -8,11 +8,12 @@ from datetime import datetime, timezone
 from pathlib import PurePosixPath
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.task import Task
+from app.models.operation import OperationLog
 from app.models.season import SeasonRecord
 from app.schemas.common import StatusResponse
 from app.schemas.task import TaskCreate, TaskOut, TaskSummary
@@ -123,7 +124,7 @@ async def get_task_seasons(
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
 
-    stmt = select(SeasonRecord).where(SeasonRecord.task_id == task_id)
+    stmt = select(SeasonRecord).where(SeasonRecord.task_id == task_id, SeasonRecord.status != "manually_handled")
     if status:
         stmt = stmt.where(SeasonRecord.status == status)
     stmt = stmt.order_by(SeasonRecord.show_name, SeasonRecord.season_number)
@@ -150,3 +151,40 @@ async def get_task_seasons(
         }
         for r in records
     ]
+
+
+@router.post("/{task_id}/seasons/{record_id}/handled", response_model=StatusResponse)
+async def mark_season_handled(task_id: str, record_id: str, db: AsyncSession = Depends(get_db)) -> StatusResponse:
+    """用户确认手动处置完成后，从当前任务所有清单中隐藏该季。"""
+    task = await db.get(Task, task_id)
+    rec = await db.get(SeasonRecord, record_id)
+    if not task or not rec or rec.task_id != task_id:
+        raise HTTPException(status_code=404, detail="剧季记录不存在")
+    if rec.status == "manually_handled":
+        return StatusResponse(ok=True, message="该条目已标记为手动处理")
+    from app.services.task_service import TASK_RUNNING_WORKERS
+    if task.status in ("running", "paused") or task_id in TASK_RUNNING_WORKERS:
+        raise HTTPException(status_code=409, detail="请在初检结束后标记手动处理")
+    recognized = json.loads(rec.recognized_episodes_json or "[]")
+    is_anomaly = (
+        rec.status in ("already_archived", "unknown")
+        or not rec.total_episodes
+        or (rec.status != "archive_ready" and max(recognized, default=0) > rec.total_episodes)
+    )
+    if rec.status == "archive_check" or not is_anomaly:
+        raise HTTPException(status_code=409, detail="仅异常剧集可标记为手动处理")
+    previous = rec.status
+    changed = await db.execute(update(SeasonRecord).where(
+        SeasonRecord.id == record_id, SeasonRecord.status != "manually_handled"
+    ).values(status="manually_handled"))
+    if changed.rowcount:
+        db.add(OperationLog(
+            task_id=task_id, season_record_id=record_id, action="manually_handled", status="completed",
+            detail_json=json.dumps({"season_path": rec.season_path, "show_name": rec.show_name,
+                                    "season_number": rec.season_number, "previous_status": previous}, ensure_ascii=False),
+        ))
+    await db.refresh(rec)
+    from app.api.archive import _refresh_task_summary
+    await _refresh_task_summary(task_id, db)
+    await db.commit()
+    return StatusResponse(ok=True, message="已标记为手动处理，并从任务清单中移除")

@@ -17,6 +17,7 @@ import time
 sys.stdout.reconfigure(encoding='utf-8')
 
 SUITES = [
+    {"name": "手动处理隐藏与缺集源端删除", "cmd": [sys.executable, "tests/test_manual_actions.py"], "type": "python"},
     {"name": "1. 前端静态契约与 DOM 事件审计", "cmd": ["node", "tests/audit_frontend.js"], "type": "node"},
     {"name": "2. 前端分类决策与卡片渲染契约测试", "cmd": ["node", "tests/test_frontend_logic.js"], "type": "node"},
     {"name": "3. 业务领域核心不变量与用户心智回归测试", "cmd": [sys.executable, "tests/test_domain_invariants.py"], "type": "python"},

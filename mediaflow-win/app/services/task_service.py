@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.operation import OperationLog
 from app.models.task import Task
 from app.models.season import SeasonRecord
 from app.core.inspector import InspectionResult, SeasonDiagnosis, run_inspection
@@ -183,6 +184,15 @@ async def execute_inspection(task_id: str, db: AsyncSession) -> InspectionResult
             await mp.close()
             await tmdb.close()
 
+        # 人工完成标记按任务和源季路径保留，重扫生成新记录 ID 后仍然有效。
+        handled_logs = await db.scalars(select(OperationLog.detail_json).where(
+            OperationLog.task_id == task_id, OperationLog.action == "manually_handled"))
+        handled_paths = {json.loads(detail)["season_path"] for detail in handled_logs if detail}
+        for diag in result.seasons:
+            if diag.season_path in handled_paths:
+                diag.status = "manually_handled"
+        result.compute_summary()
+
         # 4. 清除旧记录，写入新结果
         old_records = await db.execute(
             select(SeasonRecord).where(SeasonRecord.task_id == task_id)
@@ -220,8 +230,9 @@ async def execute_inspection(task_id: str, db: AsyncSession) -> InspectionResult
             "review_needed": result.review_needed_count,
             "download_needed": result.download_needed_count,
             "airing": result.airing_count,
+            "archive_check": result.archive_check_count,
             "already_archived": result.already_archived_count,
-            "total_seasons": len(result.seasons),
+            "total_seasons": sum(s.status != "manually_handled" for s in result.seasons),
         })
         await db.commit()
 
@@ -270,7 +281,7 @@ async def get_task_seasons(
     Returns:
         SeasonRecord 列表
     """
-    stmt = select(SeasonRecord).where(SeasonRecord.task_id == task_id)
+    stmt = select(SeasonRecord).where(SeasonRecord.task_id == task_id, SeasonRecord.status != "manually_handled")
     if status:
         stmt = stmt.where(SeasonRecord.status == status)
     stmt = stmt.order_by(SeasonRecord.show_name, SeasonRecord.season_number)

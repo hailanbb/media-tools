@@ -23,8 +23,11 @@ import json
 import urllib.parse
 import httpx
 import re
+from collections import Counter
 from dataclasses import dataclass, field
+from pathlib import Path, PurePosixPath
 
+from app.clients.clouddrive2 import GrpcError
 from app.core.episode_parser import ParsedEpisode, is_video_file, parse_episode
 
 # 非正片判定正则（预告、片花、特辑、宣传片、花絮、Trailer、Teaser 等，杜绝污染正片总集数）
@@ -77,6 +80,7 @@ class InspectionResult:
     review_needed_count: int = 0
     download_needed_count: int = 0
     airing_count: int = 0
+    archive_check_count: int = 0
     already_archived_count: int = 0
 
     def compute_summary(self) -> None:
@@ -85,6 +89,7 @@ class InspectionResult:
         self.review_needed_count = sum(1 for s in self.seasons if s.status == "review_needed")
         self.download_needed_count = sum(1 for s in self.seasons if s.status == "download_needed")
         self.airing_count = sum(1 for s in self.seasons if s.status == "airing")
+        self.archive_check_count = sum(s.status == "archive_check" for s in self.seasons)
         self.already_archived_count = sum(1 for s in self.seasons if s.status == "already_archived")
 
 
@@ -104,6 +109,95 @@ def compute_archive_target(show_path: str, season_path: str, archive_root: str, 
     if len(parts) >= 2:
         return f"{arch_norm}/{parts[-2]}/{parts[-1]}"
     return f"{arch_norm}/{parts[-1]}"
+
+
+async def _find_archive_season(cd2, cache: dict[str, list[dict]], expected_path: str,
+                               season_number: int, tagged_show: re.Match | None) -> tuple[str | None, bool]:
+    """在归档分类内按显式作品 ID 和季号匹配；返回实际路径及是否跨别名。"""
+    async def directories(path):
+        if path not in cache:
+            try:
+                entries = await cd2.list_files(path)
+            except FileNotFoundError:
+                entries = []
+            except GrpcError as exc:
+                if exc.status != 5:
+                    raise
+                entries = []
+            cache[path] = [e for e in entries if e["isDirectory"]]
+        return cache[path]
+
+    parent, season_name = expected_path.rsplit("/", 1)
+    is_season_folder = _parse_season_number(season_name) == season_number
+    alias = False
+    if tagged_show and is_season_folder:
+        category, expected_name = parent.rsplit("/", 1)
+        tag = tagged_show.group(1)
+        same_work = [e["name"] for e in await directories(category or "/")
+                     if re.search(rf"\[tmdbid[=:]{tag}\]", e["name"], re.I)]
+        if len(same_work) > 1:
+            raise ValueError("同分类有多个相同 TMDB ID 的归档目录：" + "、".join(same_work))
+        if not same_work:
+            return None, False
+        alias = same_work[0] != expected_name
+        parent = f"{category}/{same_work[0]}"
+
+    names = [e["name"] for e in await directories(parent)
+             if e["name"] == season_name or
+             (is_season_folder and _parse_season_number(e["name"]) == season_number)]
+    if len(names) > 1:
+        raise ValueError("多个归档目录对应同一季：" + "、".join(names))
+    if not names:
+        return None, alias
+    return f"{parent}/{names[0]}", alias
+
+
+def _verified_video(ep: ParsedEpisode, season_number: int) -> bool:
+    return (ep.file_size_bytes > 0 and not ep.is_extra and not ep.is_special
+            and ep.season_number in (None, season_number) and bool(ep.episode_numbers))
+
+
+def _source_inventory(items: list[dict], parsed: list[ParsedEpisode], season_number: int) -> str:
+    if not items:
+        return "源季目录为空"
+    folders = sum(item["isDirectory"] for item in items)
+    types = Counter(PurePosixPath(item["name"]).suffix.lower() for item in items
+                    if not item["isDirectory"] and not is_video_file(item["name"]))
+    images = {".jpg", ".jpeg", ".png", ".webp"}
+    labels = []
+    for ext, count in types.most_common():
+        kind = ext.lstrip(".").upper() or "无扩展名"
+        labels.append(f"{count} 张 {kind} 图片" if ext in images else f"{count} 个 {kind} 文件")
+    types_text = "、".join(labels)
+    sidecars = {".nfo", ".jpg", ".jpeg", ".png", ".webp", ".srt", ".ass", ".ssa", ".sub", ".idx", ".sup"}
+    if not parsed:
+        if not folders and types.keys() <= sidecars:
+            return f"源季目录只有 {types_text}，没有视频文件"
+        detail = "源季目录本层没有支持的视频文件"
+        if types:
+            detail += f"，有 {types_text}"
+    else:
+        detail = f"源季目录有 {len(parsed)} 个视频文件"
+        reasons: dict[str, list[str]] = {}
+        for ep in parsed:
+            if ep.is_extra or ep.is_special:
+                reason = "标记为花絮或特别篇"
+            elif ep.file_size_bytes <= 0:
+                reason = "文件大小为零或未知"
+            elif ep.season_number not in (None, season_number):
+                reason = "文件名标注了其他季号"
+            elif not ep.episode_numbers:
+                reason = "未能从文件名解析出集号"
+            else:
+                continue
+            reasons.setdefault(reason, []).append(ep.filename)
+        for reason, names in reasons.items():
+            detail += f"；{len(names)} 个{reason}（如 {names[0]}）"
+        if not reasons:
+            detail += "，均已识别出本季集号"
+    if folders:
+        detail += f"；另有 {folders} 个子目录，尚未核对里面的文件"
+    return detail
 
 
 def separate_outliers(ep_nums: list[int], expected_max: int | None = None) -> tuple[list[int], list[int]]:
@@ -204,12 +298,13 @@ def diagnose_season(
         if allow_bonus_specials and total_episodes >= 6 and max(out_of_range) <= total_episodes + 4 and len(out_of_range) <= 3 and not has_duplicates:
             extra_desc = f"（附带 {len(out_of_range)} 集加更/特辑: {out_of_range}）"
             return "archive_ready", f"全 {total_episodes} 集齐全{extra_desc}，可归档"
-        return "review_needed", f"全 {total_episodes} 集已齐，但存在超出官方范围的异常集号 ({out_of_range})，需人工核对后归档"
+        dup_note = f"；第 {','.join(map(str, duplicate_episodes))} 集另有重复版本" if duplicate_episodes else ""
+        return "review_needed", f"当前资料收录 {total_episodes} 集，本地另有集号 {out_of_range} 待核实{dup_note}。"
 
     # 4. 已完结且全部集数已就绪，但存在同集重复版本：进入复核清理
     if has_duplicates:
         dup_text = f"第 {','.join(str(d) for d in sorted(duplicate_episodes))} 集" if duplicate_episodes else "部分集数"
-        return "review_needed", f"全 {total_episodes} 集已齐，但存在重复版本 ({dup_text})，需清理低质冗余后归档"
+        return "review_needed", f"全 {total_episodes} 集已齐，但存在重复版本 ({dup_text})，请复核同集文件后再归档"
 
     # 5. 已完结、无缺集、无重复、无超范围：完美就绪，可归档
     return "archive_ready", f"全 {total_episodes} 集齐全，可归档"
@@ -249,7 +344,6 @@ async def run_inspection(
         InspectionResult 初检结果
     """
     import logging
-    from collections import Counter
 
     log = logging.getLogger("mediaflow.inspector")
     result = InspectionResult(task_id=task_id, source_path=source_path)
@@ -339,11 +433,8 @@ async def run_inspection(
         for season_num, season_item in sorted(season_dirs, key=lambda x: x[0]):
             season_path = season_item["path"]
             try:
-                if season_path == show_path:
-                    video_items = loose_files
-                else:
-                    season_files = await cd2_client.list_files(season_path)
-                    video_items = [f for f in season_files if not f["isDirectory"] and is_video_file(f["name"])]
+                season_files = all_items if season_path == show_path else await cd2_client.list_files(season_path)
+                video_items = [f for f in season_files if not f["isDirectory"] and is_video_file(f["name"])]
             except Exception as e:
                 result.errors.append(f"扫描 {show_name}/S{season_num:02d} 失败: {e}")
                 continue
@@ -352,11 +443,10 @@ async def run_inspection(
             for vf in video_items:
                 parsed_episodes.append(parse_episode(vf["name"], vf["path"], vf.get("size", 0)))
 
-            regular_episodes = [ep for ep in parsed_episodes if not ep.is_extra]
-            target_eps_list = regular_episodes if regular_episodes else parsed_episodes
+            regular_episodes = [ep for ep in parsed_episodes if _verified_video(ep, season_num)]
 
             all_ep_nums: list[int] = []
-            for ep in target_eps_list:
+            for ep in regular_episodes:
                 all_ep_nums.extend(ep.episode_numbers)
 
             total_eps: int | None = None
@@ -365,8 +455,14 @@ async def run_inspection(
             db_tot: int | None = None
             tmdb_tot: int | None = None
             is_split = False
-            if season_num in tmdb_seasons_data:
-                info = tmdb_seasons_data[season_num]
+            info = tmdb_seasons_data.get(season_num, {})
+            if (mp_client and info.get("total") and max(all_ep_nums, default=0) > info["total"]
+                    and not info.get("douban_checked")):
+                _, secondary = await _fetch_seasons_via_douban(
+                    mp_client, show_name, log, [season_num], tmdb_id=tmdb_id_num,
+                    season_years={season_num: info.get("season_year")})
+                info = _merge_season_sources(info, secondary.get(season_num))
+            if info:
                 total_eps = info.get("total")
                 season_finished = info.get("finished", False)
                 db_tot = info.get("douban_total")
@@ -375,47 +471,35 @@ async def run_inspection(
 
             # 智能剥离断崖孤立集号（如正片 1..12，断崖孤立出现 56）
             # 优先以参考集数作为 expected_max 阈值
-            ref_max = db_tot or total_eps
+            ref_max = max(db_tot or 0, total_eps or 0) or None
             regular_nums, outlier_nums = separate_outliers(all_ep_nums, expected_max=ref_max)
             recognized = sorted(set(regular_nums)) if regular_nums else sorted(set(all_ep_nums))
             if not regular_nums:
                 outlier_nums = []
 
-            # 双重播出版型自适应选型（整期版 vs 拆分版）：基于纯净正片集号进行精准版型拟合
-            if is_split and db_tot and tmdb_tot:
-                max_rec = max(recognized) if recognized else 0
-                if max_rec <= db_tot + 4 and max_rec < tmdb_tot * 0.8:
+            # 文件只能佐证某个来源的集号范围，不能单独证明版型或总集数。
+            if db_tot and tmdb_tot and db_tot != tmdb_tot:
+                smaller, larger = sorted((db_tot, tmdb_tot))
+                if is_split:
+                    if info.get("bound") and db_tot == larger:
+                        total_eps = db_tot
+                    elif max(recognized, default=0) > smaller:
+                        total_eps = larger
+                    elif recognized == list(range(1, smaller + 1)):
+                        total_eps = smaller
+                elif db_tot > tmdb_tot:
                     total_eps = db_tot
-                    edition_note = f" (自适应匹配官方整期版: 豆瓣 {db_tot} 集)"
-                    if log:
-                        log.info(
-                            "剧集 %s S%02d 本地集数 %d 自适应拟合为官方整期版: 豆瓣 %d 集 (已排除 TMDB 拆分版 %d 集干扰)",
-                            show_name, season_num, max_rec, db_tot, tmdb_tot
-                        )
-                elif max_rec >= tmdb_tot - 2:
-                    total_eps = tmdb_tot
-                    edition_note = f" (自适应匹配官方拆分版: TMDB {tmdb_tot} 集)"
-                    if log:
-                        log.info(
-                            "剧集 %s S%02d 本地集数 %d 自适应拟合为拆分版: TMDB %d 集",
-                            show_name, season_num, max_rec, tmdb_tot
-                        )
+                edition_note = (f"（TMDB 收录 {tmdb_tot} 集，豆瓣条目 {info['douban_id']} "
+                                f"收录 {db_tot} 集，本次按 {total_eps} 集核对）")
 
-            ep_counter = Counter(regular_nums if regular_nums else all_ep_nums)
+            set_recognized = set(recognized)
+            ep_counter = Counter(n for n in all_ep_nums if n in set_recognized)
             duplicates = sorted([n for n, cnt in ep_counter.items() if cnt > 1])
 
             # 超范围集数/缺失官方集数智能自愈校准保护 (Auto-Recalibrate on Overflow / Missing Total)
-            need_calib = False
-            if recognized:
-                if total_eps is None:
-                    need_calib = True
-                elif max(recognized) > total_eps:
-                    expected_set = set(range(1, total_eps + 1))
-                    is_full_with_extras = expected_set.issubset(set(recognized)) and max(recognized) <= total_eps + 4
-                    if not is_full_with_extras:
-                        need_calib = True
-
-            if need_calib:
+            # 已知作品/季仍有无法解释的越界时保留差异，不能按文件数换一部作品。
+            bound_id = _DOUBAN_SEASON_IDS.get(str(tmdb_id_num), {}).get(str(season_num))
+            if recognized and not total_eps and not bound_id:
                 calib_total, calib_finished, calib_tmdb_id, calib_src = await auto_recalibrate_season(
                     show_name=show_name,
                     season_num=season_num,
@@ -433,6 +517,7 @@ async def run_inspection(
                             show_name, season_num, total_eps, calib_total, calib_src
                         )
                     total_eps = calib_total
+                    edition_note = f"（集数来源：{calib_src}）"
                     season_finished = calib_finished
                     if calib_tmdb_id:
                         tmdb_id_num = calib_tmdb_id
@@ -444,10 +529,7 @@ async def run_inspection(
                 season_finished=season_finished,
                 has_duplicates=bool(duplicates),
                 duplicate_episodes=duplicates,
-                allow_bonus_specials=True,
             )
-            if edition_note:
-                detail = f"{detail}{edition_note}"
             if outlier_nums:
                 detail = f"{detail}（已自动隔离断崖集: {outlier_nums}）"
 
@@ -459,70 +541,73 @@ async def run_inspection(
             if total_eps and total_eps > 0:
                 missing = [ep for ep in range(1, total_eps + 1) if ep not in recognized]
 
-            # 跨库查重校验（集数级深入比对，严防孤本被误删）
-            if archive_target and status != "airing":
+            # 官方总数、源端实物与归档实物分别取证。只读核对不会产生源端删除资格。
+            if archive_target:
                 try:
-                    target_parent = archive_target.rsplit("/", 1)[0]
-                    if target_parent not in archive_show_cache:
-                        try:
-                            archive_show_cache[target_parent] = await cd2_client.list_files(target_parent)
-                        except Exception:
-                            archive_show_cache[target_parent] = []
-
-                    target_dir_name = archive_target.rsplit("/", 1)[-1]
-                    exists_in_archive = any(
-                        item["name"] == target_dir_name and item["isDirectory"]
-                        for item in archive_show_cache[target_parent]
+                    actual, alias = await _find_archive_season(
+                        cd2_client, archive_show_cache, archive_target, season_num,
+                        tmdb_match if season_path != show_path else None,
                     )
+                    if actual:
+                        archive_target = actual
+                        archive_items = await cd2_client.list_files(actual)
+                        archived_eps = set()
+                        for item in archive_items:
+                            if item["isDirectory"] or not is_video_file(item["name"]):
+                                continue
+                            ep = parse_episode(item["name"], item["path"], item.get("size", 0))
+                            if _verified_video(ep, season_num):
+                                archived_eps.update(ep.episode_numbers)
 
-                    if exists_in_archive:
-                        # 深入到归档库季目录内部，读取已归档的视频文件集数
-                        try:
-                            archived_season_items = await cd2_client.list_files(archive_target)
-                            archived_eps: set[int] = set()
-                            for af in archived_season_items:
-                                if not af.get("isDirectory") and is_video_file(af.get("name", "")):
-                                    p_af = parse_episode(af.get("name", ""), af.get("path", ""), af.get("size", 0))
-                                    if not p_af.is_extra:
-                                        archived_eps.update(p_af.episode_numbers)
-
-                            source_eps = set(recognized)
-                            unarchived_source_eps = sorted(source_eps - archived_eps)
-                            expected_set = set(range(1, total_eps + 1)) if total_eps and total_eps > 0 else set()
-
-                            if not source_eps:
-                                # P0-1 门禁: 源端未识别到任何有效正片集号，严禁误判为已归档！
+                        source_eps = set(recognized)
+                        expected = set(range(1, (total_eps or 0) + 1))
+                        combined = source_eps | archived_eps
+                        missing = sorted(expected - combined)
+                        uncertain_source = (len(regular_episodes) != len(parsed_episodes)
+                                            or any(i["isDirectory"] for i in season_files))
+                        if not source_eps or alias or uncertain_source or actual == season_path:
+                            status = "archive_check"
+                            official = f"本季资料共 {total_eps} 集" if expected else "资料总集数未知"
+                            coverage = (f"归档库已核实 {len(expected & archived_eps)}/{total_eps} 集"
+                                        if expected else f"归档库已识别 {len(archived_eps)} 集")
+                            if missing:
+                                coverage += f"，两库尚未核实的集号 {missing}"
+                            if actual == season_path:
+                                coverage += "（源端和归档指向同一目录）"
+                            if alias:
+                                coverage += "（按相同 TMDB ID 匹配到别名目录）"
+                            detail = f"{_source_inventory(season_files, parsed_episodes, season_num)}。{official}，{coverage}。"
+                        elif status != "airing":
+                            if total_eps and any(n > total_eps for n in source_eps):
                                 status = "review_needed"
-                                detail = f"归档目标已存在 ({archive_target})，但源端未识别到正片集号，需人工复核"
-                            elif source_eps.issubset(archived_eps):
-                                # 源端所有集号在归档库中均已存在：真·已归档残留
+                                detail += "。归档前请核对超出资料范围的视频"
+                            elif source_eps <= archived_eps:
                                 status = "already_archived"
-                                detail = f"归档库已完整包含源端所有集数 (归档库已有: {sorted(archived_eps)})，源端为历史冗余残留，可安全清理"
-                            elif unarchived_source_eps:
-                                # 源端含有归档库没有的增量集数
-                                combined_eps = source_eps | archived_eps
-                                if expected_set and expected_set.issubset(combined_eps):
-                                    status = "archive_ready"
-                                    detail = f"跨库增量就绪：归档库已有 {sorted(archived_eps)}，源端含增量集 {unarchived_source_eps}，跨库汇聚后已全剧集齐，可执行增量归档"
-                                    # P1-4 修复：两库已集齐，全剧缺集必须清空，识别集数更新为两库并集
-                                    missing = []
-                                    recognized = sorted(combined_eps)
-                                else:
-                                    missing_combined = sorted(expected_set - combined_eps) if expected_set else []
-                                    status = "download_needed"
-                                    detail = f"跨库分散待补：归档库已有 {sorted(archived_eps)}，源端含增量集 {unarchived_source_eps}，全剧仍缺 {missing_combined}，严禁误删源端"
-                                    missing = missing_combined
-                                    recognized = sorted(combined_eps)
-                            else:
+                                detail = f"归档库已包含源端正片集号 {sorted(source_eps)}，可复核源端重复版本"
+                            elif expected and not missing and not duplicates:
+                                status = "archive_ready"
+                                detail = f"两库合计已齐，源端含增量集 {sorted(source_eps - archived_eps)}"
+                            elif duplicates and not missing:
                                 status = "review_needed"
-                                detail = f"跨库比对状态异常，需人工复核 ({archive_target})"
-                        except Exception as af_err:
-                            log.warning("读取归档库季目录集数失败 %s: %s", archive_target, af_err)
-                            status = "review_needed"
-                            detail = f"归档库对应目录已存在 ({archive_target}) 但读取集数失败，需人工复核，严防误判"
+                                detail = f"源端存在重复集 {duplicates}，需复核"
+                            elif expected:
+                                status = "download_needed"
+                                detail = f"两库合计仍缺 {missing}"
+                            recognized = sorted(combined)
+                    elif not recognized:
+                        status = "archive_check"
+                        detail = (f"资料总集数 {total_eps or '未知'}；未找到对应归档季。"
+                                  + _source_inventory(season_files, parsed_episodes, season_num) + "。")
+                    elif alias and status == "archive_ready":
+                        status = "archive_check"
+                        detail = "归档分类中存在同 TMDB ID 的别名目录，但未找到对应季，需核对归档位置。"
                 except Exception as arc_err:
-                    log.warning("跨库感知查重探测失败 %s: %s", archive_target, arc_err)
+                    status = "archive_check"
+                    detail = f"归档季核对未完成：{arc_err}。资料总集数 {total_eps or '未知'}，源端已识别 {len(recognized)} 集。"
+                    log.warning("归档季核对未完成 %s: %s", archive_target, arc_err)
 
+            if edition_note:
+                detail += edition_note
             diag = SeasonDiagnosis(
                 show_name=show_name,
                 show_path=show_path,
@@ -771,6 +856,7 @@ async def _fetch_seasons_by_tmdb_id(
 
                 seasons_data[sn] = {
                     "total": real_total if real_total > 0 else None,
+                    "season_year": str(s.get("air_date") or "")[:4],
                     "finished": finished,
                 }
             if log:
@@ -848,7 +934,7 @@ def _parse_season_from_text(text: str) -> int | None:
         return None
 
     # 1. 阿拉伯数字匹配: 第3季, 第03季, Season 3, S3
-    m1 = re.search(r"第\s*(\d{1,2})\s*[季部辑期]", text)
+    m1 = re.search(r"第\s*(\d{1,2})\s*[季部辑]", text)
     if m1:
         return int(m1.group(1))
 
@@ -861,7 +947,7 @@ def _parse_season_from_text(text: str) -> int | None:
         return int(m3.group(1))
 
     # 2. 中文数字匹配: 第一季, 第二季, 第三季, 第十季, 第十二季, 第二十一季
-    m_cn = re.search(r"第\s*([一二两三四五六七八九十]+)\s*[季部辑期]", text)
+    m_cn = re.search(r"第\s*([一二两三四五六七八九十]+)\s*[季部辑]", text)
     if m_cn:
         cn_str = m_cn.group(1)
         if len(cn_str) == 1 and cn_str in _CN_SEASON_NUMS:
@@ -957,139 +1043,124 @@ def _generate_search_queries(show_name: str, file_hints: list[str] | None = None
 
 _generate_douban_queries = _generate_search_queries
 
+# 绑定保存作品与季度的外部标识；集数始终读取详情。
+_DOUBAN_SEASON_IDS = json.loads(Path(__file__).with_name("douban_season_ids.json").read_text(encoding="utf-8"))
 
-async def _fetch_seasons_via_douban(
-    mp_client,
-    show_name: str,
-    log=None,
-    needed_seasons: list[int] | None = None,
-    extra_queries: list[str] | None = None,
-) -> tuple[str | None, dict[int, dict]]:
-    """通过豆瓣获取真实季集数据（双轨驱动：豆瓣 Suggest 极速探测 + MoviePilot 媒体详情代理）。"""
-    douban_id: str | None = None
-    seasons_data: dict[int, dict] = {}
 
-    queries = list(extra_queries or [])
-    for q in _generate_search_queries(show_name):
-        if q not in queries:
-            queries.append(q)
+def _series_title(text: str) -> str:
+    text = re.sub(r"第\s*[零一二两三四五六七八九十0-9]+\s*[季部辑]|\bseason\s*\d+|\bS\d+\b", "", text, flags=re.I)
+    return re.sub(r"[\W_]+", "", text).casefold()
 
-    candidate_items: list[dict] = []
-    seen_did = set()
 
-    for q in queries:
-        # A: 豆瓣公开 Suggest API（轻量快速，免登录）
+def _douban_evidence(detail, subject_id, search_title, show_name, wanted, tmdb_id, bound_season=None, season_years=None):
+    """仅返回身份、季号都可核实的季表；单季条目有时使用键 1。"""
+    if not isinstance(detail, dict) or not detail:
+        return {}
+    if str(detail.get("type") or "").casefold() in ("电影", "movie"):
+        return {}
+    if detail.get("douban_id") and str(detail["douban_id"]) != subject_id:
+        return {}
+    if tmdb_id and detail.get("tmdb_id") and str(detail["tmdb_id"]) != str(tmdb_id):
+        return {}
+    aliases = [a for a in detail.get("names") or [] if isinstance(a, str)]
+    titles = [detail.get("title") or search_title, detail.get("original_title") or "", *aliases]
+    clean = _generate_search_queries(show_name)[0]
+    if bound_season is None and _series_title(clean) not in {_series_title(t) for t in titles}:
+        if not tmdb_id or str(detail.get("tmdb_id")) != str(tmdb_id):
+            return {}
+
+    season = _parse_season_from_text(titles[0]) or _parse_season_from_text(search_title)
+    field = str(detail.get("season") or "")
+    if field.isdigit():
+        if season and int(field) not in (1, season):
+            return {}
+        season = season or int(field)
+    if season in (None, 1) and not _parse_season_from_text(titles[0]):
+        season = next((sn for a in aliases if (sn := _parse_season_from_text(a))), season)
+
+    entries = detail.get("seasons") or {}
+    counts = {}
+    for key, episodes in entries.items() if isinstance(entries, dict) else ():
+        if not str(key).isdigit() or not isinstance(episodes, list) or not episodes:
+            continue
+        sn = int(key)
+        if len(entries) == 1:
+            if sn == 1 and season:
+                sn = season
+            elif season and sn != season:
+                continue
+        numbers = [e.get("episode_number") if isinstance(e, dict) else e for e in episodes]
+        if all(str(n).isdigit() for n in numbers):
+            nums = {int(n) for n in numbers}
+            if nums == set(range(1, len(nums) + 1)):
+                counts[sn] = len(nums)
+    if not entries and str(detail.get("number_of_episodes") or "").isdigit():
+        counts[season or 1] = int(detail["number_of_episodes"])
+    year = re.search(r"[（(](\d{4})[)）]", show_name)
+    if bound_season is None and year and detail.get("year") and str(detail["year"]) != year[1]:
+        counts.pop(1, None)
+    if bound_season is None and detail.get("year"):
+        counts = {sn: n for sn, n in counts.items() if not (season_years or {}).get(sn)
+                  or str(detail["year"]) == season_years[sn]}
+    return {sn: {"total": n, "douban_id": subject_id, "bound": bound_season is not None,
+                 "finished": (detail.get("status") or "") in ("Ended", "已完结", "已播完")}
+            for sn, n in counts.items()
+            if n > 0 and (not wanted or sn in wanted) and bound_season in (None, sn)}
+
+
+async def _fetch_seasons_via_douban(mp_client, show_name, log=None, needed_seasons=None,
+                                  extra_queries=None, tmdb_id=None, season_years=None):
+    wanted = set(needed_seasons or [])
+    bindings = _DOUBAN_SEASON_IDS.get(str(tmdb_id), {})
+    result = {}
+    async def read(subject_id, title, season=None):
         try:
-            async with httpx.AsyncClient(timeout=8.0) as http_c:
-                sug_url = f"https://movie.douban.com/j/subject_suggest?q={urllib.parse.quote(q)}"
-                resp = await http_c.get(sug_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-                if resp.status_code == 200:
-                    for it in resp.json():
-                        did = str(it.get("id") or "")
-                        if did and did not in seen_did:
-                            seen_did.add(did)
-                            candidate_items.append({"douban_id": did, "title": it.get("title") or "", "year": it.get("year")})
-        except Exception:
-            pass
-
-        # B: MoviePilot 代理源搜索
-        try:
-            res = await mp_client.search_media(q, source="douban")
-            if isinstance(res, list):
-                for item in res:
-                    did = str(item.get("douban_id") or item.get("media_id") or "")
-                    if did and did != "None" and did not in seen_did:
-                        seen_did.add(did)
-                        candidate_items.append(item)
-        except Exception as e:
+            detail = await mp_client.get_douban_media_info(subject_id, type_name="电视剧")
+            return _douban_evidence(detail, subject_id, title, show_name, wanted, tmdb_id, season, season_years)
+        except Exception as exc:
             if log:
-                log.warning("豆瓣搜索关键词 '%s' 出错: %s", q, e)
+                log.warning("豆瓣条目 %s 读取失败 (%s)", subject_id, type(exc).__name__)
+            return {}
 
-        if len(candidate_items) >= 8:
-            break
-
-    # 多季条目深度解析与别名季号映射
-    for it in candidate_items[:12]:
-        did = str(it.get("douban_id") or it.get("media_id") or "")
-        it_title = str(it.get("title") or "")
-        try:
-            detail = await mp_client.get_douban_media_info(did, type_name="电视剧")
-            if not isinstance(detail, dict):
-                detail = {}
-
-            real_sn = None
-            if it.get("season"):
+    for sn in wanted:
+        did = bindings.get(str(sn))
+        if did:
+            result.update(await read(did, "", sn))
+    unbound = wanted - {int(sn) for sn in bindings}
+    if not wanted or unbound:
+        base_queries = _generate_search_queries(show_name)
+        season_labels = {1: "一", 2: "二", 3: "三", 4: "四", 5: "五", 6: "六", 7: "七", 8: "八", 9: "九", 10: "十", 11: "十一", 12: "十二"}
+        seasonal = [f"{base_queries[0]} 第{season_labels.get(sn, sn)}季" for sn in sorted(unbound) if sn > 0]
+        queries = list(dict.fromkeys(seasonal + base_queries + list(extra_queries or [])))
+        candidates = {}
+        async with httpx.AsyncClient(timeout=8.0) as http:
+            for q in queries:
                 try:
-                    real_sn = int(it["season"])
-                except Exception:
+                    resp = await http.get("https://movie.douban.com/j/subject_suggest", params={"q": q},
+                                          headers={"User-Agent": "Mozilla/5.0"})
+                    if resp.status_code == 200:
+                        for it in resp.json():
+                            if str(it.get("id") or "").isdigit():
+                                candidates[str(it["id"])] = it.get("title") or ""
+                except (ValueError, httpx.HTTPError, AttributeError):
                     pass
-            if real_sn is None:
-                real_sn = _parse_season_from_text(it_title)
-            if real_sn is None and isinstance(detail.get("names"), list):
-                for alias in detail["names"]:
-                    sn_cand = _parse_season_from_text(alias)
-                    if sn_cand is not None:
-                        real_sn = sn_cand
-                        break
-            if real_sn is None and detail.get("overview"):
-                real_sn = _parse_season_from_text(detail["overview"][:300])
-
-            seasons_dict = detail.get("seasons") or {}
-            if isinstance(seasons_dict, dict) and seasons_dict:
-                for s_str, eps in seasons_dict.items():
-                    try:
-                        if not isinstance(eps, list) or not eps:
-                            continue
-                        target_sn = real_sn if (real_sn is not None and s_str == "1") else int(s_str)
-                        if target_sn not in seasons_data:
-                            seasons_data[target_sn] = {
-                                "total": len(eps),
-                                "finished": True,
-                            }
-                            if not douban_id:
-                                douban_id = did
-                            if log:
-                                log.info(
-                                    "从豆瓣条目 [%s] (ID=%s, 别名=%s) 成功解析第 S%02d 季共 %d 集",
-                                    it_title, did, detail.get("names"), target_sn, len(eps)
-                                )
-                        # 单季独立衍生剧映射（如本地目录为 S03/S04，豆瓣为独立衍生条目且标注为第 1 季）
-                        elif needed_seasons and len(needed_seasons) == 1 and s_str == "1":
-                            req_sn = needed_seasons[0]
-                            if req_sn not in seasons_data:
-                                seasons_data[req_sn] = {
-                                    "total": len(eps),
-                                    "finished": True,
-                                }
-                                if not douban_id:
-                                    douban_id = did
-                                if log:
-                                    log.info(
-                                        "从豆瓣单季衍生条目 [%s] (ID=%s) 映射第 S%02d 季共 %d 集",
-                                        it_title, did, req_sn, len(eps)
-                                    )
-                    except Exception:
-                        pass
-            elif detail.get("number_of_episodes"):
                 try:
-                    total_eps = int(detail["number_of_episodes"])
-                    target_sn = real_sn or (needed_seasons[0] if needed_seasons and len(needed_seasons) == 1 else 1)
-                    if target_sn not in seasons_data and total_eps > 0:
-                        seasons_data[target_sn] = {
-                            "total": total_eps,
-                            "finished": True,
-                        }
-                        if not douban_id:
-                            douban_id = did
-                        if log:
-                            log.info("从豆瓣条目 [%s] (ID=%s) 获取总集数: %d 集", it_title, did, total_eps)
-                except Exception:
-                    pass
-        except Exception as det_err:
-            if log:
-                log.warning("获取豆瓣条目 ID=%s 详情失败: %s", did, det_err)
-
-    return douban_id, seasons_data
+                    for it in await mp_client.search_media(q, source="douban"):
+                        did = str(it.get("douban_id") or it.get("media_id") or it.get("id") or "")
+                        if did.isdigit():
+                            candidates[did] = it.get("title") or ""
+                except Exception as exc:
+                    if log:
+                        log.debug("豆瓣搜索失败 (%s)", type(exc).__name__)
+        matches = {}
+        for did, title in list(candidates.items())[:24]:
+            for sn, info in (await read(did, title)).items():
+                if str(sn) not in bindings:
+                    matches.setdefault(sn, []).append(info)
+        for sn, hits in matches.items():
+            if len(hits) == 1:
+                result[sn] = hits[0]
+    return next((i["douban_id"] for i in result.values()), None), result
 
 
 async def auto_recalibrate_season(
@@ -1225,106 +1296,27 @@ async def auto_recalibrate_season(
             if log:
                 log.warning("TMDB 自愈校准执行异常: %s", e)
 
-    # ── 2. 豆瓣权威双轨定向检索兜底 ───────────────────────
     if mp_client:
-        try:
-            cn_season = {
-                1: "一", 2: "二", 3: "三", 4: "四", 5: "五",
-                6: "六", 7: "七", 8: "八", 9: "九", 10: "十",
-                11: "十一", 12: "十二"
-            }.get(season_num, str(season_num))
-
-            db_queries = [
-                f"{clean_title} 第{cn_season}季",
-                f"{clean_title} 第{season_num}季",
-                f"{clean_title} S{season_num:02d}",
-            ]
-            if show_year:
-                db_queries.append(f"{clean_title} {show_year}")
-            db_queries.append(clean_title)
-
-            candidate_dids: list[tuple[str, str]] = []
-            seen_dids = set()
-
-            async with httpx.AsyncClient(timeout=8.0) as http_c:
-                for q in db_queries:
-                    # 途径 A: 豆瓣公开 Suggest API
-                    try:
-                        sug_url = f"https://movie.douban.com/j/subject_suggest?q={urllib.parse.quote(q)}"
-                        resp = await http_c.get(sug_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-                        if resp.status_code == 200:
-                            for it in resp.json():
-                                did = str(it.get("id") or "")
-                                if did and did not in seen_dids:
-                                    seen_dids.add(did)
-                                    candidate_dids.append((did, it.get("title") or ""))
-                    except Exception:
-                        pass
-
-                    # 途径 B: MoviePilot 媒体搜索代理
-                    try:
-                        res = await mp_client.search_media(q, source="douban")
-                        if isinstance(res, list):
-                            for item in res:
-                                did = str(item.get("douban_id") or item.get("media_id") or item.get("id") or "")
-                                if did and did != "None" and did not in seen_dids:
-                                    seen_dids.add(did)
-                                    candidate_dids.append((did, item.get("title") or ""))
-                    except Exception:
-                        pass
-
-                    if len(candidate_dids) >= 12:
-                        break
-
-            for did, it_title in candidate_dids[:12]:
-                try:
-                    detail = await mp_client.get_douban_media_info(did, type_name="电视剧")
-                    if not isinstance(detail, dict):
-                        detail = {}
-                    if not detail:
-                        continue
-
-                    real_sn = _parse_season_from_text(it_title)
-                    if real_sn is None and isinstance(detail.get("names"), list):
-                        for alias in detail["names"]:
-                            sn_cand = _parse_season_from_text(alias)
-                            if sn_cand is not None:
-                                real_sn = sn_cand
-                                break
-
-                    seasons_dict = detail.get("seasons") or {}
-                    if isinstance(seasons_dict, dict) and seasons_dict:
-                        for s_key in [str(season_num), "1"]:
-                            if s_key in seasons_dict:
-                                eps = seasons_dict[s_key]
-                                if isinstance(eps, list) and len(eps) >= target_count:
-                                    if s_key == "1" and season_num != 1 and real_sn != season_num:
-                                        continue
-                                    source_desc = f"豆瓣权威条目 [{it_title}] (ID={did})"
-                                    if log:
-                                        log.info(
-                                            "剧集 %s S%02d 豆瓣自愈校准命中: %s, 官方集数 %d 集",
-                                            show_name, season_num, source_desc, len(eps)
-                                        )
-                                    return len(eps), True, None, source_desc
-
-                    num_eps = detail.get("number_of_episodes")
-                    if num_eps and int(num_eps) >= target_count:
-                        if real_sn == season_num or (season_num == 1 and real_sn is None):
-                            source_desc = f"豆瓣权威条目 [{it_title}] (ID={did})"
-                            if log:
-                                log.info(
-                                    "剧集 %s S%02d 豆瓣总集数自愈校准命中: %s, 共 %d 集",
-                                    show_name, season_num, source_desc, int(num_eps)
-                                )
-                            return int(num_eps), True, None, source_desc
-                except Exception:
-                    pass
-        except Exception as e:
-            if log:
-                log.warning("豆瓣自愈校准执行异常: %s", e)
+        _, seasons = await _fetch_seasons_via_douban(
+            mp_client, show_name, log, [season_num], tmdb_id=current_tmdb_id)
+        info = seasons.get(season_num)
+        if info and info["total"] >= target_count:
+            return info["total"], info["finished"], current_tmdb_id, f"豆瓣条目 {info['douban_id']}"
 
     return current_total, False, current_tmdb_id, None
+
+
+def _merge_season_sources(primary: dict, secondary: dict | None) -> dict:
+    info = {**primary, "douban_checked": True}
+    if not secondary:
+        return info
+    tmdb_total = primary.get("total") or 0
+    db_total = secondary["total"]
+    if not tmdb_total:
+        return {**info, **secondary}
+    return {**info, "tmdb_total": tmdb_total, "douban_total": db_total,
+            "douban_id": secondary["douban_id"], "bound": secondary["bound"],
+            "is_split_edition": max(tmdb_total, db_total) >= 1.5 * min(tmdb_total, db_total)}
 
 
 async def _resolve_show_metadata(
@@ -1366,7 +1358,7 @@ async def _resolve_show_metadata(
         elif is_complete():
             has_cn = bool(re.search(r"[\u4e00-\u9fa5]", show_name))
             need_douban_check = has_cn or any((seasons_data.get(sn, {}).get("total") or 0) >= 12 for sn in needed_seasons)
-            if not need_douban_check:
+            if not need_douban_check and str(tmdb_id_num) not in _DOUBAN_SEASON_IDS:
                 return resolved_id, seasons_data
 
     # 2. TMDB 标题与母系列检索（补齐缺失季度）
@@ -1464,7 +1456,7 @@ async def _resolve_show_metadata(
     # 3. 豆瓣双轨深度检索与交叉核对 (主动双轨驱动，解决拆分版与整期版口径冲突)
     has_cn = bool(re.search(r"[\u4e00-\u9fa5]", show_name))
     need_douban_check = (mp_client is not None) and (
-        not is_complete() or has_cn or any((seasons_data.get(sn, {}).get("total") or 0) >= 12 for sn in needed_seasons)
+        str(tmdb_id_num) in _DOUBAN_SEASON_IDS or not is_complete() or has_cn or any((seasons_data.get(sn, {}).get("total") or 0) >= 12 for sn in needed_seasons)
     )
 
     if need_douban_check and mp_client:
@@ -1474,31 +1466,13 @@ async def _resolve_show_metadata(
             log=log,
             needed_seasons=needed_seasons,
             extra_queries=discovered_cn,
+            tmdb_id=tmdb_id_num,
+            season_years={sn: s.get("season_year") for sn, s in seasons_data.items()},
         )
-        if db_seasons:
-            for sn, info in db_seasons.items():
-                db_total = info.get("total") or 0
-                if sn not in seasons_data or not (seasons_data[sn].get("total") or 0) > 0:
-                    seasons_data[sn] = info
-                else:
-                    tmdb_tot = seasons_data[sn].get("total") or 0
-                    seasons_data[sn]["tmdb_total"] = tmdb_tot
-                    seasons_data[sn]["douban_total"] = db_total
-                    seasons_data[sn]["douban_id"] = db_id
-
-                    if db_total > 0 and (tmdb_tot >= int(db_total * 1.5) or db_total >= int(tmdb_tot * 1.5)):
-                        seasons_data[sn]["is_split_edition"] = True
-                        seasons_data[sn]["split_info"] = f"TMDB: {tmdb_tot}集, 豆瓣: {db_total}集"
-                        if log:
-                            log.info(
-                                "剧集 %s S%02d 双轨核验发现版型口径差异: TMDB=%d集 vs 豆瓣=%d集 (已标记支持自适应拟合)",
-                                show_name, sn, tmdb_tot, db_total
-                            )
-            if log:
-                log.info(
-                    "剧集 %s 豆瓣核对完成 (douban_id=%s): %s",
-                    show_name, db_id, {k: v.get("total") for k, v in db_seasons.items()}
-                )
+        for sn in needed_seasons:
+            seasons_data[sn] = _merge_season_sources(seasons_data.get(sn, {}), db_seasons.get(sn))
+        if log and db_seasons:
+            log.info("豆瓣季度核对 %s: %s", show_name, {sn: (v["douban_id"], v["total"]) for sn, v in db_seasons.items()})
 
     # 4. 若依然无信息且未指定 tmdb_id，通过 MoviePilot 兜底检索
     if not is_complete() and not resolved_id and mp_client:

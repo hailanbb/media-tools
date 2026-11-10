@@ -12,6 +12,7 @@ class TaskSummary(BaseModel):
     review_needed: int = 0
     download_needed: int = 0
     airing: int = 0
+    archive_check: int = 0
     already_archived: int = 0
     total_seasons: int = 0
 

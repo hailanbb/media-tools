@@ -1,4 +1,11 @@
-# MediaFlow 媒体流智能工作台 (v2.5.7)
+# MediaFlow 媒体流智能工作台 (v2.5.8)
+
+## MediaFlow v2.5.8 · 2026-11-10
+
+本次更新包括归档核对、豆瓣季度资料核实、具体重复集提示、异常条目持久隐藏及缺集清单的源端删除入口。Windows 与 Docker 版的共用程序保持一致。
+
+详细改动见 [版本历史](mediaflow-win/README.md#版本历史)，本地与 GitHub 同步方式见 [版本管理说明](mediaflow-win/VERSIONING.md)。最新版本为 v2.5.8，下方保留历史版本记录。
+
 
 > 面向家庭影院与云原生 NAS（115 网盘 / CloudDrive2 / MoviePilot / Emby / Jellyfin）的新一代智能影视媒体整理、跨库无损归档与双轨运维治理平台。
 

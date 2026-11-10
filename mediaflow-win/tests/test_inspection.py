@@ -288,5 +288,140 @@ class TestInspectionEngine(unittest.TestCase):
         self.assertIn("可归档", detail)
 
 
+class TestSeasonSourceReconciliation(unittest.IsolatedAsyncioTestCase):
+    async def scan(self, files, *, bound=True, details=None, candidates=(), primary=10):
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from app.core.inspector import run_inspection
+        tid = 256080 if bound else 999
+        show = f"/src/小小少年 (2024) [tmdbid={tid}]"
+        subject = {"douban_id": "37116072", "title": "小小少年 第二季", "season": 2,
+                   "seasons": {"2": list(range(1, 13))}, "year": "2025"}
+        disk = AsyncMock()
+        disk.list_files.side_effect = lambda path: (
+            [{"name": "Season 2", "path": show + "/Season 2", "isDirectory": True}] if path == show
+            else [{"name": f, "path": path + "/" + f, "size": 100, "isDirectory": False} for f in files])
+        mp = AsyncMock()
+        mp.search_media.return_value = list(candidates)
+        lookup = details if details is not None else {"37116072": subject}
+        mp.get_douban_media_info.side_effect = lambda did, **kwargs: lookup.get(did, {})
+        http = MagicMock()
+        http.__aenter__.return_value.get = AsyncMock(return_value=MagicMock(status_code=503))
+        with patch("app.core.inspector._fetch_seasons_by_tmdb_id", new=AsyncMock(
+                return_value={2: {"total": primary, "finished": True}})), patch(
+                "app.core.inspector.httpx.AsyncClient", return_value=http):
+            out = await run_inspection("case", show, cd2_client=disk, mp_client=mp, tmdb_client=AsyncMock())
+        if bound:
+            mp.search_media.assert_not_awaited()
+        return out.seasons[0]
+
+    async def test_verified_link_with_empty_search_and_duplicate(self):
+        files = [f"Show.S02E{i:02}.H264.mp4" for i in range(1, 13)] + ["Show.S02E02.H265.mp4"]
+        d = await self.scan(files)
+        self.assertEqual((d.status, d.total_episodes, d.local_episode_count), ("review_needed", 12, 13))
+        self.assertEqual((d.duplicate_episodes, d.missing_episodes), ([2], []))
+        self.assertIn("37116072", d.status_detail)
+
+    async def test_missing_episode_and_later_total_are_read_from_detail(self):
+        d = await self.scan(["X.S02E01-E10.mkv", "X.S02E12.mkv"], details={"37116072": {
+            "season": 2, "seasons": {"2": list(range(1, 14))}}})
+        self.assertEqual((d.total_episodes, d.missing_episodes), (13, [11, 13]))
+
+    async def test_unbound_correct_season_found_despite_small_difference(self):
+        d = await self.scan(["X.S02E01-E12.mkv"], bound=False,
+                            candidates=[{"id": "37116072", "title": "小小少年 第二季"}])
+        self.assertEqual((d.status, d.total_episodes), ("archive_ready", 12))
+
+    async def test_larger_source_supported_in_either_direction(self):
+        d = await self.scan(["X.S02E01-E12.mkv"], primary=8)
+        self.assertEqual((d.total_episodes, d.status), (12, "archive_ready"))
+        d = await self.scan(["X.S02E01-E20.mkv"], primary=20)
+        self.assertEqual((d.total_episodes, d.status), (20, "archive_ready"))
+
+    async def test_unverified_overflow_never_becomes_bonus(self):
+        for details in ({}, {"37116072": {"season": 1, "seasons": {"1": list(range(1, 13))}}}):
+            d = await self.scan(["X.S02E01-E12.mkv"], details=details)
+            self.assertEqual((d.status, d.total_episodes), ("review_needed", 10))
+            self.assertIn("[11, 12]", d.status_detail)
+        d = await self.scan(["X.S02E01-E10.mkv", "X.S02E11.加更.mp4"], details={})
+        self.assertEqual((d.status, d.recognized_episodes), ("archive_ready", list(range(1, 11))))
+
+    async def test_wrong_title_or_ambiguous_same_season_is_not_adopted(self):
+        files = ["X.S02E01-E12.mkv"]
+        for titles in [("另一节目 第二季",), ("小小少年 第二季", "小小少年 第二季")]:
+            details = {str(i+1): {"title": name, "season": 2, "number_of_episodes": 12}
+                       for i, name in enumerate(titles)}
+            candidates = [{"id": did, "title": item["title"]} for did, item in details.items()]
+            d = await self.scan(files, bound=False, details=details, candidates=candidates)
+            self.assertEqual((d.status, d.total_episodes), ("review_needed", 10))
+
+
+class TestArchiveEvidence(unittest.IsolatedAsyncioTestCase):
+    async def inspect(self, source, target, *, total=13, alias=False, ambiguous=False, fail=False):
+        from unittest.mock import AsyncMock, patch
+        from app.core.inspector import run_inspection
+        show = "高度潜力 (2024) [tmdbid=226637]"
+        src = "/src/tv/" + show
+        archived_name = "潜能探案组 (2024) [tmdbid=226637]" if alias else show
+        dst = "/dst/tv/" + archived_name
+        def entries(parent, names, directory=False):
+            return [dict(name=n, path=f"{parent}/{n}", size=size, isDirectory=directory) for n, size in names]
+        catalogue = [(archived_name, 0)]
+        if ambiguous:
+            catalogue.append(("High Potential [tmdbid=226637]", 0))
+        dirs = {
+            src: entries(src, [("Season 1", 0)], True),
+            src + "/Season 1": entries(src + "/Season 1", source),
+            "/dst/tv": entries("/dst/tv", catalogue, True),
+            dst: entries(dst, [("S01", 0)], True),
+            dst + "/S01": entries(dst + "/S01", target),
+        }
+        async def read(path):
+            if fail and path == dst + "/S01":
+                raise TimeoutError("fixture timeout")
+            return dirs[path]
+        disk = AsyncMock()
+        disk.list_files.side_effect = read
+        with patch("app.core.inspector._resolve_show_metadata", new=AsyncMock(
+                return_value=(226637, {1: {"total": total, "finished": True}}))):
+            result = await run_inspection("case", src, cd2_client=disk, tmdb_client=AsyncMock(),
+                                          archive_root="/dst", global_source_root="/src")
+        self.assertEqual(result.archive_check_count, 1)
+        disk.delete_file.assert_not_awaited()
+        disk.move_file.assert_not_awaited()
+        return result.seasons[0]
+
+    async def test_sidecars_only_full_archive(self):
+        files = [(f"High.Potential.S01E{i:02}.mkv", 100) for i in range(1, 14)]
+        d = await self.inspect([("season.nfo", 8), ("S01E01.jpg", 9), ("S01E01.nfo", 4)], files)
+        self.assertEqual((d.status, d.total_episodes, d.local_episode_count), ("archive_check", 13, 0))
+        self.assertEqual((d.recognized_episodes, d.missing_episodes), ([], []))
+        self.assertIn("13/13", d.status_detail)
+        self.assertIn("只有 2 个 NFO 文件、1 张 JPG 图片，没有视频文件", d.status_detail)
+
+    async def test_incomplete_archive_does_not_count_wrong_season_empty_or_extra(self):
+        files = [("S01E01.mkv", 10), ("S02E02.mkv", 10), ("S01E03.mkv", 0), ("Clip.S01E04.mkv", 10)]
+        d = await self.inspect([("mystery.mkv", 10)], files, total=4)
+        self.assertEqual(d.missing_episodes, [2, 3, 4])
+        self.assertIn("1/4", d.status_detail)
+        self.assertIn("未能从文件名解析出集号（如 mystery.mkv）", d.status_detail)
+
+    async def test_alias_same_id_and_season_is_read_only(self):
+        d = await self.inspect([("S01E01.mkv", 100)], [("S01E01.mkv", 100)], total=1, alias=True)
+        self.assertIn("别名", d.status_detail)
+        self.assertIn("潜能探案组", d.archive_target_path)
+        self.assertEqual(d.missing_episodes, [])
+
+    async def test_ambiguous_alias_and_failed_read(self):
+        for kwargs, message in [({"ambiguous": True}, "多个"), ({"fail": True}, "未完成")]:
+            d = await self.inspect([], [], **kwargs)
+            self.assertIn(message, d.status_detail)
+            self.assertNotIn("已覆盖全部", d.status_detail)
+
+    async def test_missing_metadata_does_not_imply_complete(self):
+        d = await self.inspect([], [("S01E01.mkv", 5)], total=None)
+        self.assertIn("资料总集数未知", d.status_detail)
+        self.assertNotIn("已覆盖全部", d.status_detail)
+
+
 if __name__ == "__main__":
     unittest.main()

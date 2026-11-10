@@ -209,7 +209,7 @@ class TestManualFullCoverage(unittest.TestCase):
         # 官方 2 集，本地 {1, 2, 3} -> 无缺集但有超范围集号，标为 review_needed
         st_over, det_over = diagnose_season([1, 2, 3], total_episodes=2, season_finished=True, has_duplicates=False)
         self.assertEqual(st_over, "review_needed")
-        self.assertIn("超出官方范围的异常集号", det_over)
+        self.assertIn("本地另有集号 [3] 待核实", det_over)
 
     def test_scan08_calibrate_episodes(self):
         """SCAN-08: POST archive/calibrate-episodes 合法与非法参数校验。"""

@@ -226,6 +226,9 @@ async def execute_gap_fill_download(
             log.warning("获取 MoviePilot 活跃下载队列失败，继续直连检索: %s", q_err)
 
         for rec in records:
+            if rec.status in ("archive_check", "manually_handled"):
+                errors.append(f"{rec.show_name}：归档核对记录仅供查看")
+                continue
             show_name = rec.show_name
             season_num = rec.season_number
             tmdb_id_str = rec.tmdb_id
