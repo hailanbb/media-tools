@@ -187,6 +187,10 @@ def generate_review_clean_plan(
             "status": str  # 'skip', 'ready', 'cleaned'
         }
     """
+    from app.core.segments import segment_number
+    if any(segment_number(f.get("name", "")) is not None for f in files):
+        return {"can_clean": False, "reason": "存在上下段文件，请先核对分段覆盖及整期版",
+                "version_note": "分段核对", "status": "skip", "to_keep": files, "to_delete": []}
     now_iso = datetime.now().isoformat()
 
     # 1. 安全门禁：存在子目录

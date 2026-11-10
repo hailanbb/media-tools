@@ -135,7 +135,7 @@ class MoviePilotClient:
             return data
         if isinstance(data, dict):
             return data.get("items") or data.get("results") or []
-        return []
+        raise RuntimeError("资源搜索返回未知格式")
 
     # ── 订阅管理 ──────────────────────────────────────────
     async def list_subscriptions(self) -> list[dict]:

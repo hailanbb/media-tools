@@ -174,6 +174,11 @@ async def execute_archive(
                 continue
 
             source_season_path = rec.season_path
+            from app.core.segments import segment_number
+            contents = await cd2.list_files(source_season_path, force_refresh=True)
+            if any(segment_number(f.get("name", "")) is not None for f in contents):
+                errors.append(f"{rec.show_name}: 请先核对上下段和整期版")
+                continue
             archive_target = rec.archive_target_path
 
             if not archive_target:

@@ -229,6 +229,16 @@ async def execute_gap_fill_download(
             if rec.status in ("archive_check", "manually_handled"):
                 errors.append(f"{rec.show_name}：归档核对记录仅供查看")
                 continue
+            from app.clients.clouddrive2 import CloudDrive2Client
+            from app.core.segments import segment_number
+            disk = CloudDrive2Client()
+            try:
+                source_files = await disk.list_files(rec.season_path, force_refresh=True)
+            finally:
+                await disk.close()
+            if any(segment_number(f.get("name", "")) is not None for f in source_files):
+                errors.append(f"{rec.show_name}: 上下段文件需先核对，暂缓补缺")
+                continue
             show_name = rec.show_name
             season_num = rec.season_number
             tmdb_id_str = rec.tmdb_id

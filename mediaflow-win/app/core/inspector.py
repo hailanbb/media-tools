@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from app.clients.clouddrive2 import GrpcError
+from app.core.segments import episode_segments, segment_report
 from app.core.episode_parser import ParsedEpisode, is_video_file, parse_episode
 
 # 非正片判定正则（预告、片花、特辑、宣传片、花絮、Trailer、Teaser 等，杜绝污染正片总集数）
@@ -606,6 +607,13 @@ async def run_inspection(
                     detail = f"归档季核对未完成：{arc_err}。资料总集数 {total_eps or '未知'}，源端已识别 {len(recognized)} 集。"
                     log.warning("归档季核对未完成 %s: %s", archive_target, arc_err)
 
+            if info.get("parts") and any(len(v) > 1 for v in info["parts"].values()):
+                status = "archive_check"
+                detail = segment_report(season_files, season_num, info["parts"])
+                total_eps = len(info["parts"])
+                edition_note = ""
+                missing = []
+                duplicates = []
             if edition_note:
                 detail += edition_note
             diag = SeasonDiagnosis(
@@ -801,6 +809,7 @@ async def _fetch_seasons_by_tmdb_id(
                 raw_ep_count = s.get("episode_count") or 0
                 finished = False
                 real_total = raw_ep_count
+                parts = {}
 
                 if raw_ep_count > 0:
                     try:
@@ -816,6 +825,7 @@ async def _fetch_seasons_by_tmdb_id(
                                     continue
                                 regular_eps.append(ep)
 
+                            parts = episode_segments(regular_eps)
                             if regular_eps:
                                 real_total = len(regular_eps)
 
@@ -856,6 +866,7 @@ async def _fetch_seasons_by_tmdb_id(
 
                 seasons_data[sn] = {
                     "total": real_total if real_total > 0 else None,
+                    "parts": parts,
                     "season_year": str(s.get("air_date") or "")[:4],
                     "finished": finished,
                 }

@@ -22,6 +22,82 @@ log = logging.getLogger("mediaflow.api.moviepilot")
 router = APIRouter()
 
 
+class SubscriptionPlanRequest(BaseModel):
+    cleanup: bool = False
+    season_record_id: str | None = None
+
+
+@router.post("/subscriptions/{sub_id}/resource-check")
+async def check_subscription_resources(sub_id: int):
+    from app.services.subscription_service import subscription, resource_check
+    _check_mp_configured()
+    mp = MoviePilotClient()
+    try:
+        sub = await subscription(mp, sub_id)
+        if not sub:
+            raise HTTPException(404, "订阅不存在")
+        return await resource_check(mp, sub)
+    finally:
+        await mp.close()
+
+
+@router.get("/subscriptions/{sub_id}/sources")
+async def subscription_sources(sub_id: int, db: AsyncSession = Depends(get_db)):
+    from app.services.subscription_service import subscription, identity
+    from app.models.season import SeasonRecord
+    from sqlalchemy import select
+    _check_mp_configured()
+    mp = MoviePilotClient()
+    try:
+        sub = await subscription(mp, sub_id)
+        if not sub:
+            raise HTTPException(404, "订阅不存在")
+        tid, season = identity(sub)
+        rows = await db.scalars(select(SeasonRecord).where(SeasonRecord.tmdb_id == tid,
+            SeasonRecord.season_number == season, SeasonRecord.status != "manually_handled"))
+        unique = {}
+        for row in rows:
+            unique[row.season_path] = {"id": row.id, "path": row.season_path}
+        return list(unique.values())
+    finally:
+        await mp.close()
+
+
+@router.post("/subscriptions/{sub_id}/operation-preview")
+async def preview_subscription_operation(sub_id: int, body: SubscriptionPlanRequest, db: AsyncSession = Depends(get_db)):
+    from app.services.subscription_service import preview
+    from app.clients.clouddrive2 import CloudDrive2Client
+    _check_mp_configured()
+    mp, disk = MoviePilotClient(), CloudDrive2Client()
+    try:
+        return await preview(db, mp, disk, sub_id, body.cleanup, body.season_record_id)
+    finally:
+        await mp.close()
+        await disk.close()
+
+
+@router.get("/subscription-operations")
+async def list_subscription_operations(db: AsyncSession = Depends(get_db)):
+    from sqlalchemy import select
+    from app.models.operation import OperationLog
+    logs = await db.scalars(select(OperationLog).where(OperationLog.action == "subscription_cleanup",
+        OperationLog.status != "completed").order_by(OperationLog.created_at.desc()).limit(100))
+    return [{"operation_id": op.id, "status": op.status, **json.loads(op.detail_json)} for op in logs]
+
+
+@router.post("/subscription-operations/{operation_id}/execute")
+async def execute_subscription_operation(operation_id: str, db: AsyncSession = Depends(get_db)):
+    from app.services.subscription_service import execute
+    from app.clients.clouddrive2 import CloudDrive2Client
+    _check_mp_configured()
+    mp, disk = MoviePilotClient(), CloudDrive2Client()
+    try:
+        return await execute(db, mp, disk, operation_id)
+    finally:
+        await mp.close()
+        await disk.close()
+
+
 def _check_mp_configured() -> None:
     settings = get_settings()
     if not settings.mp_url or not settings.mp_token:
@@ -241,6 +317,10 @@ async def batch_delete_subscriptions(
             )
             mp_deleted = False
             try:
+                from app.services.subscription_service import subscription
+                current_sub = await subscription(mp, sid)
+                if not current_sub or diagnose_subscription(current_sub).is_protected:
+                    raise ValueError("订阅已不存在或处于保护状态，请重新核查")
                 await mp.delete_subscription(sid)
                 mp_deleted = True
                 op_log = OperationLog(

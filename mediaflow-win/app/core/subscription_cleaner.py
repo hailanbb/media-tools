@@ -148,7 +148,7 @@ def diagnose_movie_subscription(sub: Dict[str, Any], now: Optional[datetime] = N
             total_episodes=1, completed_episodes=0, lack_episodes=1, state=state, username=username,
             clean_eligible=True, clean_confidence="medium",
             clean_rule="zombie", clean_rule_name="往年老片长期无源死种",
-            clean_reason=f"{movie_year} 年老片，已下映多年，添加已逾 {created_days} 天各站点仍无资源做种，建议退订",
+            clean_reason=f"{movie_year} 年影片，订阅添加 {created_days} 天；资源待核查",
             days_inactive=inactive_days, created_days_ago=created_days, is_protected=False,
             is_douban_sync=is_douban
         )
@@ -254,7 +254,7 @@ def diagnose_tv_subscription(sub: Dict[str, Any], now: Optional[datetime] = None
             total_episodes=total_ep, completed_episodes=comp_ep, lack_episodes=lack_ep, state=state, username=username,
             clean_eligible=True, clean_confidence="medium",
             clean_rule="short_tv_stalled", clean_rule_name="短剧虚标长期停滞",
-            clean_reason=f"短剧/微短剧条目（总集数虚标99，S{season or 1}），已暂停或逾 {inactive_days} 天无做种，建议退订",
+            clean_reason=f"短剧订阅总数待核实，{inactive_days} 天未更新；资源待核查",
             days_inactive=inactive_days, created_days_ago=created_days, is_protected=False,
             is_short_tv=True, is_douban_sync=is_douban
         )
@@ -266,7 +266,7 @@ def diagnose_tv_subscription(sub: Dict[str, Any], now: Optional[datetime] = None
             total_episodes=total_ep, completed_episodes=comp_ep, lack_episodes=lack_ep, state=state, username=username,
             clean_eligible=True, clean_confidence="medium",
             clean_rule="stalled", clean_rule_name="中途断更停滞",
-            clean_reason=f"订阅已暂停且沉寂逾 {inactive_days} 天未活动 (当前进度 {comp_ep}/{total_ep or '?'})，建议退订",
+            clean_reason=f"订阅已暂停，{inactive_days} 天未更新；订阅记录 {comp_ep}/{total_ep or '?'}，资源待核查",
             days_inactive=inactive_days, created_days_ago=created_days, is_protected=False,
             is_short_tv=is_short_drama, is_douban_sync=is_douban
         )
@@ -278,7 +278,7 @@ def diagnose_tv_subscription(sub: Dict[str, Any], now: Optional[datetime] = None
             total_episodes=total_ep, completed_episodes=comp_ep, lack_episodes=lack_ep, state=state, username=username,
             clean_eligible=True, clean_confidence="medium",
             clean_rule="zombie", clean_rule_name="剧集长期无源死种",
-            clean_reason=f"添加已逾 {created_days} 天，连首集都无站点做种拉取，判定为死种",
+            clean_reason=f"订阅添加 {created_days} 天，尚无完成记录；资源待核查",
             days_inactive=inactive_days, created_days_ago=created_days, is_protected=False,
             is_short_tv=is_short_drama, is_douban_sync=is_douban
         )

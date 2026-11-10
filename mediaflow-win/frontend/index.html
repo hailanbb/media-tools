@@ -84,7 +84,7 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.8</span>
+              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.9</span>
             </div>
             <!-- 完善后的命名 -->
             <p class="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">智能媒体库整理与归档工作台</p>
@@ -319,7 +319,7 @@
             </div>
 
             <div onclick="filterResultCategory('archive_check')" id="cat-card-archive_check" class="cursor-pointer rounded-xl p-3 sm:p-3.5 border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 hover:border-teal-400 flex-shrink-0 w-36 sm:w-auto snap-start shadow-sm">
-              <div class="text-xs font-medium text-teal-700 dark:text-teal-400 mb-1">归档核对</div>
+              <div class="text-xs font-medium text-teal-700 dark:text-teal-400 mb-1">文件核对</div>
               <div class="text-xl sm:text-2xl font-bold text-teal-700 dark:text-teal-400" id="catCountArchiveCheck">0</div>
               <p class="text-[10px] sm:text-[11px] text-slate-500 mt-1">源端与归档集号</p>
             </div>
@@ -394,6 +394,7 @@
 
       <!-- ================= 视图 B：MoviePilot 订阅清理 (剧集 / 电影) ================= -->
       <div id="mpSubscriptionsView" class="hidden space-y-6">
+          <button id="resumeSubscriptionOperations" onclick="resumeSubOperations()" class="text-xs text-indigo-600 mb-2">继续未完成的退订操作</button>
         <div class="app-card rounded-2xl p-5 space-y-4">
           <!-- 媒体类型大 Tab 切换：电视剧 vs 电影 -->
           <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 dark:border-slate-800 pb-3">
@@ -1065,7 +1066,7 @@
       if (!s) return '初检完成';
       const parts = [];
       if (s.archive_ready) parts.push(`可归档 ${s.archive_ready}`);
-      if (s.archive_check) parts.push(`归档核对 ${s.archive_check}`);
+      if (s.archive_check) parts.push(`文件核对 ${s.archive_check}`);
       if (s.review_needed) parts.push(`待复核 ${s.review_needed}`);
       if (s.download_needed) parts.push(`待补集 ${s.download_needed}`);
       if (s.airing) parts.push(`连载中 ${s.airing}`);
@@ -1277,6 +1278,15 @@
       if (status === 'unknown' || !total) return 'unknown_meta';
       if (status !== 'archive_ready' && maxRecognized > total) return 'episode_overflow';
       return '';
+    }
+
+    function fileCheckAdvice(s) {
+      const note = s.status_detail || '';
+      if (note.includes('分段')) return '核对上下段和整期版，完成前保留所有文件';
+      if (note.includes('已核实') && /([0-9]+)\/\1 集/.test(note)) return '归档已齐，无需补集；源端文件可先保留';
+      if (note.includes('未完成')) return '本次核对未完成，请重新初检';
+      if (s.local_episode_count === 0) return '源端没有视频，可保留附件';
+      return '请根据下列文件情况核对内容与归属';
     }
 
     async function selectTask(taskId) {
@@ -1833,15 +1843,16 @@
       if (selectAll) selectAll.checked = false;
 
       const readOnly = currentCategory === 'archive_check';
+
       if (selectAll) selectAll.disabled = readOnly;
       if (readOnly) {
         batchContainer.replaceChildren();
         if (selectAllLabel) selectAllLabel.textContent = '只读核对';
         banner.className = 'p-3.5 rounded-xl text-xs bg-slate-50 dark:bg-slate-900';
-        banner.textContent = '按季核对资料总集数、源端文件和归档库正片。';
+        banner.textContent = '查看每季的文件情况与下一步处理建议。';
         const records = task?.categories?.archive_check || [];
         container.replaceChildren();
-        if (!records.length) container.textContent = '当前任务没有归档核对记录';
+        if (!records.length) container.textContent = '当前任务没有文件核对记录';
         for (const s of records) {
           const card = document.createElement('article');
           card.className = 'app-card p-4 rounded-xl space-y-1';
@@ -1849,7 +1860,7 @@
           title.className = 'font-semibold';
           title.textContent = s.show_name + ' · S' + String(s.season_number).padStart(2, '0');
           card.append(title);
-          for (const line of [s.status_detail, '源端：' + s.season_path, '归档位置：' + (s.archive_target_path || '未知')]) {
+          for (const line of [fileCheckAdvice(s), s.status_detail, '源端：' + s.season_path, '归档位置：' + (s.archive_target_path || '未知')]) {
             const text = document.createElement('p');
             text.className = 'text-xs break-all';
             text.textContent = line;
@@ -1932,6 +1943,12 @@
           </div>`;
       }
 
+      if (currentCategory === 'airing') {
+        batchContainer.replaceChildren();
+        if (selectAll) selectAll.disabled = true;
+        if (selectAllLabel) selectAllLabel.textContent = '连载状态';
+      }
+
       // 获取当前分类下的项目
       const items = (task && task.categories) ? (task.categories[currentCategory] || []) : [];
 
@@ -1984,7 +2001,7 @@
         return `
           <div class="app-card rounded-xl p-4 transition flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-l-4 border-l-${badgeColor}-500">
             <div class="flex items-start space-x-3.5 flex-1 min-w-0">
-              <input type="checkbox" name="itemCheck" value="${item.id}" onchange="updateSelection()" class="mt-1 w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer accent-indigo-600">
+              <input type="checkbox" name="itemCheck" ${currentCategory === 'airing' ? 'disabled hidden' : ''} value="${item.id}" onchange="updateSelection()" class="mt-1 w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer accent-indigo-600">
               <div class="w-10 h-14 rounded bg-slate-100 dark:bg-slate-800 flex-shrink-0 flex items-center justify-center text-slate-400 border border-slate-200 dark:border-slate-700">
                 <i class="fa-solid fa-film text-lg"></i>
               </div>
@@ -2025,7 +2042,7 @@
                   <span>清理预览</span>
                 </button>
               ` : ''}
-              ${(currentCategory === 'anomaly' && item.anomalySubtype === 'already_archived') ? `
+              ${currentCategory === 'airing' ? '<span class="text-xs text-slate-500">连载中，文件已留在源目录</span>' : (currentCategory === 'anomaly' && item.anomalySubtype === 'already_archived') ? `
                 <button onclick="cleanSourceRedundantSingle('${item.id}')" class="px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-700 text-white text-xs font-semibold shadow-sm transition flex items-center gap-1.5">
                   <i class="fa-solid fa-trash-can text-xs"></i>
                   <span>清理源端</span>
@@ -3065,16 +3082,7 @@
     }
 
     async function triggerDeleteSingleSub(subId) {
-      const sub = allSubscriptions.find(s => s.id === subId);
-      const name = sub ? sub.name : `订阅 #${subId}`;
-      if (!confirm(`确定在 MoviePilot 中退订【${name}】吗？\n此操作仅取消追更，本地已下载的影视文件不会被删除。`)) return;
-      try {
-        await api(`/api/moviepilot/subscriptions/${subId}`, { method: 'DELETE' });
-        allSubscriptions = allSubscriptions.filter(s => s.id !== subId);
-        renderSubscriptionList();
-      } catch (e) {
-        alert(`退订失败: ${e.message}`);
-      }
+      await planSubOperation(subId, false);
     }
 
     // ── 智能清理助手专属预案与弹窗 ─────────────────────────────
@@ -3102,7 +3110,7 @@
               <span>🟢 全季完结安全清理</span>
               <i class="fa-solid fa-shield-halved text-emerald-600"></i>
             </div>
-            <p class="text-[11px] text-slate-500 dark:text-slate-400 mt-1">仅退订全集已齐完结入库项，0 误删风险。</p>
+            <p class="text-[11px] text-slate-500 dark:text-slate-400 mt-1">按订阅记录筛选，执行前核对入库情况。</p>
             <div class="text-xs font-semibold text-emerald-700 dark:text-emerald-400 mt-2" id="modeCountSafe">匹配 0 项</div>
           </div>
 
@@ -3131,7 +3139,7 @@
               <span>🟢 已入库完成清理</span>
               <i class="fa-solid fa-shield-halved text-emerald-600"></i>
             </div>
-            <p class="text-[11px] text-slate-500 dark:text-slate-400 mt-1">仅退订已完成入库的电影，0 误删风险。</p>
+            <p class="text-[11px] text-slate-500 dark:text-slate-400 mt-1">按订阅记录筛选，执行前核对入库情况。</p>
             <div class="text-xs font-semibold text-emerald-700 dark:text-emerald-400 mt-2" id="modeCountSafe">匹配 0 项</div>
           </div>
 
@@ -3207,6 +3215,7 @@
           })
         });
         currentPreviewData = res;
+        if (confirmBtn) confirmBtn.style.display = 'none';
 
         // 更新卡片上的匹配计数
         const targetCountId = mode === 'safe' ? 'modeCountSafe' : (mode === 'short_tv' ? 'modeCountShortTv' : (mode === 'old_zombie' ? 'modeCountOldZombie' : 'modeCountDeep'));
@@ -3246,9 +3255,12 @@
               ${item.is_short_tv ? '<span class="text-[10px] px-1.5 py-0.2 rounded bg-purple-100 dark:bg-purple-900 text-purple-700 dark:text-purple-300 font-mono">短剧</span>' : ''}
             </div>
             <div class="flex items-center space-x-2 flex-shrink-0">
-              <span class="text-[10px] text-slate-500 dark:text-slate-400 font-mono truncate max-w-xs">${item.clean_reason}</span>
+              <span class="text-[10px] text-slate-500 dark:text-slate-400 font-mono truncate max-w-xs">${escapeHtml(item.clean_reason)}</span>
+              <button onclick="checkSubResource(${item.id})" class="text-indigo-600">核查资源</button>
+              <button onclick="planSubOperation(${item.id}, false)" class="text-amber-600">仅退订</button>
+              <button onclick="planSubOperation(${item.id}, true)" class="text-rose-600">退订并清理源视频</button>
               <span class="text-[10px] px-1.5 py-0.5 rounded-full font-bold ${item.clean_confidence === 'high' ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-400' : 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-400'}">
-                ${item.clean_confidence === 'high' ? '可退订' : '建议退订'}
+                待核查
               </span>
             </div>
           </div>
@@ -3260,57 +3272,81 @@
       }
     }
 
-    async function confirmBatchCleanSubs() {
-      if (!currentPreviewData || !currentPreviewData.to_clean || currentPreviewData.to_clean.length === 0) {
-        alert('没有可清理的订阅项目');
-        return;
-      }
+    async function checkSubResource(id) {
+      try {
+        const r = await api('/api/moviepilot/subscriptions/' + id + '/resource-check', {method: 'POST'});
+        alert(r.message + '\n' + (r.resources || []).map(x => x.title + ' · 做种 ' + x.seeders +
+          ' · 集号 ' + (x.episodes.length ? x.episodes.join(',') : '待核实') + ' · 标注总数 ' + (x.total || '未知')).join('\n'));
+      } catch (e) { alert(e.message); }
+    }
 
-      const toClean = currentPreviewData.to_clean;
-      const mediaName = currentMediaTab === 'tv' ? '电视剧' : '电影';
-      if (!confirm(`确定在 MoviePilot 中批量退订这 ${toClean.length} 项【${mediaName}】订阅吗？\n模式：${currentPreviewData.mode_name}\n注意：退订仅取消后续追更，已入库的本地影视文件不会受到任何影响。`)) {
-        return;
-      }
-
-      closeModal('subCleanModal');
-
-      const items = toClean.map(s => ({
-        id: s.id,
-        name: `${s.title || '影视'}${s.season ? ` S${s.season}` : ''}`,
-        reason: s.clean_reason || '已完结/无更新'
-      }));
-
-      await runBatchPipeline({
-        title: `批量退订 MoviePilot 订阅 (${items.length} 项)`,
-        subtitle: `正在按【${currentPreviewData.mode_name}】模式逐项退订并同步 MP...`,
-        iconClass: 'fa-tags',
-        iconWrapClass: 'bg-amber-100 dark:bg-amber-950/70 text-amber-600 dark:text-amber-400',
-        barGradientClass: 'from-amber-500 to-rose-600',
-        items,
-        processItem: async (item, i, total, appendLog) => {
-          appendLog(`<span class="text-slate-400">[${getNowTimestamp()}] 🏷️ 正在退订: <b>【${item.name}】</b> (原因: ${item.reason})...</span>`);
-          try {
-            const res = await api('/api/moviepilot/subscriptions/batch-delete', {
-              method: 'POST',
-              body: JSON.stringify({ sub_ids: [item.id], titles: [item.name] })
-            });
-            if (res.ok) {
-              appendLog(`<span class="text-emerald-400 font-bold">[${getNowTimestamp()}] ✓ 退订成功: 【${item.name}】</span>`);
-              return { success: true };
-            } else {
-              appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] ✗ 退订失败: 【${item.name}】${res.message || '接口调用异常'}</span>`);
-              return { success: false };
-            }
-          } catch (err) {
-            appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] ✗ 退订异常: 【${item.name}】${err.message}</span>`);
-            return { success: false };
-          }
-        },
-        onFinish: async () => {
-          await loadSubscriptions();
+    async function planSubOperation(id, cleanup) {
+      try {
+        let season_record_id = null;
+        if (cleanup) {
+          const sources = await api('/api/moviepilot/subscriptions/' + id + '/sources');
+          if (!sources.length) throw new Error('没有对应的源季初检记录，请先初检');
+          const index = sources.length === 1 ? 0 : Number(prompt('选择源季目录序号\n' +
+            sources.map((s, i) => (i + 1) + '. ' + s.path).join('\n'))) - 1;
+          if (!sources[index]) return;
+          season_record_id = sources[index].id;
         }
+        const r = await api('/api/moviepilot/subscriptions/' + id + '/operation-preview',
+          {method:'POST', body:JSON.stringify({cleanup, season_record_id})});
+        await confirmSubOperation(r);
+      } catch (e) { alert(e.message); }
+    }
+
+    function showSubscriptionPlan(text) {
+      return new Promise(resolve => {
+        const dialog = document.createElement('dialog');
+        dialog.className = 'rounded-xl p-5 bg-white dark:bg-slate-900 dark:text-white max-w-3xl w-full';
+        const title = document.createElement('h3');
+        title.textContent = '确认订阅操作';
+        title.className = 'font-semibold mb-3';
+        const body = document.createElement('pre');
+        body.textContent = text;
+        body.className = 'whitespace-pre-wrap break-all text-xs overflow-y-auto max-h-96';
+        const cancel = document.createElement('button');
+        cancel.textContent = '返回';
+        cancel.className = 'px-4 py-2 mr-2';
+        const execute = document.createElement('button');
+        execute.textContent = '确认执行以上操作';
+        execute.className = 'px-4 py-2 mt-4 bg-rose-600 text-white rounded-lg';
+        let accepted = false;
+        cancel.addEventListener('click', () => dialog.close());
+        execute.addEventListener('click', () => { accepted = true; dialog.close(); });
+        dialog.addEventListener('close', () => { dialog.remove(); resolve(accepted); }, {once:true});
+        dialog.append(title, body, cancel, execute);
+        document.body.append(dialog);
+        dialog.showModal();
       });
     }
+
+    async function confirmSubOperation(r) {
+      const files = r.files || [];
+      const remaining = files.filter(f => !(r.deleted || []).includes(f.path));
+      const text = (r.subscription.name || '') + '\n' + r.evidence.message +
+        '\n' + (r.cleanup ? '退订并删除以下源视频，可能包含唯一副本：\n' + remaining.map(f => f.path + ' (' + f.size + ' 字节)').join('\n') +
+          '\n字幕、NFO 和海报将保留。' : '仅退订') +
+        '\n操作编号 ' + r.operation_id;
+      if (!await showSubscriptionPlan(text)) return;
+      const out = await api('/api/moviepilot/subscription-operations/' + r.operation_id + '/execute', {method:'POST'});
+      alert(out.message + '\n操作编号 ' + r.operation_id);
+      await loadSubscriptions();
+    }
+
+    async function resumeSubOperations() {
+      try {
+        const rows = await api('/api/moviepilot/subscription-operations');
+        if (!rows.length) { alert('没有待处理操作'); return; }
+        const list = rows.map((r, i) => (i + 1) + '. ' + (r.subscription.name || '') + ' · ' + r.status).join('\n');
+        const index = Number(prompt('选择要继续的操作序号\n' + list)) - 1;
+        if (Number.isInteger(index) && rows[index]) await confirmSubOperation(rows[index]);
+      } catch (e) { alert(e.message); }
+    }
+
+    function confirmBatchCleanSubs() { alert('请逐条核查资源并选择退订方式'); }
 
     async function loadTransferQueue() {
       const container = document.getElementById('transferQueueContainer');

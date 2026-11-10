@@ -89,10 +89,18 @@ def parse_episode(filename: str, filepath: str = "", file_size: int = 0) -> Pars
     if re.search(r"\b(SP\d*|OVA\d*|OAD\d*|番外|特别篇|特典)\b", filename, re.IGNORECASE):
         result.is_special = True
 
+    classification_name = filename
+    episode_tag = re.search(r"[Ss]\d{1,2}[Ee]\d+", filename)
+    if episode_tag and " - " in filename[:episode_tag.start()]:
+        classification_name = filename[episode_tag.start():]
+        title_tokens = re.findall(r"\w+", filename[:episode_tag.start()].rstrip(" -._"))
+        if title_tokens:
+            title_pattern = r"[\W_]*".join(re.escape(t) for t in title_tokens)
+            classification_name = re.sub(title_pattern, "", classification_name, flags=re.I)
     if re.search(
         r"(?:^|[\s._\-\(\[])(?:Diary|Extra|Preview|Behind[._\s-]the[._\s-]Scenes|Making[._\s-]of|Cut|Clip|Tape)(?:$|[\s._\-\)\]\d])|"
         r"(?:日记|花活儿|花絮|彩蛋|纯享(?:版)?|会员版|采访|访谈|先行片|先导(?:片)?|预告(?:片)?|母带(?:版)?|切片|看点(?:版)?|片段|加更(?:版|期)?|特辑|收官(?:特辑)?)",
-        filename,
+        classification_name,
         re.IGNORECASE
     ):
         result.is_extra = True

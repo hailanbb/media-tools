@@ -149,7 +149,7 @@ class CloudDrive2Client:
             "Accept": "application/grpc-web+proto",
         }
 
-        max_retries = 3
+        max_retries = 3 if method in ("GetSubFiles", "FindFileByPath") else 0
         last_error: Exception | None = None
 
         for attempt in range(max_retries + 1):
@@ -165,6 +165,9 @@ class CloudDrive2Client:
                 if res.status_code != 200:
                     raise RuntimeError(f"CloudDrive2 HTTP 错误 [{res.status_code}]: {res.text}")
 
+                if "application/grpc-web" not in res.headers.get("content-type", "").lower():
+                    raise RuntimeError("CloudDrive2 返回了非 gRPC-Web 响应")
+                terminal_status = "grpc-status" in res.headers
                 # Headers 中的 gRPC 状态
                 if "grpc-status" in res.headers:
                     status = int(res.headers["grpc-status"])
@@ -178,6 +181,8 @@ class CloudDrive2Client:
                 data_frames: list[bytes] = []
                 while ptr + 5 <= len(raw):
                     flag, payload_len = struct.unpack_from(">BI", raw, ptr)
+                    if ptr + 5 + payload_len > len(raw):
+                        raise RuntimeError("CloudDrive2 响应帧不完整")
                     payload = raw[ptr + 5: ptr + 5 + payload_len]
                     ptr += 5 + payload_len
 
@@ -186,16 +191,21 @@ class CloudDrive2Client:
                     elif flag == 0x80:
                         trailer_str = payload.decode("utf-8", errors="replace")
                         status = 0; msg = ""
+                        terminal_status = False
                         for line in trailer_str.split("\r\n"):
                             lower = line.lower()
                             if lower.startswith("grpc-status:"):
+                                terminal_status = True
                                 try: status = int(line.split(":")[1].strip())
-                                except Exception: pass
+                                except ValueError:
+                                    raise RuntimeError("CloudDrive2 返回无效状态码")
                             elif lower.startswith("grpc-message:"):
                                 msg = urllib.parse.unquote(line[line.find(":") + 1:].strip())
                         if status != 0:
                             raise GrpcError(status, msg)
 
+                if ptr != len(raw) or not terminal_status:
+                    raise RuntimeError("CloudDrive2 响应缺少有效终态")
                 return data_frames
 
             except GrpcError:
