@@ -124,9 +124,12 @@ async def get_task_seasons(
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
 
-    stmt = select(SeasonRecord).where(SeasonRecord.task_id == task_id, SeasonRecord.status.not_in(("manually_handled", "verified_complete")))
+    stmt = select(SeasonRecord).where(SeasonRecord.task_id == task_id, SeasonRecord.status.not_in(("manually_handled", "verified_complete", "cleaned_redundant", "source_absent")))
     if status:
-        stmt = stmt.where(SeasonRecord.status == status)
+        groups = {"archive_ready": ("archive_ready", "period_ready"),
+                  "review_needed": ("review_needed", "period_review", "identity_review", "already_archived"),
+                  "download_needed": ("download_needed", "period_missing")}
+        stmt = stmt.where(SeasonRecord.status.in_(groups.get(status, (status,))))
     stmt = stmt.order_by(SeasonRecord.show_name, SeasonRecord.season_number)
     result = await db.execute(stmt)
     records = result.scalars().all()
@@ -167,7 +170,7 @@ async def mark_season_handled(task_id: str, record_id: str, db: AsyncSession = D
         raise HTTPException(status_code=409, detail="请在初检结束后标记手动处理")
     recognized = json.loads(rec.recognized_episodes_json or "[]")
     is_anomaly = (
-        rec.status in ("already_archived", "unknown", "archive_check")
+        rec.status in ("already_archived", "unknown", "archive_check", "period_review", "identity_review")
         or not rec.total_episodes
         or (rec.status != "archive_ready" and max(recognized, default=0) > rec.total_episodes)
     )
@@ -175,8 +178,12 @@ async def mark_season_handled(task_id: str, record_id: str, db: AsyncSession = D
         raise HTTPException(status_code=409, detail="仅异常剧集可标记为手动处理")
     previous = rec.status
     changed = await db.execute(update(SeasonRecord).where(
-        SeasonRecord.id == record_id, SeasonRecord.status != "manually_handled"
+        SeasonRecord.id == record_id, SeasonRecord.status == previous
     ).values(status="manually_handled"))
+    if not changed.rowcount:
+        await db.refresh(rec)
+        if rec.status != "manually_handled":
+            raise HTTPException(status_code=409, detail="条目状态已更新，请刷新清单")
     if changed.rowcount:
         db.add(OperationLog(
             task_id=task_id, season_record_id=record_id, action="manually_handled", status="completed",

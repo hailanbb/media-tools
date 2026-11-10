@@ -322,14 +322,14 @@ class CloudDrive2Client:
                 return None
             raise
 
-    async def move_file(self, source_path: str, target_parent_path: str) -> dict[str, Any]:
+    async def move_file(self, source_path: str, target_parent_path: str, *, skip_existing: bool = False) -> dict[str, Any]:
         """移动文件/目录到目标父目录。"""
         norm_src = source_path.rstrip("/")
         norm_dest = target_parent_path.rstrip("/") or "/"
         req_pb = (
             _encode_string_field(1, norm_src) +
             _encode_string_field(2, norm_dest) +
-            _encode_int_field(3, 0) +    # ConflictPolicy = Overwrite
+            _encode_int_field(3, 2 if skip_existing else 0) +    # Skip / Overwrite
             _encode_bool_field(4, True)   # moveAcrossClouds
         )
         frames = await self._call_rpc("MoveFile", req_pb)

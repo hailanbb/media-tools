@@ -385,7 +385,7 @@ class TestArchiveEvidence(unittest.IsolatedAsyncioTestCase):
                 return_value=(226637, {1: {"total": total, "finished": True}}))):
             result = await run_inspection("case", src, cd2_client=disk, tmdb_client=AsyncMock(),
                                           archive_root="/dst", global_source_root="/src")
-        self.assertEqual(result.archive_check_count + sum(s.status == "verified_complete" for s in result.seasons), 1)
+        self.assertEqual(len(result.seasons), 1)
         disk.delete_file.assert_not_awaited()
         disk.move_file.assert_not_awaited()
         return result.seasons[0]
@@ -407,6 +407,7 @@ class TestArchiveEvidence(unittest.IsolatedAsyncioTestCase):
 
     async def test_alias_same_id_and_season_is_read_only(self):
         d = await self.inspect([("S01E01.mkv", 100)], [("S01E01.mkv", 100)], total=1, alias=True)
+        self.assertEqual(d.status, "already_archived")
         self.assertIn("别名", d.status_detail)
         self.assertIn("潜能探案组", d.archive_target_path)
         self.assertEqual(d.missing_episodes, [])

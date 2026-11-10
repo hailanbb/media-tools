@@ -84,7 +84,7 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.10</span>
+              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.11</span>
             </div>
             <!-- 完善后的命名 -->
             <p class="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">智能媒体库整理与归档工作台</p>
@@ -824,9 +824,9 @@
         <button onclick="closeModal('cleanRedundantModal')" class="text-slate-400 hover:text-slate-600"><i class="fa-solid fa-xmark"></i></button>
       </div>
       <div class="text-xs space-y-2 p-3.5 rounded-lg bg-purple-50/50 dark:bg-purple-950/20 text-slate-600 dark:text-slate-400 font-mono">
-        <div class="text-purple-700 dark:text-purple-400 font-bold">✓ 目标归档库 (nas.finish) 已完整保存该季，源端目录为历史冗余/残卷</div>
+        <div class="text-purple-700 dark:text-purple-400 font-bold">归档库已包含本季源端正片，删除前会再次核对</div>
         <div>• 拟删除源端季目录，释放网盘冗余占用</div>
-        <div>• 若删除后源端剧集目录无其他季度与视频，将自动清理源端空壳目录</div>
+        <div>只处理所选源季。源季中的 NFO、海报等附件会随目录删除。</div>
       </div>
       <div class="flex justify-end gap-2 pt-2">
         <button onclick="closeModal('cleanRedundantModal')" class="px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-xs">取消</button>
@@ -1267,23 +1267,13 @@
       triggerStopTask(currentTaskId);
     }
 
-    function seasonAnomaly(status, total, maxRecognized) {
-      if (status === 'already_archived') return 'already_archived';
-      if (status === 'unknown' || !total) return 'unknown_meta';
-      if (status !== 'archive_ready' && maxRecognized > total) return 'episode_overflow';
+    function seasonCategory(status, legacyCheck = false) {
+      if (legacyCheck || ['archive_check', 'unknown'].includes(status)) return 'anomaly';
+      if (['archive_ready', 'period_ready'].includes(status)) return 'archive';
+      if (['review_needed', 'period_review', 'identity_review', 'already_archived'].includes(status)) return 'review';
+      if (['download_needed', 'period_missing'].includes(status)) return 'download';
+      if (status === 'airing') return 'airing';
       return '';
-    }
-
-    function fileCheckAdvice(s) {
-      const note = s.status_detail || '';
-      if (note.includes('另有资料未列')) return '请查看额外期号是否为加更或命名错误；确认后可改名、保留，或标记已手动处理';
-      if (note.includes('全部正片分段')) return '正片上下段已齐，无需补集；只在需要释放空间时，核对同号整期版是否重复';
-      if (note.includes('分段')) return '请查看同号文件是否分别为上、下段，或一个整期文件；确认编号方式后可标记已手动处理';
-      if (note.includes('已核实') && /([0-9]+)\/\1 集/.test(note)) return '归档已齐，无需补集；可保留源端文件，确认后点击“已手动处理”';
-      if (note.includes('未完成')) return '本次核对未完成，请重新初检';
-      if (note.includes('源季目录只有')) return '源端只剩附件；可直接保留，确认后点击“已手动处理”';
-      if (s.local_episode_count === 0) return '本层没有可识别视频，请查看目录内容；确认后点击“已手动处理”';
-      return '请根据下列文件情况核对内容与归属';
     }
 
     async function selectTask(taskId) {
@@ -1328,40 +1318,35 @@
             const recEps = s.recognized_episodes || [];
             const maxRec = recEps.length > 0 ? Math.max(...recEps) : 0;
 
-            // 智能识别异常剧集（包括归档已有残留、官方集数失真/拆分冲突、官方未收录）
+            // 按初检结论分流，并兼容旧版保存的核对提示。
             // 旧初检只保存视频数量，不能据此推断归档集数或残留文件类型。
             const legacyCheck = s.status === 'review_needed' && note.endsWith('但源端未识别到正片集号，需人工复核');
             if (legacyCheck && s.local_episode_count === 0) {
               note = '上次初检在源季本层找到 0 个视频。请重新初检核对归档情况；可保留源端附件。';
             }
-            const anomalySubtype = (s.status === 'archive_check' || legacyCheck)
-              ? 'file_check' : seasonAnomaly(s.status, total, maxRec);
-            const isAnomaly = Boolean(anomalySubtype);
-
-            let catKey = 'airing';
-            if (isAnomaly) {
-              catKey = 'anomaly';
-            } else if (s.status === 'archive_ready') {
-              catKey = 'archive';
-            } else if (s.status === 'review_needed') {
-              catKey = 'review';
-            } else if (s.status === 'download_needed') {
-              catKey = 'download';
-            } else if (s.status === 'airing') {
-              catKey = 'airing';
-            }
+            const catKey = seasonCategory(s.status, legacyCheck);
+            if (!catKey) continue;
+            const isAnomaly = catKey === 'anomaly';
+            const anomalySubtype = isAnomaly ? (s.status === 'unknown' ? 'unknown_meta' : 'file_check') : '';
 
             let actionType = 'archive', actionText = '一键归档';
             if (catKey === 'anomaly') {
-              if (anomalySubtype === 'already_archived') { actionType = 'clean_redundant'; actionText = '清理源端'; }
-              else if (anomalySubtype === 'file_check') { actionType = 'inspect_info'; actionText = '处理说明'; }
+              if (anomalySubtype === 'file_check') { actionType = 'inspect_info'; actionText = '处理说明'; }
               else { actionType = 'calibrate'; actionText = '校准集数'; }
             } else if (catKey === 'review') { actionType = 'clean'; actionText = '清理冗余'; }
             else if (catKey === 'download') { actionType = 'download'; actionText = '推送补缺'; }
             else if (catKey === 'airing') { actionType = 'skip'; actionText = '留源'; }
 
+            const checkOnly = ['identity_review', 'period_review'].includes(s.status) ||
+              (s.status === 'review_needed' && total && maxRec > total);
+            if (checkOnly) { actionType = 'inspect_info'; actionText = '查看依据'; }
+            if (s.status === 'period_ready') actionText = '保留全部版本归档';
+            if (s.status === 'already_archived') { actionType = 'clean_redundant'; actionText = '删除源端（本季）'; }
             const uniqueCount = recEps.length;
             let statusText = `${uniqueCount}/${total || '?'}集`;
+            if (['period_missing', 'period_review'].includes(s.status)) {
+              statusText = s.status === 'period_missing' ? `确认缺 ${missing.length} 期 / 全 ${total} 期` : `全 ${total} 期 · 编号待核对`;
+            }
             if (dup && dup.length > 0) {
               statusText += `，第 ${dup.join("、")} 集有多个版本`;
             }
@@ -1861,22 +1846,18 @@
         banner.innerHTML = `
           <i class="fa-solid fa-triangle-exclamation text-amber-500 text-sm mt-0.5"></i>
           <div class="flex-1 space-y-1">
-            <div class="font-bold text-amber-900 dark:text-amber-300">待复核与冗余清理：已锁定最佳保留版本</div>
-            <div class="text-slate-600 dark:text-slate-300">点击单项或批量一键清理冗余，<b>外挂字幕 (.srt/.ass) 与剧集海报 100% 保护不删</b>。</div>
+            <div class="font-bold text-amber-900 dark:text-amber-300">待复核清理</div>
+            <div class="text-slate-600 dark:text-slate-300">可批量勾选重复版本。作品归属、编号差异与归档已覆盖的源季请按条目操作。</div>
           </div>`;
       } else if (currentCategory === 'anomaly' || currentCategory === 'already_archived') {
-        if (selectAllLabel) selectAllLabel.textContent = "全选归档库已有项";
-        batchContainer.innerHTML = `
-          <button id="batchActionButton" onclick="executeBatchCleanRedundant()" disabled class="px-4 py-2 rounded-lg bg-purple-600 hover:bg-purple-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold shadow-md shadow-purple-600/20 transition flex items-center space-x-1.5">
-            <i class="fa-solid fa-trash-can text-xs"></i>
-            <span id="batchActionBtnText">批量清理源端冗余残留 (0)</span>
-          </button>`;
+        if (selectAllLabel) selectAllLabel.textContent = "逐项核对";
+        batchContainer.innerHTML = '';
         banner.className = "p-3.5 rounded-xl bg-purple-50 dark:bg-purple-950/30 border border-purple-200 dark:border-purple-800/60 flex items-start space-x-3 text-xs";
         banner.innerHTML = `
           <i class="fa-solid fa-server text-purple-600 text-sm mt-0.5"></i>
           <div class="flex-1 space-y-1">
-            <div class="font-bold text-purple-900 dark:text-purple-300">归档库已有清单：目标归档库已完整归档该季</div>
-            <div class="text-slate-600 dark:text-slate-300">源端目录（nas）中的文件为历史残留或散碎残卷。确认后可一键清理源端残留，安全释放存储空间。</div>
+            <div class="font-bold text-purple-900 dark:text-purple-300">仍需查明原因的剧季</div>
+            <div class="text-slate-600 dark:text-slate-300">查看条目中的目录或资料问题。完成核对后可点击“已手动处理”。</div>
           </div>`;
       } else if (currentCategory === 'download') {
         if (selectAllLabel) selectAllLabel.textContent = "全选待补缺项";
@@ -1953,11 +1934,7 @@
         let anomalyTagHtml = '';
         if (item.isAnomaly) {
           if (item.anomalySubtype === 'file_check') {
-            anomalyTagHtml = '<span class="text-xs text-amber-700">文件内容或编号方式待核对</span>';
-          } else if (item.anomalySubtype === 'already_archived') {
-            anomalyTagHtml = `<span class="text-[10px] px-1.5 py-0.5 rounded bg-purple-100 dark:bg-purple-950/70 text-purple-700 dark:text-purple-400 font-semibold border border-purple-200">归档库已有残留</span>`;
-          } else if (item.anomalySubtype === 'episode_overflow') {
-            anomalyTagHtml = `<span class="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-950/70 text-amber-700 dark:text-amber-400 font-semibold border border-amber-200">本地集号超出当前资料</span>`;
+            anomalyTagHtml = '<span class="text-xs text-amber-700">目录或文件待核实</span>';
           } else if (item.anomalySubtype === 'unknown_meta') {
             anomalyTagHtml = `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 font-semibold border border-slate-200">官方无集数信息</span>`;
           }
@@ -1966,7 +1943,7 @@
         return `
           <div class="app-card rounded-xl p-4 transition flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-l-4 border-l-${badgeColor}-500">
             <div class="flex items-start space-x-3.5 flex-1 min-w-0">
-              <input type="checkbox" name="itemCheck" ${currentCategory === 'airing' ? 'disabled hidden' : ''} value="${item.id}" onchange="updateSelection()" class="mt-1 w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer accent-indigo-600">
+              <input type="checkbox" name="itemCheck" ${currentCategory === 'airing' || currentCategory === 'anomaly' || ['inspect_info', 'clean_redundant'].includes(item.actionType) ? 'disabled hidden' : ''} value="${item.id}" onchange="updateSelection()" class="mt-1 w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer accent-indigo-600">
               <div class="w-10 h-14 rounded bg-slate-100 dark:bg-slate-800 flex-shrink-0 flex items-center justify-center text-slate-400 border border-slate-200 dark:border-slate-700">
                 <i class="fa-solid fa-film text-lg"></i>
               </div>
@@ -1984,13 +1961,13 @@
                   ${item.pathB ? `<span>${escapeHtml(item.pathB)}</span>` : ''}
                 </div>
                 <div class="text-[11px] text-slate-600 dark:text-slate-400 flex items-center gap-2">
-                  <span class="text-${badgeColor}-600 dark:text-${badgeColor}-400 font-medium">👉 ${escapeHtml(item.anomalySubtype === 'file_check' ? fileCheckAdvice(item.raw) : item.note || '')}</span>
+                  <span class="text-${badgeColor}-600 dark:text-${badgeColor}-400 font-medium">👉 ${escapeHtml(item.note || '')}</span>
                   ${item.dest ? `<span>• ${escapeHtml(item.dest)}</span>` : ''}
                 </div>
               </div>
             </div>
             <div class="flex items-center space-x-2 flex-shrink-0 self-end sm:self-center flex-wrap gap-y-1">
-              ${currentCategory === 'anomaly' ? `
+              ${currentCategory === 'anomaly' || item.actionType === 'inspect_info' ? `
                 <button onclick="markSeasonHandled('${item.id}', this)" class="px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 text-slate-600 dark:text-slate-300 text-xs font-semibold disabled:opacity-50">
                   <i class="fa-solid fa-check mr-1"></i>已手动处理
                 </button>
@@ -2001,16 +1978,16 @@
                   <span>删除源端</span>
                 </button>
               ` : ''}
-              ${(item.anomalySubtype !== 'file_check' && item.duplicates && item.duplicates.length > 0) ? `
+              ${(!['inspect_info', 'clean_redundant'].includes(item.actionType) && item.duplicates && item.duplicates.length > 0) ? `
                 <button onclick="openCleanPreview('${item.id}')" class="px-2.5 py-1.5 rounded-lg border border-amber-200 dark:border-amber-700 bg-white dark:bg-slate-800 text-amber-600 dark:text-amber-400 text-xs font-semibold hover:bg-amber-50 dark:hover:bg-amber-950/30 transition flex items-center gap-1.5 shadow-sm" title="查看保留版本与拟删除文件">
                   <i class="fa-solid fa-file-magnifying-glass text-xs"></i>
                   <span>清理预览</span>
                 </button>
               ` : ''}
-              ${currentCategory === 'airing' ? '<span class="text-xs text-slate-500">连载中，文件已留在源目录</span>' : (currentCategory === 'anomaly' && item.anomalySubtype === 'already_archived') ? `
+              ${currentCategory === 'airing' ? '<span class="text-xs text-slate-500">连载中，文件已留在源目录</span>' : (item.actionType === 'clean_redundant') ? `
                 <button onclick="cleanSourceRedundantSingle('${item.id}')" class="px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-700 text-white text-xs font-semibold shadow-sm transition flex items-center gap-1.5">
                   <i class="fa-solid fa-trash-can text-xs"></i>
-                  <span>清理源端</span>
+                  <span>删除源端（本季）</span>
                 </button>
               ` : `
                 <button onclick="handleSingleAction('${item.actionType}', '${item.id}')" class="px-3 py-1.5 rounded-lg ${actionBtnClass} text-xs font-semibold shadow-sm transition flex items-center gap-1.5">
@@ -2025,7 +2002,7 @@
     }
 
     function toggleSelectAll(master) {
-      document.querySelectorAll('input[name="itemCheck"]').forEach(cb => cb.checked = master.checked);
+      document.querySelectorAll('input[name="itemCheck"]:not(:disabled)').forEach(cb => cb.checked = master.checked);
       updateSelection();
     }
 
@@ -2241,7 +2218,7 @@
         name = item ? `${item.show} - ${item.season}` : '';
       }
       openModal('cleanRedundantModal');
-      document.getElementById('cleanRedundantTitle').textContent = `源端冗余清理确认: ${name}`;
+      document.getElementById('cleanRedundantTitle').textContent = `删除源端（本季） ${name} · ${findItemByRecordId(recordId)?.pathA || ""}`;
     }
 
     // ── 10.3 人工校准官方总集数 ──────────────────────────────
@@ -2354,7 +2331,7 @@
 
       if (type === 'inspect_info') {
         const item = findItemByRecordId(recordId);
-        alert(fileCheckAdvice(item?.raw || {}) + '\n\n' + (item?.note || '') +
+        alert((item?.note || '') +
           '\n\n完成人工核对后，可点“已手动处理”移除此条。');
       } else if (type === 'calibrate') {
         openCalibrateModal(recordId);

@@ -226,17 +226,28 @@ async def execute_gap_fill_download(
             log.warning("获取 MoviePilot 活跃下载队列失败，继续直连检索: %s", q_err)
 
         for rec in records:
-            if rec.status in ("archive_check", "manually_handled", "verified_complete"):
+            if rec.status in ("archive_check", "period_ready", "period_review", "identity_review", "already_archived", "manually_handled", "verified_complete"):
                 errors.append(f"{rec.show_name}：归档核对记录仅供查看")
                 continue
             from app.clients.clouddrive2 import CloudDrive2Client
             from app.core.segments import segment_number
+            by_period = rec.status == "period_missing"
             disk = CloudDrive2Client()
             try:
                 source_files = await disk.list_files(rec.season_path, force_refresh=True)
+                if by_period:
+                    from app.core.inspector import run_inspection
+                    inspection = await run_inspection(rec.task_id, rec.show_path, disk, mp,
+                                                      archive_root=settings.archive_root,
+                                                      global_source_root=settings.source_root)
+                    fresh = next((s for s in inspection.seasons if s.season_path == rec.season_path
+                                  and s.status == "period_missing" and str(s.tmdb_id) == str(rec.tmdb_id)), None)
+                    if not fresh:
+                        errors.append(f"{rec.show_name}：缺期情况或作品信息已变化，请重新初检")
+                        continue
             finally:
                 await disk.close()
-            if any(segment_number(f.get("name", "")) is not None for f in source_files):
+            if not by_period and any(segment_number(f.get("name", "")) is not None for f in source_files):
                 errors.append(f"{rec.show_name}: 上下段文件需先核对，暂缓补缺")
                 continue
             show_name = rec.show_name
@@ -263,6 +274,8 @@ async def execute_gap_fill_download(
                 except Exception:
                     pass
 
+            if by_period:
+                missing_eps = sorted(set(missing_eps) & set(fresh.missing_episodes))
             total_eps = rec.total_episodes or (max(missing_eps) if missing_eps else 0)
 
             # 如果没有缺失集号，且状态不是 download_needed，跳过
@@ -282,7 +295,10 @@ async def execute_gap_fill_download(
                         dl_season = int(s_match.group(1)) if s_match else None
                     if dl_season is None or dl_season == season_num:
                         ep_field = str(dl.get("episode") or "")
-                        in_progress_eps.update(parse_active_episodes(ep_field or dl_name, total_eps))
+                        if by_period:
+                            in_progress_eps.update(int(n) for n in re.findall(r"第\s*(\d+)\s*期", dl_name))
+                        else:
+                            in_progress_eps.update(parse_active_episodes(ep_field or dl_name, total_eps))
 
             actually_needed = [ep for ep in missing_eps if ep not in in_progress_eps]
             if in_progress_eps and not actually_needed:
@@ -332,10 +348,20 @@ async def execute_gap_fill_download(
                 seasons = meta.get("season_list") or ([meta.get("begin_season")] if meta.get("begin_season") else [])
                 if seasons and seasons[0] != season_num:
                     continue
+                if by_period:
+                    title = str(t.get("title") or "")
+                    period = re.findall(r"第\s*(\d+)\s*期", title)
+                    if (len(period) != 1 or int(period[0]) not in missing_eps or segment_number(title)
+                            or seasons != [season_num] or str(m_info.get("tmdb_id") or "") != str(tmdb_id_num)
+                            or re.search(r"加更|纯享|花絮|预告|[上中下][篇集部]|期\s*[（(【\[]?\s*[上中下]|特别版|\bpart\b", title)):
+                        continue
+                    # 明确标期的单条资源只覆盖该期，避免被通用选种逻辑解释成整季包。
+                    c = {**c, "meta_info": {**meta, "episode_list": [int(period[0])]}}
                 eligible.append(c)
 
             if not eligible:
-                errors.append(f"{clean_name} S{season_num:02d}: 检索到 {len(raw_results)} 条，但无做种数≥2且季号匹配的资源")
+                reason = "未找到明确标期且作品、季号匹配的整期资源" if by_period else "无做种数≥2且季号匹配的资源"
+                errors.append(f"{clean_name} S{season_num:02d}: 检索到 {len(raw_results)} 条，{reason}")
                 continue
 
             # 选种决策
@@ -357,7 +383,7 @@ async def execute_gap_fill_download(
                 cleared_info: dict[str, Any] = {"cleared_count": 0, "records": []}
                 try:
                     target_eps_for_clean = None if is_sp else set(covered_eps)
-                    clean_res = await mp.clear_transfer_history_for_episodes(
+                    clean_res = cleared_info if by_period else await mp.clear_transfer_history_for_episodes(
                         title=clean_name,
                         season=season_num,
                         episodes=target_eps_for_clean,

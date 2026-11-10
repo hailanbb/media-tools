@@ -15,7 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.clients.clouddrive2 import CloudDrive2Client
 from app.config import get_settings
 from app.core.episode_parser import is_subtitle_file, is_video_file, parse_episode
-from app.core.inspector import _parse_season_number, diagnose_season
+from app.core.inspector import _parse_season_number, _verified_video, diagnose_season
+from app.core.segments import segment_number
 from app.core.review_engine import generate_review_clean_plan
 from app.database import get_db
 from app.models.operation import OperationLog
@@ -123,11 +124,11 @@ async def _refresh_task_summary(task_id: str, db: AsyncSession) -> None:
 
     stmt = select(SeasonRecord).where(SeasonRecord.task_id == task_id)
     res = await db.execute(stmt)
-    all_seasons = [s for s in res.scalars().all() if s.status not in ("manually_handled", "verified_complete")]
+    all_seasons = [s for s in res.scalars().all() if s.status not in ("manually_handled", "verified_complete", "cleaned_redundant", "source_absent")]
 
-    archive_ready_count = sum(1 for s in all_seasons if s.status == "archive_ready")
-    review_needed_count = sum(1 for s in all_seasons if s.status == "review_needed")
-    download_needed_count = sum(1 for s in all_seasons if s.status == "download_needed")
+    archive_ready_count = sum(1 for s in all_seasons if s.status in ("archive_ready", "period_ready"))
+    review_needed_count = sum(1 for s in all_seasons if s.status in ("review_needed", "period_review", "identity_review"))
+    download_needed_count = sum(1 for s in all_seasons if s.status in ("download_needed", "period_missing"))
     airing_count = sum(1 for s in all_seasons if s.status == "airing")
     already_archived_count = sum(1 for s in all_seasons if s.status == "already_archived")
 
@@ -169,14 +170,28 @@ async def execute_archive(
 
     try:
         for rec in records:
-            if rec.status != "archive_ready":
+            if rec.status not in ("archive_ready", "period_ready"):
                 errors.append(f"{rec.show_name} S{rec.season_number:02d}: 当前状态为 {rec.status}，跳过")
                 continue
 
             source_season_path = rec.season_path
-            from app.core.segments import segment_number
             contents = await cd2.list_files(source_season_path, force_refresh=True)
-            if any(segment_number(f.get("name", "")) is not None for f in contents):
+            preserve_versions = rec.status == "period_ready"
+            if preserve_versions:
+                from app.clients.moviepilot import MoviePilotClient
+                from app.core.inspector import run_inspection
+                mp = MoviePilotClient()
+                try:
+                    verified = await run_inspection(rec.task_id, rec.show_path, cd2, mp,
+                                                    archive_root=settings.archive_root,
+                                                    global_source_root=settings.source_root)
+                    if not any(s.season_path == source_season_path and s.status == "period_ready"
+                               and s.archive_target_path == rec.archive_target_path for s in verified.seasons):
+                        errors.append(f"{rec.show_name}：全季分段或归档位置已变化，请重新初检")
+                        continue
+                finally:
+                    await mp.close()
+            if not preserve_versions and any(segment_number(f.get("name", "")) is not None for f in contents):
                 errors.append(f"{rec.show_name}: 请先核对上下段和整期版")
                 continue
             archive_target = rec.archive_target_path
@@ -214,6 +229,9 @@ async def execute_archive(
                     )),
                     None
                 )
+                if existing_season and preserve_versions:
+                    errors.append(f"{rec.show_name}：目标季已存在，保留版本归档已停止")
+                    continue
                 if existing_season:
                     existing_season_path = existing_season.get("path") or f"{target_parent}/{existing_season.get('name')}"
                     log.info("发现目标归档库已存在同季目录: %s，启动季内文件级增量合并通道 (F08)", existing_season_path)
@@ -334,7 +352,13 @@ async def execute_archive(
 
                 log.info("执行归档迁移: %s -> %s", source_season_path, target_parent)
 
-                move_result = await cd2.move_file(source_season_path, target_parent)
+                if preserve_versions:
+                    move_result = await cd2.move_file(source_season_path, target_parent, skip_existing=True)
+                    if any(f["path"] == source_season_path for f in await cd2.list_files(rec.show_path, force_refresh=True)):
+                        errors.append(f"{rec.show_name}：源季仍存在，网盘尚未确认归档完成")
+                        continue
+                else:
+                    move_result = await cd2.move_file(source_season_path, target_parent)
                 if move_result.get("success", True):
                     success_count += 1
                     rec.status = "archived"
@@ -356,8 +380,8 @@ async def execute_archive(
                     )
                     db.add(op_log)
 
-                    # 【源端零残留与公共资产完备归档 (F01 强化安全门禁)】
-                    if rec.show_path and rec.show_path != source_season_path:
+                    # 保留版本归档只搬移所选季。
+                    if not preserve_versions and rec.show_path and rec.show_path != source_season_path:
                         await _safe_cleanup_source_show_dir(cd2, rec.show_path, target_parent)
                 else:
                     err_msg = move_result.get("errorMessage", "未知错误")
@@ -417,8 +441,8 @@ async def clean_duplicates(
         for rec in records:
             season_path = rec.season_path
 
-            if rec.status in ("archive_check", "manually_handled", "verified_complete"):
-                errors.append(f"{rec.show_name}：归档核对记录只供查看")
+            if rec.status in ("archive_check", "period_review", "period_ready", "period_missing", "identity_review", "already_archived", "manually_handled", "verified_complete"):
+                errors.append(f"{rec.show_name}：当前处理方式不适用重复版本清理")
                 continue
 
             # 获取该季目录在 CD2 上的实时最新文件（强制刷新缓存）
@@ -643,7 +667,7 @@ async def clean_source_redundant(
     执行步骤：
     1. 校验源季目录真实性；
     2. 安全删除源端季目录 (cd2.delete_file)；
-    3. 检查源端剧集目录，若已无其他季且无视频文件，自动级联清理源端剧集目录空壳；
+    3. 保留剧集父目录和其他季度；
     4. 更新数据库状态为 cleaned_redundant，写入操作日志；
     5. 级联刷新任务统计。
     """
@@ -715,6 +739,28 @@ async def clean_source_redundant(
 
             # 门禁 3: 重新实时获取源端与目标端文件清单，执行集号与独有附件覆盖比对
             try:
+                import re
+                expected_target = norm_archive_root + norm_src[len(norm_source_root):]
+                if norm_src != source_season_path or norm_target != archive_target:
+                    raise ValueError("路径含未规范化的目录层级")
+                if (posixpath.dirname(norm_src) != show_path or
+                        _parse_season_number(posixpath.basename(norm_src)) != rec.season_number):
+                    raise ValueError("源目录并非本剧的独立季目录")
+                if norm_target != expected_target:
+                    src_parent = posixpath.dirname(expected_target)
+                    dst_parent = posixpath.dirname(norm_target)
+                    tag = re.search(r"\[tmdbid[=:](\d+)\]", posixpath.basename(src_parent), re.I)
+                    if (not tag or str(rec.tmdb_id) != tag[1]
+                            or posixpath.dirname(src_parent) != posixpath.dirname(dst_parent)):
+                        raise ValueError("归档别名目录的作品或分类不匹配")
+                    category = await cd2.list_files(posixpath.dirname(dst_parent), force_refresh=True)
+                    matches = [i["path"] for i in category if i["isDirectory"]
+                               and re.search(rf"\[tmdbid[=:]{tag[1]}\]", i["name"], re.I)]
+                    seasons = await cd2.list_files(dst_parent, force_refresh=True)
+                    paths = [i["path"] for i in seasons if i["isDirectory"]
+                             and _parse_season_number(i["name"]) == rec.season_number]
+                    if matches != [dst_parent] or paths != [norm_target]:
+                        raise ValueError("同作品及季号未匹配到唯一归档目录")
                 src_files = await cd2.list_files(source_season_path, force_refresh=True)
                 target_files = await cd2.list_files(archive_target, force_refresh=True)
 
@@ -723,30 +769,31 @@ async def clean_source_redundant(
                 unrecognized_videos: list[dict] = []
                 for sf in src_files:
                     if sf.get("isDirectory"):
-                        continue
+                        raise ValueError("源季内另有子目录：" + sf["name"])
                     sf_name = sf.get("name", "")
                     if is_video_file(sf_name):
                         p_sf = parse_episode(sf_name, sf.get("path", ""), sf.get("size", 0))
-                        if not p_sf.is_extra:
-                            if p_sf.episode_numbers:
-                                src_video_eps.update(p_sf.episode_numbers)
-                            else:
-                                unrecognized_videos.append(sf)
+                        if _verified_video(p_sf, rec.season_number) and not segment_number(sf_name):
+                            src_video_eps.update(p_sf.episode_numbers)
+                        else:
+                            unrecognized_videos.append(sf)
                     elif is_subtitle_file(sf_name):
                         src_subs.append(sf)
+                    elif posixpath.splitext(sf_name)[1].lower() not in {".nfo", ".jpg", ".jpeg", ".png", ".webp"}:
+                        raise ValueError("源端另有待核对文件：" + sf_name)
 
                 target_video_eps: set[int] = set()
-                target_sub_names: set[str] = set()
+                target_sub_sizes = {}
                 for tf in target_files:
                     if tf.get("isDirectory"):
                         continue
                     tf_name = tf.get("name", "")
                     if is_video_file(tf_name):
                         p_tf = parse_episode(tf_name, tf.get("path", ""), tf.get("size", 0))
-                        if not p_tf.is_extra:
+                        if _verified_video(p_tf, rec.season_number) and not segment_number(tf_name):
                             target_video_eps.update(p_tf.episode_numbers)
                     elif is_subtitle_file(tf_name):
-                        target_sub_names.add(tf_name.lower())
+                        target_sub_sizes[tf_name.casefold()] = tf.get("size")
 
                 # 核验 A: 源端若未识别到任何有效正片集号，或含有无法识别集号的正片视频，绝对拦截删除（源集数与记录不变）
                 if unrecognized_videos:
@@ -766,21 +813,36 @@ async def clean_source_redundant(
 
                 # 核验 B: 目标端必须完整包含源端所有正片集号 (source_eps ⊆ target_eps)，证据不足坚决拦截（源集数与记录不变）
                 uncovered_eps = sorted(src_video_eps - target_video_eps)
+                if rec.total_episodes and not set(range(1, rec.total_episodes + 1)) <= target_video_eps:
+                    raise ValueError("归档目录已无法核实全季覆盖")
                 if uncovered_eps:
                     err_msg = f"{rec.show_name} S{rec.season_number:02d}: 源端含有归档库未包含的集数 {uncovered_eps}，拦截删除！"
                     log.warning(err_msg)
                     errors.append(err_msg)
                     continue
 
+                if any(posixpath.dirname(f["path"]) != norm_src for f in src_files):
+                    raise ValueError("文件路径与源季目录不一致")
                 # 核验 C: 源端独有外挂字幕自动迁移至目标库
                 for sub in src_subs:
                     s_name = sub.get("name", "")
-                    if s_name.lower() not in target_sub_names:
+                    if s_name.casefold() in target_sub_sizes and sub.get("size") != target_sub_sizes[s_name.casefold()]:
+                        raise ValueError("两端存在同名但大小不同的字幕：" + s_name)
+                    if s_name.casefold() not in target_sub_sizes:
                         try:
-                            await cd2.move_file(sub.get("path"), archive_target)
+                            moved = await cd2.move_file(sub.get("path"), archive_target, skip_existing=True)
+                            if not moved.get("success", False):
+                                raise ValueError("网盘未确认字幕移动成功")
                             log.info("源端残留清理前已安全迁移独有字幕: %s -> %s", s_name, archive_target)
                         except Exception as sub_mv_err:
-                            log.warning("迁移独有字幕失败 (%s): %s", s_name, sub_mv_err)
+                            raise ValueError(f"迁移字幕 {s_name} 失败") from sub_mv_err
+                moved_names = {s["name"] for s in src_subs if s["name"].casefold() not in target_sub_sizes}
+                def signature(files):
+                    return sorted((f["path"], f.get("size"), f.get("modified"), f.get("isDirectory"))
+                                  for f in files)
+                fresh_source = await cd2.list_files(source_season_path, force_refresh=True)
+                if signature(fresh_source) != signature([f for f in src_files if f["name"] not in moved_names]):
+                    raise ValueError("源季内容已变化，请重新初检")
 
             except Exception as chk_err:
                 err_msg = f"{rec.show_name} S{rec.season_number:02d}: 校验两端文件清单失败 ({chk_err})，安全拦截源端删除！"
@@ -809,11 +871,6 @@ async def clean_source_redundant(
                     }, ensure_ascii=False),
                 )
                 db.add(op_log)
-
-                # 2. 检查源剧集目录是否为空壳 (F01 强化门禁)
-                if show_path and show_path != source_season_path:
-                    target_parent = archive_target.rsplit("/", 1)[0] if "/" in archive_target else None
-                    await _safe_cleanup_source_show_dir(cd2, show_path, target_parent)
 
             except Exception as e:
                 err_msg = f"{rec.show_name} S{rec.season_number:02d}: 清理失败 - {str(e)[:150]}"
@@ -849,7 +906,7 @@ async def calibrate_episodes(
     if body.total_episodes is None or body.total_episodes <= 0:
         return StatusResponse(ok=False, message=f"非法总集数 ({body.total_episodes})，总集数必须为大于 0 的正整数")
 
-    if rec.status in ("archive_check", "manually_handled", "verified_complete"):
+    if rec.status in ("archive_check", "period_review", "period_ready", "period_missing", "identity_review", "already_archived", "manually_handled", "verified_complete"):
         return StatusResponse(ok=False, message="归档核对记录需通过重新初检更新")
 
     old_total = rec.total_episodes
@@ -896,7 +953,7 @@ async def delete_source_show(
     if not rec:
         return StatusResponse(ok=False, message="剧季记录不存在")
 
-    if rec.status in ("archive_check", "manually_handled", "verified_complete"):
+    if rec.status in ("archive_check", "period_review", "period_ready", "identity_review", "already_archived", "manually_handled", "verified_complete", "source_absent", "cleaned_redundant"):
         return StatusResponse(ok=False, message="归档核对记录仅供查看，保留源端")
 
     show_path = rec.show_path

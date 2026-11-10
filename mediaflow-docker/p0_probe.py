@@ -43,6 +43,8 @@ class Disk:
         for items in self.entries.values():
             items[:] = [item for item in items if item["path"] != path]
         return {"success": True}
+    async def move_file(self, source, target, **kwargs):
+        return {"success":False}
     async def close(self):
         pass
 
@@ -67,12 +69,25 @@ async def check_route(http, case, mode):
     disk = Disk({src:[item(src+"/"+n) for n in names],
                  dst:[item(dst+"/"+n) for n in target_names],
                  show:[item(src,directory=True), item(show+"/Extras",directory=True)]})
+    if mode == "nested":
+        disk.entries[src].append(item(src+"/Extras",directory=True))
+    if mode == "wrong-season":
+        disk.entries[dst] = [item(dst+"/X.S02E01.mkv"),item(dst+"/X.S02E02.mkv")]
+    if mode == "subtitle":
+        disk.entries[src].append(item(src+"/unique.srt"))
+    if mode == "alias":
+        alias_show = case + " [tmdbid=42]"
+        src_parent, dst_parent = "/qa/src/"+alias_show, "/qa/dst/别名 [tmdbid=42]"
+        show = src_parent
+        src, dst = src_parent+"/Season 1", dst_parent+"/S01"
+        disk = Disk({src:[item(src+"/"+n) for n in names], dst:[item(dst+"/"+n) for n in names],
+                     "/qa/dst":[item(dst_parent,directory=True)],dst_parent:[item(dst,directory=True)]})
     if mode == "unreadable":
         disk.entries.pop(dst)
     async with async_session() as db:
         db.add(Task(id=case, name=case, source_path=show))
         await db.flush()
-        db.add(SeasonRecord(id=case,task_id=case,show_name=case,show_path=show,
+        db.add(SeasonRecord(id=case,task_id=case,show_name=case,show_path=show,tmdb_id="42",
             season_path=src,season_number=1,status=state,archive_target_path=dst,
             total_episodes=2,local_episode_count=2,season_finished=True,
             recognized_episodes_json="[1,2]"))
@@ -88,7 +103,7 @@ async def check_route(http, case, mode):
     async with async_session() as db:
         rec=await db.get(SeasonRecord,case)
         after=rec.status if rec else None
-    if mode=="covered":
+    if mode in ("covered","alias"):
         ok=(resp.status_code==200 and out.get("ok") is True
             and disk.deleted==[src] and after=="cleaned_redundant")
     else:
@@ -119,7 +134,9 @@ async def main():
         if warm.status_code!=200:
             raise RuntimeError("harness initialization failed: "+str(warm.status_code))
         for case,mode in [("SAFE-01","stale"),("SAFE-02","same"),("SAFE-03","root"),
-                          ("SAFE-04","state"),("SAFE-05","unreadable"),("SAFE-06","covered")]:
+                          ("SAFE-04","state"),("SAFE-05","unreadable"),("SAFE-06","covered"),
+                          ("SAFE-07","nested"),("SAFE-08","wrong-season"),
+                          ("SAFE-09","subtitle"),("SAFE-10","alias")]:
             ok,detail=await check_route(http,case,mode)
             results.append({"id":case,"result":"PASS" if ok else "FAIL","evidence":detail})
         for case,total in [("PLAN-01",2),("PLAN-02",3)]:

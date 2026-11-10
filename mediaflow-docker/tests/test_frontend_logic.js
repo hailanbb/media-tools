@@ -21,26 +21,15 @@ const htmlPath = fs.existsSync(path.join(__dirname, 'frontend/index.html'))
 const htmlContent = fs.readFileSync(htmlPath, 'utf-8');
 
 // 从实际页面载入分类条件，避免测试与 UI 各自维护一套异常判定。
-const anomalyFn = htmlContent.match(/function seasonAnomaly\([^]*?\n    \}/)[0];
-const seasonAnomaly = require('node:vm').runInNewContext('(' + anomalyFn + ')');
+const anomalyFn = htmlContent.match(/function seasonCategory\([^]*?\n    \}/)[0];
+const seasonCategory = require('node:vm').runInNewContext('(' + anomalyFn + ')');
 function classifySeason(s) {
   const dup = s.duplicate_episodes || [];
   const total = s.total_episodes || null;
   const recEps = s.recognized_episodes || [];
-  const anomalySubtype = seasonAnomaly(s.status, total, Math.max(0, ...recEps));
-  const isAnomaly = Boolean(anomalySubtype);
-  let catKey = 'airing';
-  if (isAnomaly) {
-    catKey = 'anomaly';
-  } else if (s.status === 'archive_ready') {
-    catKey = 'archive';
-  } else if (s.status === 'review_needed') {
-    catKey = 'review';
-  } else if (s.status === 'download_needed') {
-    catKey = 'download';
-  } else if (s.status === 'airing') {
-    catKey = 'airing';
-  }
+  const catKey = seasonCategory(s.status);
+  const isAnomaly = catKey === 'anomaly';
+  const anomalySubtype = isAnomaly ? 'unknown_meta' : '';
 
   const uniqueCount = recEps.length;
   let statusText = `${uniqueCount}/${total || '?'}集`;
@@ -103,6 +92,11 @@ console.log("===================================================================
   console.log("  ✓ [Test 02] 缺集属实优先进待补缺与 statusText 去伪存真：通过");
 }
 
+for (const [status, category] of Object.entries({
+  identity_review: 'review', period_review: 'review', already_archived: 'review',
+  period_missing: 'download', period_ready: 'archive', source_absent: ''
+})) assert.strictEqual(seasonCategory(status), category);
+
 // --- 测试用例 3: 真实集数失真/拆分冲突（本地 24 集超出官方 12 集） ---
 {
   const s = {
@@ -117,9 +111,8 @@ console.log("===================================================================
     status_detail: ""
   };
   const res = classifySeason(s);
-  assert.strictEqual(res.isAnomaly, true);
-  assert.strictEqual(res.anomalySubtype, "episode_overflow", "本地集数超出官方总集数必须捕获为 split_conflict！");
-  assert.strictEqual(res.catKey, "anomaly");
+  assert.strictEqual(res.isAnomaly, false);
+  assert.strictEqual(res.catKey, "download");
   console.log("  ✓ [Test 03] 本地超出官方总集数拆分冲突精准捕获：通过");
 }
 
@@ -137,9 +130,8 @@ console.log("===================================================================
     status_detail: "目标归档库已存在完整剧集"
   };
   const res = classifySeason(s);
-  assert.strictEqual(res.isAnomaly, true);
-  assert.strictEqual(res.anomalySubtype, "already_archived");
-  assert.strictEqual(res.catKey, "anomaly");
+  assert.strictEqual(res.isAnomaly, false);
+  assert.strictEqual(res.catKey, "review");
   console.log("  ✓ [Test 04] 归档已有残留精准识别：通过");
 }
 

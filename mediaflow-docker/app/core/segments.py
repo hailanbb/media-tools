@@ -5,10 +5,10 @@ from app.core.episode_parser import parse_episode, is_video_file
 
 
 def segment_number(name: str) -> int | None:
-    m = re.search(r"(?:Part[ ._-]*(01|02|03|[ABC])\b|第\s*\d+\s*[期集][ ._-]*([上中下]))", name, re.I)
+    m = re.search(r"(?:Part[ ._-]*(0?[123]|[ABC])(?=[^a-z0-9]|$)|第\s*\d+\s*[期集][ ._-]*([上中下]))", name, re.I)
     if not m:
         return None
-    return {"A": 1, "B": 2, "C": 3, "01": 1, "02": 2, "03": 3,
+    return {"A": 1, "B": 2, "C": 3, "01": 1, "02": 2, "03": 3, "1": 1, "2": 2, "3": 3,
             "上": 1, "中": 2, "下": 2}[next(v for v in m.groups() if v).upper()]
 
 
@@ -26,7 +26,7 @@ def episode_segments(episodes: list[dict]) -> dict[int, list[int]]:
         parts = [3 if len(items) == 3 and re.search(r"第\s*\d+\s*期下", e.get("name", "")) else segment_number(e.get("name", "")) for e in items]
         if len(items) > 1 and (None in parts or len(set(parts)) != len(parts)):
             return {}
-        result[number] = parts if len(items) > 1 else [0]
+        result[number] = [p or 0 for p in parts]
     return result
 
 
@@ -61,3 +61,64 @@ def segment_report(files: list[dict], season: int, mapping: dict[int, list[int]]
     if extras:
         text += f"另有资料未列的期号 {extras}，需核对内容。"
     return text
+
+
+def diagnose_periods(files, season, mapping, ordinals, total, finished, archive_present):
+    """分别按期号和 TMDB 原集号核对，两个解释都覆盖不到的期才可报缺。"""
+    numbered = set()
+    explicit = set()
+    versions = defaultdict(set)
+    part_files = set()
+    samples = []
+    for item in files:
+        if item.get("isDirectory"):
+            return None
+        if not is_video_file(item["name"]):
+            continue
+        ep = parse_episode(item["name"], item.get("path", ""), item.get("size", 0))
+        if ep.is_extra or ep.is_special:
+            continue
+        if not ep.episode_numbers or ep.season_number not in (None, season) or ep.file_size_bytes <= 0:
+            return None
+        for number in ep.episode_numbers:
+            if len(samples) < 2 and item["name"] not in samples:
+                samples.append(item["name"])
+            if segment_number(item["name"]) is None:
+                numbered.add(number)
+                template = re.sub(r"(S\d+E|第\s*)\d+", r"\1#", item["name"], flags=re.I)
+                versions[template.casefold()].add(number)
+                part_files.add((number, 0))
+            else:
+                explicit.add(number)
+                part = segment_number(item["name"])
+                if 3 in mapping.get(number, []) and re.search(r"第\s*\d+\s*[期集]下", item["name"]):
+                    part = 3
+                part_files.add((number, part))
+    if not (numbered or explicit):
+        return None
+    expected = set(range(1, total + 1))
+    possible = (numbered | explicit | {ordinals[n] for n in numbered if n in ordinals}) & expected
+    gaps = sorted(expected - possible)
+    detail = f"本季共 {total} 期。"
+    if not finished:
+        return "airing", detail + f"当前分段资料列出 {len(mapping)} 期，尚未确认全季播毕，后续期数留源跟踪。", [], sorted((numbered | explicit) & expected)
+    if gaps and ordinals:
+        return "period_missing", detail + f"按期号和分段集号分别核对，两种编号下都缺第 {', '.join(map(str, gaps))} 期。补缺时请按期号选择资源。", gaps, sorted((numbered | explicit) & expected)
+    all_parts = {(n, p) for n, parts in mapping.items() for p in parts}
+    explicit_complete = set(mapping) == expected and all_parts <= part_files
+    linear_complete = (set(ordinals.values()) == expected and len(ordinals) > total
+                       and any(numbers == set(ordinals) for numbers in versions.values()))
+    if not archive_present and (explicit_complete or linear_complete) and all(v != [1] for v in mapping.values()):
+        evidence = "逐期核实了全部上下段" if explicit_complete else "同一版本的分段编号齐全"
+        return "period_ready", detail + evidence + "，可将整季连同其他版本一起归档。", [], sorted(expected)
+    if explicit_complete or linear_complete:
+        detail += "两库合计已覆盖全季。请比较源端与归档中同号文件的版本。"
+    else:
+        direct_gaps = sorted(expected - numbered - explicit)
+        flat_gaps = sorted(set(ordinals) - numbered)
+        detail += (f"按整期编号，尚未看到的期号为 {direct_gaps or '无'}；"
+                   f"按分段编号，未标段文件中尚缺编号 {flat_gaps[:10] or '无'}。"
+                   "请打开同一版本的样片，确认一集包含整期还是其中一段。")
+    if samples:
+        detail += " 可查看：" + "、".join(samples) + "。"
+    return "period_review", detail, [], sorted((numbered | explicit) & expected)

@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from app.clients.clouddrive2 import GrpcError
-from app.core.segments import episode_segments, segment_report
+from app.core.segments import episode_segments, diagnose_periods, segment_number
 from app.core.episode_parser import ParsedEpisode, is_video_file, parse_episode
 
 # 非正片判定正则（预告、片花、特辑、宣传片、花絮、Trailer、Teaser 等，杜绝污染正片总集数）
@@ -86,9 +86,9 @@ class InspectionResult:
 
     def compute_summary(self) -> None:
         """根据 seasons 计算汇总统计。"""
-        self.archive_ready_count = sum(1 for s in self.seasons if s.status == "archive_ready")
-        self.review_needed_count = sum(1 for s in self.seasons if s.status == "review_needed")
-        self.download_needed_count = sum(1 for s in self.seasons if s.status == "download_needed")
+        self.archive_ready_count = sum(1 for s in self.seasons if s.status in ("archive_ready", "period_ready"))
+        self.review_needed_count = sum(1 for s in self.seasons if s.status in ("review_needed", "period_review", "identity_review"))
+        self.download_needed_count = sum(1 for s in self.seasons if s.status in ("download_needed", "period_missing"))
         self.airing_count = sum(1 for s in self.seasons if s.status == "airing")
         self.archive_check_count = sum(s.status == "archive_check" for s in self.seasons)
         self.already_archived_count = sum(1 for s in self.seasons if s.status == "already_archived")
@@ -536,6 +536,9 @@ async def run_inspection(
 
             archive_target = ""
             archive_verified = False
+            archive_items = []
+            actual = None
+            alias = False
             if archive_root:
                 archive_target = compute_archive_target(show_path, season_path, archive_root, global_source_root)
 
@@ -568,7 +571,14 @@ async def run_inspection(
                         missing = sorted(expected - combined)
                         uncertain_source = (len(regular_episodes) != len(parsed_episodes)
                                             or any(i["isDirectory"] for i in season_files))
-                        if not source_eps or alias or uncertain_source or actual == season_path:
+                        alias_covered = (alias and archive_verified and source_eps and source_eps <= archived_eps
+                                         and not uncertain_source and actual != season_path
+                                         and not any(segment_number(i["name"]) for i in season_files + archive_items))
+                        if alias_covered:
+                            status = "already_archived"
+                            detail = (f"按同一 TMDB ID 和季号核实别名归档目录，已齐 {total_eps}/{total_eps} 集。"
+                                      f"源端 {len(source_eps)} 集在归档中均有对应正片，可删除本季源端。")
+                        elif not source_eps or alias or uncertain_source or actual == season_path:
                             status = "archive_check"
                             official = f"本季资料共 {total_eps} 集" if expected else "资料总集数未知"
                             coverage = (f"归档库已核实 {len(expected & archived_eps)}/{total_eps} 集"
@@ -584,7 +594,7 @@ async def run_inspection(
                             if total_eps and any(n > total_eps for n in source_eps):
                                 status = "review_needed"
                                 detail += "。归档前请核对超出资料范围的视频"
-                            elif source_eps <= archived_eps:
+                            elif source_eps <= archived_eps and archive_verified:
                                 status = "already_archived"
                                 detail = f"归档库已包含源端正片集号 {sorted(source_eps)}，可复核源端重复版本"
                             elif expected and not missing and not duplicates:
@@ -609,18 +619,47 @@ async def run_inspection(
                     detail = f"归档季核对未完成：{arc_err}。资料总集数 {total_eps or '未知'}，源端已识别 {len(recognized)} 集。"
                     log.warning("归档季核对未完成 %s: %s", archive_target, arc_err)
 
-            if info.get("parts") and any(len(v) > 1 for v in info["parts"].values()):
-                status = "archive_check"
-                detail = segment_report(season_files, season_num, info["parts"])
-                total_eps = len(info["parts"])
-                edition_note = ""
-                missing = []
-                duplicates = []
+            parts = info.get("parts") or {}
+            segmented = any(any(v) for v in parts.values())
+            if segmented and status != "archive_check":
+                period_total = len(parts)
+                if db_tot and db_tot > period_total and (info.get("bound") or db_tot > (tmdb_tot or 0)):
+                    period_total = db_tot
+                    season_finished = info.get("douban_finished", False)
+                period = diagnose_periods(season_files + archive_items, season_num, parts,
+                                          info.get("ordinals", {}), period_total, season_finished, bool(actual))
+                if period:
+                    status, detail, missing, recognized = period
+                    if status == "period_ready" and alias and not actual:
+                        status, detail = "archive_check", "同作品的别名归档目录缺少本季。请核对归档位置后重新初检。"
+                    total_eps = period_total
+                    duplicates = []
+                    edition_note = f"（豆瓣条目 {info['douban_id']} 收录 {db_tot} 集）" if db_tot else ""
+                else:
+                    status = "archive_check"
+                    detail = "本季含分段，目录中还有无法核实的内容。请检查子目录及未编号视频。"
+            if status == "review_needed" and total_eps:
+                overflow = [e.filename for e in regular_episodes if any(n > total_eps for n in e.episode_numbers)]
+                if overflow:
+                    detail += " 请核对越界文件：" + "、".join(overflow[:3]) + "。"
             attachments = {".nfo", ".jpg", ".jpeg", ".png", ".webp"}
-            if (status == "archive_check" and archive_verified and not parsed_episodes
+            if (status == "archive_check" and archive_verified and not segmented and not parsed_episodes
                     and all(not f["isDirectory"] and PurePosixPath(f["name"]).suffix.lower() in attachments for f in season_files)):
                 status = "verified_complete"
                 detail = "归档正片已齐，源端只留元数据附件，已完成"
+            if status == "archive_check":
+                if not parsed_episodes and not any(i["isDirectory"] for i in season_files):
+                    detail += " 如打算收藏本季，请查找正片所在目录；仅保留附件时可标记已手动处理。"
+                elif parsed_episodes and all(ep.is_special or ep.is_extra for ep in parsed_episodes):
+                    detail += " 源端只找到特别篇或花絮。想保留这些内容可直接标记已手动处理。"
+                elif archive_verified:
+                    detail += " 归档已有对应集号，源端仍有未核实内容。请先检查分段、子目录或异常大小的文件。"
+            if info.get("candidate_id") and status != "archive_check":
+                status = "identity_review"
+                detail = (f"目录标注 TMDB {tmdb_match.group(1) if tmdb_match else tmdb_id_num}，"
+                          f"第 {season_num} 季的 {total_eps} 集来自另一候选作品 {info['candidate_id']}。"
+                          f"请核对片头或地区并修正作品 ID，再初检。{detail if '越界文件' in detail else ''}")
+                missing = []
             if edition_note:
                 detail += edition_note
             diag = SeasonDiagnosis(
@@ -817,6 +856,7 @@ async def _fetch_seasons_by_tmdb_id(
                 finished = False
                 real_total = raw_ep_count
                 parts = {}
+                ordinals = {}
 
                 if raw_ep_count > 0:
                     try:
@@ -833,6 +873,11 @@ async def _fetch_seasons_by_tmdb_id(
                                 regular_eps.append(ep)
 
                             parts = episode_segments(regular_eps)
+                            if parts and all(isinstance(e.get("episode_number"), int) for e in regular_eps):
+                                ordinals = {e["episode_number"]: int(re.search(r"第\s*(\d+)\s*期", e["name"])[1])
+                                            for e in regular_eps}
+                                if len(ordinals) != len(regular_eps):
+                                    ordinals = {}
                             if regular_eps:
                                 real_total = len(regular_eps)
 
@@ -874,6 +919,7 @@ async def _fetch_seasons_by_tmdb_id(
                 seasons_data[sn] = {
                     "total": real_total if real_total > 0 else None,
                     "parts": parts,
+                    "ordinals": ordinals,
                     "season_year": str(s.get("air_date") or "")[:4],
                     "finished": finished,
                 }
@@ -1334,6 +1380,7 @@ def _merge_season_sources(primary: dict, secondary: dict | None) -> dict:
         return {**info, **secondary}
     return {**info, "tmdb_total": tmdb_total, "douban_total": db_total,
             "douban_id": secondary["douban_id"], "bound": secondary["bound"],
+            "douban_finished": secondary.get("finished", False),
             "is_split_edition": max(tmdb_total, db_total) >= 1.5 * min(tmdb_total, db_total)}
 
 
@@ -1460,6 +1507,8 @@ async def _resolve_show_metadata(
                             except Exception:
                                 pass
                         seasons_data[sn] = {"total": cnt, "finished": s_finished}
+                        if tmdb_id_num and str(cid) != str(tmdb_id_num):
+                            seasons_data[sn]["candidate_id"] = cid
                         matched_any = True
                         if log:
                             log.info("剧集 %s 缺失第 S%02d 季，通过 TMDB 检索系列 [%s] (ID=%d, 得分=%d) 成功补齐: %d 集",
