@@ -2401,7 +2401,8 @@
       barGradientClass,
       items,
       processItem,
-      onFinish
+      onFinish,
+      concurrency = 1
     }) {
       if (!items || items.length === 0) return;
 
@@ -2457,42 +2458,69 @@
         logContainer.scrollTop = logContainer.scrollHeight;
       }
 
-      appendLog(`<span class="text-slate-400">[${getNowTimestamp()}] 🚀 批量流水线启动，共选定 <b>${items.length}</b> 个任务项，开始逐项执行...</span>`);
+      const poolLimit = Math.max(1, Math.min(concurrency || 1, items.length));
+      appendLog(`<span class="text-slate-400">[${getNowTimestamp()}] 🚀 批量流水线启动，共选定 <b>${items.length}</b> 个任务项（受控工作槽: ${poolLimit}），开始执行...</span>`);
 
       let successCount = 0;
       let failCount = 0;
       let skippedCount = 0;
+      let completedCount = 0;
+      let cursor = 0;
+      const activeTitles = new Set();
 
-      for (let i = 0; i < items.length; i++) {
-        if (isBatchPipelineCancelled) {
-          appendLog(`<span class="text-amber-400 font-bold">[${getNowTimestamp()}] 🛑 用户已手动中止后续任务，已处理 ${i}/${items.length} 项。</span>`);
-          break;
-        }
-
-        const item = items[i];
-        const itemDisplayName = item.name || `项目 #${i + 1}`;
-
-        const pct = Math.round(((i + 1) / items.length) * 100);
+      function updateUIProgress() {
+        const pct = Math.round((completedCount / items.length) * 100);
         if (progressBar) progressBar.style.width = `${pct}%`;
         if (progressPercent) progressPercent.textContent = `${pct}%`;
-        if (progressStats) progressStats.textContent = `${i + 1} / ${items.length}`;
-        if (currentItemText) currentItemText.textContent = `[${i + 1}/${items.length}] 正在处理: ${itemDisplayName}`;
-
-        try {
-          const res = await processItem(item, i, items.length, appendLog);
-          if (res && res.success) {
-            successCount++;
-          } else if (res && res.skipped) {
-            skippedCount++;
+        if (progressStats) progressStats.textContent = `${completedCount} / ${items.length}`;
+        if (currentItemText) {
+          if (activeTitles.size > 0) {
+            currentItemText.textContent = `[${completedCount}/${items.length}] 正在处理: ${Array.from(activeTitles).slice(0, 2).join(' | ')}`;
           } else {
-            failCount++;
+            currentItemText.textContent = `[${completedCount}/${items.length}] 任务调度中...`;
           }
-        } catch (err) {
-          failCount++;
-          appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] 💥 执行异常: 【${itemDisplayName}】${err.message || err}</span>`);
         }
+      }
 
-        await new Promise(r => setTimeout(r, 100));
+      async function worker() {
+        while (cursor < items.length) {
+          if (isBatchPipelineCancelled) {
+            break;
+          }
+          const i = cursor++;
+          const item = items[i];
+          const itemDisplayName = item.name || `项目 #${i + 1}`;
+          activeTitles.add(itemDisplayName);
+          updateUIProgress();
+
+          try {
+            const res = await processItem(item, i, items.length, appendLog);
+            if (res && res.success) {
+              successCount++;
+            } else if (res && res.skipped) {
+              skippedCount++;
+            } else {
+              failCount++;
+            }
+          } catch (err) {
+            failCount++;
+            appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] 💥 执行异常: 【${itemDisplayName}】${err.message || err}</span>`);
+          } finally {
+            activeTitles.delete(itemDisplayName);
+            completedCount++;
+            updateUIProgress();
+          }
+        }
+      }
+
+      const workers = [];
+      for (let w = 0; w < poolLimit; w++) {
+        workers.push(worker());
+      }
+      await Promise.all(workers);
+
+      if (isBatchPipelineCancelled) {
+        appendLog(`<span class="text-amber-400 font-bold">[${getNowTimestamp()}] 🛑 用户已手动中止后续任务，已处理 ${completedCount}/${items.length} 项。</span>`);
       }
 
       const cancelText = isBatchPipelineCancelled ? ' (已提前中止)' : '';
@@ -2566,6 +2594,7 @@
         iconClass: 'fa-broom',
         iconWrapClass: 'bg-amber-100 dark:bg-amber-950/70 text-amber-600 dark:text-amber-400',
         barGradientClass: 'from-amber-500 to-orange-600',
+        concurrency: 2,
         items,
         processItem: async (item, i, total, appendLog) => {
           appendLog(`<span class="text-slate-400">[${getNowTimestamp()}] 🧹 正在清理冗余: <b>【${item.name}】</b>...</span>`);

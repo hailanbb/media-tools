@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -473,80 +474,132 @@ async def clean_duplicates(
                 log.info("剧季 %s S%02d 无需清理文件 (%s)", rec.show_name, rec.season_number, v_note)
                 continue
 
-            # 执行 CD2 删除
+            # 依方案第一阶段：先处理待删视频，再处理仅属于已确认删除视频的伴生文件
+            video_items = [it for it in to_delete if is_video_file(it.get("name", ""))]
+            orphan_items = [it for it in to_delete if not is_video_file(it.get("name", ""))]
+
+            deleted_video_paths: list[str] = []
             deleted_files_this_season: list[str] = []
-            for item in to_delete:
+            failed_items: list[str] = []
+
+            # 1. 优先按顺序执行主视频删除
+            for item in video_items:
                 fpath = item["path"]
                 fname = item["name"]
                 try:
                     await cd2.delete_file(fpath)
+                    deleted_video_paths.append(fpath)
                     deleted_files_this_season.append(fpath)
-                    if is_video_file(fname):
-                        total_deleted_videos += 1
-                    else:
-                        total_deleted_orphans += 1
-                    log.info("已安全清理冗余/残卷/伴生文件: %s (%s)", fname, item.get("reason", ""))
+                    total_deleted_videos += 1
+                    log.info("已安全清理冗余视频: %s (%s)", fname, item.get("reason", ""))
                 except Exception as de:
-                    errors.append(f"删除 {fname} 失败: {str(de)[:100]}")
+                    failed_items.append(fpath)
+                    errors.append(f"删除视频 {fname} 失败: {str(de)[:100]}")
 
+            # 提取成功删除视频的词干名 (stem)，伴生文件必须严格依附于已确认删除的主文件
+            import posixpath
+            deleted_video_stems = {posixpath.splitext(posixpath.basename(p))[0] for p in deleted_video_paths}
+
+            # 2. 安全删除仅属于已确认删除视频的伴生文件，主视频删除失败严格保留附件
+            for item in orphan_items:
+                fpath = item["path"]
+                fname = item["name"]
+                base_stem = posixpath.splitext(fname)[0]
+                if deleted_video_stems and not any(base_stem == s or base_stem.startswith(s) for s in deleted_video_stems):
+                    log.info("伴生文件 %s 对应的主视频未确认删除或不匹配，严格保留", fname)
+                    continue
+                try:
+                    await cd2.delete_file(fpath)
+                    deleted_files_this_season.append(fpath)
+                    total_deleted_orphans += 1
+                    log.info("已安全清理伴生文件: %s", fname)
+                except Exception as de:
+                    failed_items.append(fpath)
+                    errors.append(f"删除伴生文件 {fname} 失败: {str(de)[:100]}")
+
+            # 3. 若有实际删除发生，仅强读一次真实目录用于双向实物核验与状态诊断
             if deleted_files_this_season:
                 affected_tasks.add(rec.task_id)
-
-                op_log = OperationLog(
-                    task_id=rec.task_id,
-                    season_record_id=rec.id,
-                    action="clean_duplicate",
-                    status="completed",
-                    detail_json=json.dumps({
-                        "show": rec.show_name,
-                        "season": rec.season_number,
-                        "version_note": plan["version_note"],
-                        "deleted_paths": deleted_files_this_season,
-                    }, ensure_ascii=False),
-                )
-                db.add(op_log)
-
-                # 删除后立即强制穿透刷新网盘季目录缓存（规约：确保网盘底层与前台缓存同步）
                 try:
-                    await cd2.list_files(season_path, force_refresh=True)
-                except Exception as ref_err:
-                    log.warning("删除后刷新季目录失败: %s", ref_err)
+                    fresh_files = await cd2.list_files(season_path, force_refresh=True)
+                    fresh_paths = {f.get("path") for f in fresh_files}
 
-            # 重新诊断该季度的最新状态（自动流转状态）
-            try:
-                fresh_files = await cd2.list_files(season_path, force_refresh=True)
-                fresh_videos = [
-                    parse_episode(f["name"], f["path"], f.get("size", 0))
-                    for f in fresh_files
-                    if not f["isDirectory"] and is_video_file(f["name"])
-                ]
+                    # 双向核验：待删文件确已不在网盘，计划保留文件依然完整
+                    phantom_files = [p for p in deleted_files_this_season if p in fresh_paths]
+                    missing_keep = [k["path"] for k in plan.get("to_keep", []) if k.get("path") not in fresh_paths]
 
-                all_fresh_eps: list[int] = []
-                for fv in fresh_videos:
-                    all_fresh_eps.extend(fv.episode_numbers)
+                    verification_passed = (len(phantom_files) == 0 and len(missing_keep) == 0 and len(failed_items) == 0)
 
-                from collections import Counter
-                fresh_recognized = sorted(set(all_fresh_eps))
-                ep_cnt = Counter(all_fresh_eps)
-                fresh_duplicates = sorted([n for n, c in ep_cnt.items() if c > 1])
+                    # 复用初检正片过滤口径，基于实物重新诊断
+                    fresh_parsed = [
+                        parse_episode(f["name"], f["path"], f.get("size", 0))
+                        for f in fresh_files
+                        if not f.get("isDirectory") and is_video_file(f.get("name", ""))
+                    ]
+                    regular_fresh = [ep for ep in fresh_parsed if _verified_video(ep, rec.season_number)]
 
-                new_status, new_detail = diagnose_season(
-                    recognized=fresh_recognized,
-                    total_episodes=rec.total_episodes,
-                    season_finished=rec.season_finished,
-                    has_duplicates=bool(fresh_duplicates),
-                    duplicate_episodes=fresh_duplicates,
-                )
+                    all_fresh_eps: list[int] = []
+                    for fv in regular_fresh:
+                        all_fresh_eps.extend(fv.episode_numbers)
 
-                rec.local_episode_count = len(fresh_videos)
-                rec.recognized_episodes_json = json.dumps(fresh_recognized)
-                rec.duplicate_episodes_json = json.dumps(fresh_duplicates)
-                rec.status = new_status
-                rec.status_detail = new_detail
-                log.info("季度状态自动重新计算: %s S%02d -> %s (%s)", rec.show_name, rec.season_number, new_status, new_detail)
+                    from collections import Counter
+                    fresh_recognized = sorted(set(all_fresh_eps))
+                    ep_cnt = Counter(all_fresh_eps)
+                    fresh_duplicates = sorted([n for n, c in ep_cnt.items() if c > 1])
 
-            except Exception as fe:
-                log.warning("重新计算状态失败: %s", fe)
+                    fresh_missing = []
+                    if rec.total_episodes:
+                        fresh_missing = sorted(set(range(1, rec.total_episodes + 1)) - set(fresh_recognized))
+
+                    if verification_passed:
+                        new_status, new_detail = diagnose_season(
+                            recognized=fresh_recognized,
+                            total_episodes=rec.total_episodes,
+                            season_finished=rec.season_finished,
+                            has_duplicates=bool(fresh_duplicates),
+                            duplicate_episodes=fresh_duplicates,
+                            allow_bonus_specials=True,
+                        )
+                        op_status = "completed"
+                    else:
+                        new_status = "review_needed"
+                        issue_desc = []
+                        if phantom_files:
+                            issue_desc.append(f"{len(phantom_files)}个已删文件仍残留")
+                        if missing_keep:
+                            issue_desc.append(f"{len(missing_keep)}个保留文件缺失")
+                        if failed_items:
+                            issue_desc.append(f"{len(failed_items)}个文件删除失败")
+                        new_detail = f"清理待核实: {', '.join(issue_desc)}"
+                        op_status = "partial_success"
+
+                    rec.local_episode_count = len(regular_fresh)
+                    rec.recognized_episodes_json = json.dumps(fresh_recognized)
+                    rec.duplicate_episodes_json = json.dumps(fresh_duplicates)
+                    rec.missing_episodes_json = json.dumps(fresh_missing)
+                    rec.status = new_status
+                    rec.status_detail = new_detail
+                    log.info("季度状态自动重新计算: %s S%02d -> %s (%s)", rec.show_name, rec.season_number, new_status, new_detail)
+
+                    op_log = OperationLog(
+                        task_id=rec.task_id,
+                        season_record_id=rec.id,
+                        action="clean_duplicate",
+                        status=op_status,
+                        detail_json=json.dumps({
+                            "show": rec.show_name,
+                            "season": rec.season_number,
+                            "version_note": plan["version_note"],
+                            "deleted_paths": deleted_files_this_season,
+                            "failed_paths": failed_items,
+                            "verification_passed": verification_passed,
+                        }, ensure_ascii=False),
+                    )
+                    db.add(op_log)
+
+                except Exception as fe:
+                    log.warning("清理后实物核验与重新诊断失败: %s", fe)
+                    errors.append(f"{rec.show_name} S{rec.season_number:02d}: 清理后实物核验失败: {fe}")
 
         # 5. 级联刷新受影响的任务统计
         for tid in affected_tasks:
