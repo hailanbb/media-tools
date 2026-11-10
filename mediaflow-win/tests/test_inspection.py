@@ -103,7 +103,7 @@ class TestInspectionEngine(unittest.TestCase):
             has_duplicates=False,
         )
         self.assertEqual(status, "airing")
-        self.assertIn("连载中", detail)
+        self.assertIn("尚未确认本季播毕", detail)
 
     def test_06_diagnose_unknown(self):
         """测试 TMDB 无总集数信息."""
@@ -289,11 +289,12 @@ class TestInspectionEngine(unittest.TestCase):
 
 
 class TestSeasonSourceReconciliation(unittest.IsolatedAsyncioTestCase):
-    async def scan(self, files, *, bound=True, details=None, candidates=(), primary=10):
+    async def scan(self, files, *, bound=True, details=None, candidates=(), primary=10,
+                   series="小小少年", category="/src", year=None, season_entry=False):
         from unittest.mock import AsyncMock, MagicMock, patch
         from app.core.inspector import run_inspection
         tid = 256080 if bound else 999
-        show = f"/src/小小少年 (2024) [tmdbid={tid}]"
+        show = f"{category}/{series} (2024) [tmdbid={tid}]"
         subject = {"douban_id": "37116072", "title": "小小少年 第二季", "season": 2,
                    "seasons": {"2": list(range(1, 13))}, "year": "2025"}
         disk = AsyncMock()
@@ -307,12 +308,77 @@ class TestSeasonSourceReconciliation(unittest.IsolatedAsyncioTestCase):
         http = MagicMock()
         http.__aenter__.return_value.get = AsyncMock(return_value=MagicMock(status_code=503))
         with patch("app.core.inspector._fetch_seasons_by_tmdb_id", new=AsyncMock(
-                return_value={2: {"total": primary, "finished": True}})), patch(
+                return_value={2: {"total": primary, "finished": True, "season_year": year}})), patch(
                 "app.core.inspector.httpx.AsyncClient", return_value=http):
-            out = await run_inspection("case", show, cd2_client=disk, mp_client=mp, tmdb_client=AsyncMock())
+            out = await run_inspection("case", show + "/Season 2/" if season_entry else show, cd2_client=disk, mp_client=mp, tmdb_client=AsyncMock())
         if bound:
             mp.search_media.assert_not_awaited()
         return out.seasons[0]
+
+    async def test_category_with_loose_trailer_and_season_in_show_title(self):
+        from app.core.inspector import _discover_shows
+        from unittest.mock import AsyncMock
+        root = "/收藏/其他分类"
+        subdirs = ["Special Forces (2022) [tmdbid=12]", "Another Season 2 (2020) [tmdbid=34]"]
+        disk = AsyncMock()
+        async def read(path):
+            if path == root:
+                return [{"path": root + "/" + n, "name": n, "isDirectory": True} for n in subdirs] + [
+                    {"path": root + "/预告.mkv", "name": "预告.mkv", "isDirectory": False}]
+            return [{"path": path + "/Season 1", "name": "Season 1", "isDirectory": True}]
+        disk.list_files.side_effect = read
+        found = []
+        await _discover_shows(disk, root, found)
+        self.assertEqual([x["name"] for x in found], subdirs)
+
+    async def test_direct_season_entry_keeps_parent_identity(self):
+        files = ["Example.S02E01-E12.mkv"]
+        from_show = await self.scan(files, category="/其他库/节目")
+        from_season = await self.scan(files, category="/其他库/节目", season_entry=True)
+        self.assertEqual(from_show, from_season)
+        self.assertEqual(from_season.season_number, 2)
+
+    async def test_short_english_series_outside_variety_directory(self):
+        detail = {"douban_id": "91", "title": "Autumn Coast Season 2", "season": 2,
+                  "number_of_episodes": 8, "year": "2025"}
+        d = await self.scan(["Autumn.Coast.S02E01-E04.mkv"], bound=False, series="Autumn Coast",
+                            category="/任意盘/海外短剧", primary=7, year="2025",
+                            details={"91": detail}, candidates=[{"id": "91", "title": detail["title"]}])
+        self.assertEqual((d.total_episodes, d.missing_episodes), (8, [5, 6, 7, 8]))
+
+    async def test_fallback_keeps_douban_and_tmdb_ids_separate(self):
+        import logging
+        from unittest.mock import AsyncMock
+        from app.core.inspector import _fetch_tmdb_via_mp
+        mp = AsyncMock()
+        mp.search_media.side_effect = [[{"title": "示例", "year": "2024", "id": "777"}],
+                                       [{"title": "同名误匹配", "year": "2024", "id": "33"},
+                                        {"title": "示例", "year": "2024", "id": "88"}]]
+        tid, _ = await _fetch_tmdb_via_mp(mp, "示例 (2024)", logging.getLogger(__name__))
+        self.assertEqual(tid, 88)
+        mp.get_tmdb_seasons.assert_awaited_once_with(88)
+
+    async def test_numeric_sequel_requires_matching_season_year(self):
+        detail = {"douban_id": "92", "title": "海岸来信2", "year": "2026",
+                  "seasons": {"1": list(range(1, 13))}}
+        for year, total in [("2026", 12), ("2023", 10)]:
+            d = await self.scan(["Show.S02E01-E08.mkv"], bound=False, series="海岸来信", category="/收藏/自定义",
+                                primary=10, year=year, details={"92": detail},
+                                candidates=[{"id": "92", "title": detail["title"]}])
+            self.assertEqual(d.total_episodes, total)
+
+    async def test_partial_and_future_schedules_do_not_imply_finished(self):
+        from app.core.inspector import _fetch_seasons_by_tmdb_id
+        from unittest.mock import AsyncMock
+        mp = AsyncMock()
+        mp.get_tmdb_seasons.return_value = [{"season_number": 1, "air_date": "2019-01-01", "episode_count": 8}]
+        mp.get_tmdb_episodes.return_value = [{"episode_number": n, "name": f"Ep{n}", "air_date": "2020-01-01"}
+                                             for n in range(1, 5)]
+        d = (await _fetch_seasons_by_tmdb_id(mp, 123, None))[1]
+        self.assertEqual((d["total"], d["finished"], d["partial_listing"]), (8, False, True))
+        mp.get_tmdb_episodes.return_value *= 2
+        mp.get_tmdb_episodes.return_value[-1] = {"episode_number": 8, "name": "Final", "air_date": "2099-01-01"}
+        self.assertFalse((await _fetch_seasons_by_tmdb_id(mp, 123, None))[1]["finished"])
 
     async def test_verified_link_with_empty_search_and_duplicate(self):
         files = [f"Show.S02E{i:02}.H264.mp4" for i in range(1, 13)] + ["Show.S02E02.H265.mp4"]

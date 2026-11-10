@@ -89,7 +89,7 @@ class TestDomainInvariants(unittest.TestCase):
             has_duplicates=False,
         )
         self.assertEqual(status, "airing")
-        self.assertIn("连载中", detail)
+        self.assertIn("尚未确认本季播毕", detail)
         self.assertNotIn("拆分", detail)
         self.assertNotIn("失真", detail)
 
