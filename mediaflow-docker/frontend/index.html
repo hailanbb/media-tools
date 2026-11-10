@@ -2359,27 +2359,27 @@
     function closeModal(id) { document.getElementById(id).classList.add('hidden'); }
 
     // ── 10. 通用批量操作流水线引擎 (Universal Batch Pipeline) ────────
-    let isBatchPipelineCancelled = false;
-    let batchPipelineOnFinish = null;
-    let batchPipelineAbortController = null;
+    let activeBatchSession = null;
 
     function cancelBatchPipeline() {
-      isBatchPipelineCancelled = true;
+      if (!activeBatchSession) return;
+      activeBatchSession.isCancelled = true;
+      try {
+        activeBatchSession.abortController.abort();
+      } catch (e) {
+        console.warn('AbortController abort error:', e);
+      }
       const dlCancelBtn = document.getElementById('dlCancelBtn');
       const dlCloseBtn = document.getElementById('dlCloseBtn');
+      const dlProgressSubtitle = document.getElementById('dlProgressSubtitle');
+
       if (dlCancelBtn) {
         dlCancelBtn.disabled = true;
-        dlCancelBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin text-xs mr-1"></i> 正在安全停机...';
+        dlCancelBtn.innerHTML = '<i class="fa-solid fa-ban text-xs mr-1 text-slate-400"></i> 已停止派发';
       }
-      // 立即触发网络层熔断，中断在途 HTTP 请求
-      if (batchPipelineAbortController) {
-        try {
-          batchPipelineAbortController.abort();
-        } catch (e) {
-          console.warn('AbortController abort error:', e);
-        }
+      if (dlProgressSubtitle) {
+        dlProgressSubtitle.textContent = '已停止派发新项，正在确认在途操作回执...（可直接关闭窗口）';
       }
-      // 立即释放关闭按钮控制权，防止用户界面被挂起锁死
       if (dlCloseBtn) {
         dlCloseBtn.disabled = false;
         dlCloseBtn.classList.remove('opacity-40', 'cursor-not-allowed');
@@ -2389,9 +2389,9 @@
 
     async function finishBatchPipeline() {
       closeModal('downloadProgressModal');
-      if (typeof batchPipelineOnFinish === 'function') {
-        const fn = batchPipelineOnFinish;
-        batchPipelineOnFinish = null;
+      if (activeBatchSession && typeof activeBatchSession.onFinish === 'function') {
+        const fn = activeBatchSession.onFinish;
+        activeBatchSession.onFinish = null;
         await fn();
       }
     }
@@ -2422,10 +2422,18 @@
     }) {
       if (!items || items.length === 0) return;
 
-      isBatchPipelineCancelled = false;
-      batchPipelineOnFinish = onFinish;
-      batchPipelineAbortController = new AbortController();
-      const abortSignal = batchPipelineAbortController.signal;
+      // 为本次运行分配独立批次上下文与控制器，彻底隔离各批次状态
+      const currentBatchId = 'batch_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+      const abortController = new AbortController();
+      const session = {
+        id: currentBatchId,
+        abortController,
+        isCancelled: false,
+        onFinish,
+        items,
+        total: items.length
+      };
+      activeBatchSession = session;
 
       openModal('downloadProgressModal');
 
@@ -2466,10 +2474,14 @@
       if (logContainer) logContainer.innerHTML = '';
       if (progressPercent) progressPercent.textContent = '0%';
       if (progressStats) progressStats.textContent = `0 / ${items.length}`;
-      if (dlProgressFooterHint) dlProgressFooterHint.textContent = '流水线执行中，请保持页面打开（可最小化浏览器）...';
+      if (dlProgressFooterHint) dlProgressFooterHint.textContent = '流水线执行中，请保持页面打开（可随时关闭窗口后台收尾）...';
+
+      function isCurrentBatch() {
+        return activeBatchSession && activeBatchSession.id === session.id;
+      }
 
       function appendLog(htmlContent) {
-        if (!logContainer) return;
+        if (!isCurrentBatch() || !logContainer) return;
         const div = document.createElement('div');
         div.innerHTML = htmlContent;
         logContainer.appendChild(div);
@@ -2477,16 +2489,19 @@
       }
 
       const poolLimit = Math.max(1, Math.min(concurrency || 1, items.length));
-      appendLog(`<span class="text-slate-400">[${getNowTimestamp()}] 🚀 批量流水线启动，共选定 <b>${items.length}</b> 个任务项（受控工作槽: ${poolLimit}），开始执行...</span>`);
+      appendLog(`<span class="text-slate-400">[${getNowTimestamp()}] 🚀 批量流水线启动，共选定 <b>${items.length}</b> 个任务季（工作槽: ${poolLimit}），开始执行...</span>`);
 
-      let successCount = 0;
-      let failCount = 0;
-      let skippedCount = 0;
-      let completedCount = 0;
+      let successCount = 0;       // 成功季数
+      let skippedCount = 0;       // 暂缓/跳过季数
+      let cancelledCount = 0;     // 已取消季数
+      let failCount = 0;          // 失败季数
+      let submittedTorrents = 0;  // 提交种子任务总数
+      let completedCount = 0;     // 已结算项数
       let cursor = 0;
       const activeTitles = new Set();
 
       function updateUIProgress() {
+        if (!isCurrentBatch()) return;
         const pct = Math.round((completedCount / items.length) * 100);
         if (progressBar) progressBar.style.width = `${pct}%`;
         if (progressPercent) progressPercent.textContent = `${pct}%`;
@@ -2502,7 +2517,7 @@
 
       async function worker() {
         while (cursor < items.length) {
-          if (isBatchPipelineCancelled) {
+          if (session.isCancelled) {
             break;
           }
           const i = cursor++;
@@ -2512,17 +2527,30 @@
           updateUIProgress();
 
           try {
-            const res = await processItem(item, i, items.length, appendLog, abortSignal);
+            const res = await processItem(item, i, items.length, appendLog, session.abortController.signal);
+            if (!isCurrentBatch()) return;
+
             if (res && res.success) {
               successCount++;
+              if (res.submitted_count) {
+                submittedTorrents += res.submitted_count;
+              } else if (res.submitted && Array.isArray(res.submitted)) {
+                submittedTorrents += res.submitted.length;
+              } else {
+                submittedTorrents += 1;
+              }
             } else if (res && res.skipped) {
               skippedCount++;
+            } else if (res && res.cancelled) {
+              cancelledCount++;
             } else {
               failCount++;
             }
           } catch (err) {
-            if (err.name === 'AbortError' || isBatchPipelineCancelled) {
-              appendLog(`<span class="text-amber-400">[${getNowTimestamp()}] ⏸️ 任务已安全中止: 【${itemDisplayName}】</span>`);
+            if (!isCurrentBatch()) return;
+            if (err.name === 'AbortError' || session.isCancelled) {
+              cancelledCount++;
+              appendLog(`<span class="text-amber-400">[${getNowTimestamp()}] ⏸️ 任务已停止派发: 【${itemDisplayName}】</span>`);
             } else {
               failCount++;
               appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] 💥 执行异常: 【${itemDisplayName}】${err.message || err}</span>`);
@@ -2541,22 +2569,46 @@
       }
       await Promise.all(workers);
 
-      if (isBatchPipelineCancelled) {
-        appendLog(`<span class="text-amber-400 font-bold">[${getNowTimestamp()}] 🛑 用户已手动中止后续任务，已处理 ${completedCount}/${items.length} 项。</span>`);
+      // 若用户提前中止，未进入 Worker 队列的剩余项全部归入已取消，保证各类之和严格等于总季数
+      const unhandled = items.length - completedCount;
+      if (unhandled > 0) {
+        cancelledCount += unhandled;
+        completedCount = items.length;
+        updateUIProgress();
       }
 
-      const cancelText = isBatchPipelineCancelled ? ' (已提前中止)' : '';
-      appendLog(`<div class="pt-2 border-t border-slate-800 text-xs font-bold text-slate-300">` +
-        `[${getNowTimestamp()}] 🏁 流水线执行结束${cancelText}: 成功 <span class="text-emerald-400">${successCount}</span> 项 | ` +
-        `暂缓/跳过 <span class="text-amber-400">${skippedCount}</span> 项 | ` +
-        `失败 <span class="text-rose-400">${failCount}</span> 项 / 共 ${items.length} 项</div>`);
+      if (!isCurrentBatch()) return;
 
-      if (dlProgressSubtitle) dlProgressSubtitle.textContent = `流水线执行已完结: 成功 ${successCount} 项, 失败 ${failCount} 项`;
-      if (currentItemText) currentItemText.textContent = isBatchPipelineCancelled ? `已中止 (${completedCount}/${items.length})` : `全部完成 (${successCount}/${items.length})`;
-      if (dlProgressFooterHint) dlProgressFooterHint.textContent = isBatchPipelineCancelled ? '流水线已安全停止，可点击右侧按钮应用变更并刷新' : '执行完毕，点击右侧按钮应用变更并刷新';
+      if (session.isCancelled) {
+        appendLog(`<span class="text-amber-400 font-bold">[${getNowTimestamp()}] 🛑 用户已手动中止后续任务，已处理并确认 ${completedCount - unhandled}/${items.length} 季，剩余 ${unhandled} 季已移出待办。</span>`);
+      }
+
+      const cancelText = session.isCancelled ? ' (已提前中止)' : '';
+      const torrentNote = submittedTorrents > 0 ? ` (共提交 <span class="text-indigo-400 font-bold">${submittedTorrents}</span> 个种子)` : '';
+      appendLog(`<div class="pt-2 border-t border-slate-800 text-xs font-bold text-slate-300">` +
+        `[${getNowTimestamp()}] 🏁 流水线执行结束${cancelText}: 成功 <span class="text-emerald-400">${successCount}</span> 季${torrentNote} | ` +
+        `暂缓 <span class="text-amber-400">${skippedCount}</span> 季 | ` +
+        (cancelledCount > 0 ? `已取消 <span class="text-slate-400">${cancelledCount}</span> 季 | ` : '') +
+        `失败 <span class="text-rose-400">${failCount}</span> 季 / 共 ${items.length} 季</div>`);
+
+      if (dlProgressSubtitle) {
+        dlProgressSubtitle.textContent = session.isCancelled
+          ? `已停止派发，已发出项目结果已确认: 成功 ${successCount} 季${torrentNote}, 失败 ${failCount} 季`
+          : `流水线执行已完结: 成功 ${successCount} 季${torrentNote}, 失败 ${failCount} 季`;
+      }
+      if (currentItemText) {
+        currentItemText.textContent = session.isCancelled
+          ? `已中止 (有效完成 ${successCount}/${items.length} 季)`
+          : `全部完成 (${successCount}/${items.length} 季)`;
+      }
+      if (dlProgressFooterHint) {
+        dlProgressFooterHint.textContent = session.isCancelled
+          ? '流水线已安全停止，点击右侧按钮应用变更并刷新'
+          : '执行完毕，点击右侧按钮应用变更并刷新';
+      }
       if (dlCancelBtn) {
         dlCancelBtn.disabled = true;
-        dlCancelBtn.innerHTML = isBatchPipelineCancelled
+        dlCancelBtn.innerHTML = session.isCancelled
           ? '<i class="fa-solid fa-ban text-xs mr-1 text-slate-400"></i> 已中止'
           : '<i class="fa-solid fa-stop text-xs mr-1 text-slate-400"></i> 中止任务';
       }
@@ -2706,7 +2758,7 @@
                 for (const note of res.skip_reasons || []) {
                   appendLog(`<span class="text-amber-400">${escapeHtml(note)}</span>`);
                 }
-                return { success: true };
+                return { success: true, submitted_count: successes.length };
               } else {
                 const failReason = (failures[0] && (failures[0].reason || failures[0].message)) || res.message || '未找到合适种子';
                 appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] ✗ 推送失败: 【${escapeHtml(item.name)}】(${escapeHtml(failReason)})</span>`);

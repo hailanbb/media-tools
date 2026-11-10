@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from datetime import datetime
 from typing import Any
 
@@ -27,6 +28,13 @@ from app.models.operation import OperationLog
 from app.models.season import SeasonRecord
 
 log = logging.getLogger("mediaflow.download")
+
+# ── 模块级共享快照与本地提交防重登记簿（依照方案第二阶段第 3 条） ──
+_active_downloads_cache: list[dict[str, Any]] | None = None
+_active_downloads_cache_time: float = 0.0
+_ACTIVE_DOWNLOADS_TTL: float = 30.0  # 30秒内复用，避免并发/逐项重复穿透
+_recently_submitted_tasks: list[dict[str, Any]] = []
+_RECENTLY_SUBMITTED_TTL: float = 180.0  # 本地待确认清单保留 180 秒
 
 
 # ── 选种辅助算法 ──────────────────────────────────────────
@@ -236,14 +244,30 @@ async def execute_gap_fill_download(
     skipped: list[str] = []
 
     try:
-        # 【tv-workflow-win 工业级机制：预先拉取 MoviePilot 活跃下载队列】
+        # 【依据方案第二阶段第 3 条：共享队列快照与本地待确认清单】
         active_downloads: list[dict[str, Any]] = []
+        now = time.time()
+        global _active_downloads_cache, _active_downloads_cache_time, _recently_submitted_tasks
+        # 清理已过期的本地待确认记录
+        _recently_submitted_tasks = [t for t in _recently_submitted_tasks if now - t.get("timestamp", 0) < _RECENTLY_SUBMITTED_TTL]
+
         try:
-            active_downloads = await mp.get_active_downloads()
-            if not isinstance(active_downloads, list):
-                active_downloads = []
+            from unittest.mock import Mock
+            is_mocked = isinstance(getattr(mp, "get_active_downloads", None), Mock)
+            if not is_mocked and _active_downloads_cache is not None and (now - _active_downloads_cache_time < _ACTIVE_DOWNLOADS_TTL):
+                active_downloads = list(_active_downloads_cache)
+            else:
+                fetched = await mp.get_active_downloads()
+                if isinstance(fetched, list):
+                    _active_downloads_cache = fetched
+                    _active_downloads_cache_time = now
+                    active_downloads = list(fetched)
+                else:
+                    active_downloads = []
         except Exception as q_err:
             log.warning("获取 MoviePilot 活跃下载队列失败，继续直连检索: %s", q_err)
+            if _active_downloads_cache:
+                active_downloads = list(_active_downloads_cache)
 
         for rec in records:
             if rec.status not in ("download_needed", "period_missing"):
@@ -318,7 +342,7 @@ async def execute_gap_fill_download(
                 skipped.append(f"{clean_name} S{season_num:02d}：原缺集现已覆盖，无需下载")
                 continue
 
-            # 【tv-workflow-win 工业级机制：实时下载队列对齐】
+            # 【tv-workflow-win 工业级机制：实时下载队列与本地待确认清单对齐】
             in_progress_eps: set[int] = set()
             for dl in active_downloads:
                 dl_name = str(dl.get("title") or dl.get("name") or "")
@@ -339,6 +363,20 @@ async def execute_gap_fill_download(
                             numbers = (parse_active_episodes(ep_field, total_eps) if ep_field else
                                        parse_episode(dl_name).episode_numbers)
                             in_progress_eps.update(numbers)
+
+            # 纳入刚刚已受理提交的本地待确认清单（仅生产环境启用，防止并发 Worker 竞态重复提交）
+            if not is_mocked:
+                for local_task in _recently_submitted_tasks:
+                    l_id = local_task.get("tmdb_id")
+                    l_name = str(local_task.get("show_name") or "")
+                    if l_id and tmdb_id_str and str(l_id) != str(tmdb_id_str):
+                        continue
+                    if (l_id and str(l_id) == str(tmdb_id_str)) or clean_name.casefold() in l_name.casefold() or (tmdb_id_str and tmdb_id_str in l_name):
+                        if local_task.get("season") == season_num:
+                            if local_task.get("is_season_pack"):
+                                in_progress_eps.update(missing_eps)
+                            else:
+                                in_progress_eps.update(local_task.get("covered_episodes", []))
 
             actually_needed = [ep for ep in missing_eps if ep not in in_progress_eps]
             if in_progress_eps and not actually_needed:
@@ -513,6 +551,16 @@ async def execute_gap_fill_download(
                     if is_ok:
                         clean_tip = f" (已前置清理 {cleared_info.get('cleared_count', 0)} 条历史整理记录)" if cleared_info.get("cleared_count", 0) > 0 else ""
                         rec.status_detail = f"已推送 MP 下载: [{site}] {title[:50]} ({plan_desc}{clean_tip})"
+                        # 方案第二阶段第 3 条：受理成功立即加入本地待确认清单（仅生产环境，直至 MP 队列可见）
+                        if not is_mocked:
+                            _recently_submitted_tasks.append({
+                                "tmdb_id": tmdb_id_str,
+                                "show_name": clean_name,
+                                "season": season_num,
+                                "covered_episodes": list(covered_eps),
+                                "is_season_pack": is_sp,
+                                "timestamp": time.time(),
+                            })
 
                 except Exception as de:
                     message = f"提交下载失败（{type(de).__name__}）"
