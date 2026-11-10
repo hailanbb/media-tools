@@ -50,11 +50,14 @@ def segment_report(files: list[dict], season: int, mapping: dict[int, list[int]]
     extras = sorted((set(found) | unsegmented) - set(mapping))
     text = f"本季资料按 {len(mapping)} 期、{sum(map(len, mapping.values()))} 段收录。"
     if missing:
-        text += "待核对分段 " + "、".join(f"第{n}期第{p}段" if p else f"第{n}期" for n, p in missing) + "。未标分段的文件需核对是否为整期版。"
+        if unsegmented:
+            text += "本地还有未标上下段的文件，可能采用整期编号或资料单集编号，暂无法从文件名确认分段覆盖。"
+        else:
+            text += "待核对分段 " + "、".join(f"第{n}期第{p}段" if p else f"第{n}期" for n, p in missing[:6]) + (f"等 {len(missing)} 段" if len(missing) > 6 else "") + "。"
     else:
         text += "按文件名已覆盖全部正片分段，无需按条目数补集。"
     if unsegmented:
-        text += f"未标分段文件涉及期号 {sorted(unsegmented)}，可核对是否为整期版或其他版本。"
+        text += f"未标分段文件涉及 {len(unsegmented)} 个期号，可查看是否为整期版或按资料单集编号。"
     if extras:
         text += f"另有资料未列的期号 {extras}，需核对内容。"
     return text

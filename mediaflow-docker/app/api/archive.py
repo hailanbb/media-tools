@@ -123,7 +123,7 @@ async def _refresh_task_summary(task_id: str, db: AsyncSession) -> None:
 
     stmt = select(SeasonRecord).where(SeasonRecord.task_id == task_id)
     res = await db.execute(stmt)
-    all_seasons = [s for s in res.scalars().all() if s.status != "manually_handled"]
+    all_seasons = [s for s in res.scalars().all() if s.status not in ("manually_handled", "verified_complete")]
 
     archive_ready_count = sum(1 for s in all_seasons if s.status == "archive_ready")
     review_needed_count = sum(1 for s in all_seasons if s.status == "review_needed")
@@ -417,7 +417,7 @@ async def clean_duplicates(
         for rec in records:
             season_path = rec.season_path
 
-            if rec.status in ("archive_check", "manually_handled"):
+            if rec.status in ("archive_check", "manually_handled", "verified_complete"):
                 errors.append(f"{rec.show_name}：归档核对记录只供查看")
                 continue
 
@@ -849,7 +849,7 @@ async def calibrate_episodes(
     if body.total_episodes is None or body.total_episodes <= 0:
         return StatusResponse(ok=False, message=f"非法总集数 ({body.total_episodes})，总集数必须为大于 0 的正整数")
 
-    if rec.status in ("archive_check", "manually_handled"):
+    if rec.status in ("archive_check", "manually_handled", "verified_complete"):
         return StatusResponse(ok=False, message="归档核对记录需通过重新初检更新")
 
     old_total = rec.total_episodes
@@ -896,7 +896,7 @@ async def delete_source_show(
     if not rec:
         return StatusResponse(ok=False, message="剧季记录不存在")
 
-    if rec.status in ("archive_check", "manually_handled"):
+    if rec.status in ("archive_check", "manually_handled", "verified_complete"):
         return StatusResponse(ok=False, message="归档核对记录仅供查看，保留源端")
 
     show_path = rec.show_path

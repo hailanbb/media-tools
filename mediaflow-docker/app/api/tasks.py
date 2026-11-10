@@ -124,7 +124,7 @@ async def get_task_seasons(
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
 
-    stmt = select(SeasonRecord).where(SeasonRecord.task_id == task_id, SeasonRecord.status != "manually_handled")
+    stmt = select(SeasonRecord).where(SeasonRecord.task_id == task_id, SeasonRecord.status.not_in(("manually_handled", "verified_complete")))
     if status:
         stmt = stmt.where(SeasonRecord.status == status)
     stmt = stmt.order_by(SeasonRecord.show_name, SeasonRecord.season_number)
@@ -167,11 +167,11 @@ async def mark_season_handled(task_id: str, record_id: str, db: AsyncSession = D
         raise HTTPException(status_code=409, detail="请在初检结束后标记手动处理")
     recognized = json.loads(rec.recognized_episodes_json or "[]")
     is_anomaly = (
-        rec.status in ("already_archived", "unknown")
+        rec.status in ("already_archived", "unknown", "archive_check")
         or not rec.total_episodes
         or (rec.status != "archive_ready" and max(recognized, default=0) > rec.total_episodes)
     )
-    if rec.status == "archive_check" or not is_anomaly:
+    if not is_anomaly:
         raise HTTPException(status_code=409, detail="仅异常剧集可标记为手动处理")
     previous = rec.status
     changed = await db.execute(update(SeasonRecord).where(

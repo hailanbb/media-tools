@@ -535,6 +535,7 @@ async def run_inspection(
                 detail = f"{detail}（已自动隔离断崖集: {outlier_nums}）"
 
             archive_target = ""
+            archive_verified = False
             if archive_root:
                 archive_target = compute_archive_target(show_path, season_path, archive_root, global_source_root)
 
@@ -563,6 +564,7 @@ async def run_inspection(
                         source_eps = set(recognized)
                         expected = set(range(1, (total_eps or 0) + 1))
                         combined = source_eps | archived_eps
+                        archive_verified = bool(expected) and expected <= archived_eps
                         missing = sorted(expected - combined)
                         uncertain_source = (len(regular_episodes) != len(parsed_episodes)
                                             or any(i["isDirectory"] for i in season_files))
@@ -614,6 +616,11 @@ async def run_inspection(
                 edition_note = ""
                 missing = []
                 duplicates = []
+            attachments = {".nfo", ".jpg", ".jpeg", ".png", ".webp"}
+            if (status == "archive_check" and archive_verified and not parsed_episodes
+                    and all(not f["isDirectory"] and PurePosixPath(f["name"]).suffix.lower() in attachments for f in season_files)):
+                status = "verified_complete"
+                detail = "归档正片已齐，源端只留元数据附件，已完成"
             if edition_note:
                 detail += edition_note
             diag = SeasonDiagnosis(

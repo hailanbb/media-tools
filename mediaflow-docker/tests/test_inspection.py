@@ -385,7 +385,7 @@ class TestArchiveEvidence(unittest.IsolatedAsyncioTestCase):
                 return_value=(226637, {1: {"total": total, "finished": True}}))):
             result = await run_inspection("case", src, cd2_client=disk, tmdb_client=AsyncMock(),
                                           archive_root="/dst", global_source_root="/src")
-        self.assertEqual(result.archive_check_count, 1)
+        self.assertEqual(result.archive_check_count + sum(s.status == "verified_complete" for s in result.seasons), 1)
         disk.delete_file.assert_not_awaited()
         disk.move_file.assert_not_awaited()
         return result.seasons[0]
@@ -393,10 +393,10 @@ class TestArchiveEvidence(unittest.IsolatedAsyncioTestCase):
     async def test_sidecars_only_full_archive(self):
         files = [(f"High.Potential.S01E{i:02}.mkv", 100) for i in range(1, 14)]
         d = await self.inspect([("season.nfo", 8), ("S01E01.jpg", 9), ("S01E01.nfo", 4)], files)
-        self.assertEqual((d.status, d.total_episodes, d.local_episode_count), ("archive_check", 13, 0))
+        self.assertEqual((d.status, d.total_episodes, d.local_episode_count), ("verified_complete", 13, 0))
         self.assertEqual((d.recognized_episodes, d.missing_episodes), ([], []))
-        self.assertIn("13/13", d.status_detail)
-        self.assertIn("只有 2 个 NFO 文件、1 张 JPG 图片，没有视频文件", d.status_detail)
+        self.assertIn("已完成", d.status_detail)
+        self.assertIn("只留元数据附件", d.status_detail)
 
     async def test_incomplete_archive_does_not_count_wrong_season_empty_or_extra(self):
         files = [("S01E01.mkv", 10), ("S02E02.mkv", 10), ("S01E03.mkv", 0), ("Clip.S01E04.mkv", 10)]

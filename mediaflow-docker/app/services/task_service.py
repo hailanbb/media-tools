@@ -232,7 +232,7 @@ async def execute_inspection(task_id: str, db: AsyncSession) -> InspectionResult
             "airing": result.airing_count,
             "archive_check": result.archive_check_count,
             "already_archived": result.already_archived_count,
-            "total_seasons": sum(s.status != "manually_handled" for s in result.seasons),
+            "total_seasons": sum(s.status not in ("manually_handled", "verified_complete") for s in result.seasons),
         })
         await db.commit()
 
@@ -281,7 +281,7 @@ async def get_task_seasons(
     Returns:
         SeasonRecord 列表
     """
-    stmt = select(SeasonRecord).where(SeasonRecord.task_id == task_id, SeasonRecord.status != "manually_handled")
+    stmt = select(SeasonRecord).where(SeasonRecord.task_id == task_id, SeasonRecord.status.not_in(("manually_handled", "verified_complete")))
     if status:
         stmt = stmt.where(SeasonRecord.status == status)
     stmt = stmt.order_by(SeasonRecord.show_name, SeasonRecord.season_number)

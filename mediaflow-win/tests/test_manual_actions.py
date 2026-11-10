@@ -61,6 +61,17 @@ class ManualActionsTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(logs), 1)
             self.assertEqual(json.loads(logs[0].detail_json)["season_path"], "/qa/src/Show/Season 1")
 
+    async def test_legacy_file_check_can_be_completed_manually(self):
+        async with async_session() as db:
+            rec = await db.get(SeasonRecord, "anomaly")
+            rec.status = "archive_check"
+            rec.total_episodes = 12
+            await db.commit()
+        r = await self.http.post("/api/tasks/t/seasons/anomaly/handled")
+        self.assertTrue(r.json()["ok"])
+        rows = (await self.http.get("/api/tasks/t/seasons")).json()
+        self.assertNotIn("anomaly", [r["id"] for r in rows])
+
     async def test_normal_record_and_other_task_rejected(self):
         self.assertEqual((await self.http.post("/api/tasks/other/seasons/anomaly/handled")).status_code, 404)
         for rid in ("gap", "ready"):
