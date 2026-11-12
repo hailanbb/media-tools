@@ -7,7 +7,7 @@ from functools import lru_cache
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-VERSION = "2.5.15"
+VERSION = "2.5.16"
 
 
 
@@ -41,6 +41,14 @@ class Settings(BaseSettings):
     source_root: str = ""       # 源目录根路径，如 /115/Library_incs/nas
     archive_root: str = ""      # 归档目录根路径，如 /115/Library_incs/nas.finish
     library_root: str = ""      # 媒体库根路径（Emby/Jellyfin 扫描根），如 /115/Library_incs/nas.finish
+
+    # ── 补缺选种与站点配置 ────────────────────────────────
+    gap_fill_min_seeders: int = 2
+    gap_fill_seeder_tier_ratio: float = 0.10
+    gap_fill_min_seeder_slack: int = 1
+    gap_fill_extra_sites: str = "天空,观众"
+    gap_fill_min_resolution: str = ""
+    gap_fill_require_chinese: bool = False
 
 
 @lru_cache

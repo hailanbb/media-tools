@@ -18,6 +18,7 @@ sys.stdout.reconfigure(encoding='utf-8')
 
 SUITES = [
     {"name": "分段及订阅联合操作", "cmd": [sys.executable, "tests/test_governance.py"], "type": "python"},
+    {"name": "补缺选种、站点扩展与整季回退验收", "cmd": [sys.executable, "tests/test_gap_fill_optimization.py"], "type": "python"},
     {"name": "手动处理隐藏与缺集源端删除", "cmd": [sys.executable, "tests/test_manual_actions.py"], "type": "python"},
     {"name": "1. 前端静态契约与 DOM 事件审计", "cmd": ["node", "tests/audit_frontend.js"], "type": "node"},
     {"name": "2. 前端分类决策与卡片渲染契约测试", "cmd": ["node", "tests/test_frontend_logic.js"], "type": "node"},

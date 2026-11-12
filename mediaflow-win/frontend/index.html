@@ -84,7 +84,7 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.15</span>
+              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.16</span>
             </div>
             <!-- 完善后的命名 -->
             <p class="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">智能媒体库整理与归档工作台</p>
@@ -2747,6 +2747,9 @@
             }
 
             const details = res.details || res.submitted || [];
+            if (res.search_sites && res.search_sites.diagnostics && res.search_sites.diagnostics.length > 0) {
+              appendLog(`<span class="text-amber-400">[${getNowTimestamp()}] ℹ️ 站点提示: ${escapeHtml(res.search_sites.diagnostics.join('；'))}</span>`);
+            }
             if (details && details.length > 0) {
               const successes = details.filter(d => d.success || d.status === 'success');
               const failures = details.filter(d => !d.success && d.status !== 'success');
@@ -2755,13 +2758,20 @@
                 let extra = '';
                 const maxSeeds = Math.max(...successes.map(d => Number(d.seeders || d.seeds || 0)));
                 if (maxSeeds > 0) extra += ` (做种: ${maxSeeds})`;
+                const summaries = successes.map(d => {
+                  const st = d.site ? `[${d.site}] ` : '';
+                  const sz = d.size_display ? ` ${d.size_display}` : '';
+                  const rs = d.reason || d.plan_desc || '';
+                  return `${st}${rs || sz}`.trim();
+                }).filter(Boolean);
+                if (summaries.length > 0) extra += ` | ${summaries.join('；')}`;
                 const cleanedTotal = successes.reduce((acc, d) => acc + (d.cleaned_transfers_count || d.cleared_transfer_records_count || 0), 0);
-                if (cleanedTotal > 0) extra += ` | 自动解绑清理 ${cleanedTotal} 条旧整理记录`;
+                if (cleanedTotal > 0) extra += ` | 仅清理 ${cleanedTotal} 条冲突缺号整理记录`;
 
                 if (failures.length > 0) {
-                  appendLog(`<span class="text-amber-400 font-bold">[${getNowTimestamp()}] ⚠️ 部分推送成功: 【${escapeHtml(item.name)}】成功 ${successes.length} 项，失败 ${failures.length} 项${extra}</span>`);
+                  appendLog(`<span class="text-amber-400 font-bold">[${getNowTimestamp()}] ⚠️ 部分推送成功: 【${escapeHtml(item.name)}】成功 ${successes.length} 项，失败 ${failures.length} 项${escapeHtml(extra)}</span>`);
                 } else {
-                  appendLog(`<span class="text-emerald-400 font-bold">[${getNowTimestamp()}] ✓ 推送成功: 【${escapeHtml(item.name)}】共提交 ${successes.length} 个下载任务${extra}</span>`);
+                  appendLog(`<span class="text-emerald-400 font-bold">[${getNowTimestamp()}] ✓ 推送成功: 【${escapeHtml(item.name)}】共提交 ${successes.length} 个下载任务${escapeHtml(extra)}</span>`);
                 }
                 for (const note of res.skip_reasons || []) {
                   appendLog(`<span class="text-amber-400">${escapeHtml(note)}</span>`);

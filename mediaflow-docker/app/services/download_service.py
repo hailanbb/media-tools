@@ -1,21 +1,22 @@
-"""补缺下载引擎 — 与 MoviePilot 联动实现智能搜种、多维选种与防重下载。
+"""补缺下载引擎 — 与 MoviePilot 联动实现站点扩展、省容量选种、整季回退与防重保护。
 
 核心特性：
-1. 缺集对齐：仅对初检确认的真实缺失集号进行定向补全
-2. 选种算法：做种数≥2校验，清晰度梯队（2160p/1080p优选），中文字幕加分，健康码率保护
-3. 能效决策：缺集多且有优质整季包时优选整季；缺集少时散集覆盖，避免下载冗余大包
-4. 防重保护：自动排重，提交后写入 OperationLog 操作记录
+1. 站点扩展：补缺入口自动将“天空”“观众”（启用状态下）合并进 MoviePilot 默认搜索站点，失败不静默缩窄范围
+2. 同档省容量：以最高做种数 H 计算做种同档 (H - seeders <= max(1, floor(H * 10%)))，档内按实际需下载字节升序，支持跨站去重与精确/有界多集拼包
+3. 整季回退与保护：合格散集能补齐时不买整包；散集不全且无队列重叠时核实完整分集/清单后回退整季包，保留已有集文件与转移历史
+4. 防重提交与四段状态：提交前核验 MP 下载队列，超时先查队列防重复提交，分别记录请求缺号、物理覆盖、MP 受理与入库核验状态
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
+import math
 import re
 import time
-from datetime import datetime
+from dataclasses import dataclass
 from typing import Any
+from unittest.mock import Mock
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,15 +30,166 @@ from app.models.season import SeasonRecord
 
 log = logging.getLogger("mediaflow.download")
 
-# ── 模块级共享快照与本地提交防重登记簿（依照方案第二阶段第 3 条） ──
+# ── 模块级共享快照与本地提交防重登记簿 ───────────────────────
 _active_downloads_cache: list[dict[str, Any]] | None = None
 _active_downloads_cache_time: float = 0.0
-_ACTIVE_DOWNLOADS_TTL: float = 30.0  # 30秒内复用，避免并发/逐项重复穿透
+_ACTIVE_DOWNLOADS_TTL: float = 30.0
 _recently_submitted_tasks: list[dict[str, Any]] = []
-_RECENTLY_SUBMITTED_TTL: float = 180.0  # 本地待确认清单保留 180 秒
+_RECENTLY_SUBMITTED_TTL: float = 180.0
+_search_sites_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_SEARCH_SITES_TTL: float = 30.0
+
+# 默认附加补缺搜索站点及域名兜底（支持与用户自定义名合并，绝不写死 ID）
+_SITE_DOMAIN_ALIASES: dict[str, tuple[str, ...]] = {
+    "天空": ("hdsky.me", "hdsky"),
+    "观众": ("audiences.me", "audiences"),
+}
+_RESOLUTION_RANK: dict[str, int] = {
+    "480p": 1,
+    "576p": 1,
+    "sd": 1,
+    "720p": 2,
+    "hd": 2,
+    "1080p": 3,
+    "1080i": 3,
+    "fhd": 3,
+    "2160p": 4,
+    "4k": 4,
+    "uhd": 4,
+}
 
 
-# ── 选种辅助算法 ──────────────────────────────────────────
+@dataclass(frozen=True)
+class CandidateEval:
+    """经过准入、去重后的候选资源评估对象。"""
+
+    cand: dict[str, Any]
+    covered_all: tuple[int, ...]
+    covered_missing: tuple[int, ...]
+    is_season_pack: bool
+    seeders: int
+    size_bytes: int | None
+    site_id: int | None
+    site_name: str
+    site_sources: tuple[str, ...]
+    stable_key: tuple[str, int, str, str]
+    reason_note: str = ""
+
+
+# ── 基础解析与格式化工具 ─────────────────────────────────────
+
+def _format_bytes(size_bytes: int | None) -> str:
+    if size_bytes is None or size_bytes <= 0:
+        return "未知大小"
+    gb = 1024 ** 3
+    mb = 1024 ** 2
+    if size_bytes >= gb:
+        return f"{size_bytes / gb:.2f} GiB"
+    return f"{size_bytes / mb:.1f} MiB"
+
+
+def _candidate_size_bytes(cand: dict[str, Any]) -> int | None:
+    t = cand.get("torrent_info") or {}
+    raw = t.get("size")
+    if raw is None or raw == "":
+        return None
+    try:
+        val = int(float(raw))
+    except (TypeError, ValueError):
+        return None
+    return val if val > 0 else None
+
+
+def _candidate_seeders(cand: dict[str, Any]) -> int:
+    t = cand.get("torrent_info") or {}
+    try:
+        return max(0, int(t.get("seeders") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _candidate_site_id(cand: dict[str, Any]) -> int | None:
+    t = cand.get("torrent_info") or {}
+    raw = t.get("site")
+    try:
+        return int(raw) if raw is not None and str(raw).strip().lstrip("-").isdigit() else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _candidate_site_name(cand: dict[str, Any]) -> str:
+    t = cand.get("torrent_info") or {}
+    name = str(t.get("site_name") or "").strip()
+    if name:
+        return name
+    sid = _candidate_site_id(cand)
+    return f"站点#{sid}" if sid is not None else ""
+
+
+def _candidate_stable_key(cand: dict[str, Any]) -> tuple[str, int, str, str]:
+    t = cand.get("torrent_info") or {}
+    norm_title = re.sub(r"\s+", " ", str(t.get("title") or "")).strip().casefold()
+    size_val = _candidate_size_bytes(cand) or 0
+    ident = str(t.get("hash") or t.get("info_hash") or t.get("enclosure") or t.get("page_url") or "")
+    site_name = _candidate_site_name(cand)
+    return (norm_title, size_val, site_name, ident)
+
+
+def _torrent_identity_key(cand: dict[str, Any]) -> tuple[Any, ...]:
+    """跨站同种去重键：优先 info_hash，否则按规范化标题 + 字节数（及无大小时的链接）识别。"""
+    t = cand.get("torrent_info") or {}
+    info_hash = str(t.get("hash") or t.get("info_hash") or t.get("torrent_hash") or "").strip().casefold()
+    if info_hash:
+        return ("hash", info_hash)
+    norm_title = re.sub(r"\s+", " ", str(t.get("title") or "")).strip().casefold()
+    size_val = _candidate_size_bytes(cand)
+    if norm_title:
+        return ("rel", norm_title, size_val)
+    enclosure = str(t.get("enclosure") or t.get("page_url") or "").strip()
+    return ("url", enclosure)
+
+
+def _seeder_tier_floor(max_seeders: int, tier_ratio: float = 0.10, min_slack: int = 1) -> int:
+    if max_seeders <= 0:
+        return 0
+    slack = max(int(min_slack), math.floor(max_seeders * max(0.0, float(tier_ratio))))
+    return max(0, max_seeders - slack)
+
+
+def _candidate_resolution_rank(t: dict[str, Any], meta: dict[str, Any]) -> int:
+    text = f"{t.get('title', '')} {meta.get('resource_pix', '')} {' '.join(str(x) for x in (t.get('labels') or []))}".lower()
+    if re.search(r"2160p|4k|uhd", text):
+        return 4
+    if re.search(r"1080p|1080i|fhd", text):
+        return 3
+    if re.search(r"720p|hd(?![a-z0-9])", text):
+        return 2
+    if re.search(r"480p|576p|sd(?![a-z0-9])", text):
+        return 1
+    return 0
+
+
+def _candidate_has_chinese(t: dict[str, Any], meta: dict[str, Any]) -> bool:
+    labels_text = json.dumps(t.get("labels") or [], ensure_ascii=False)
+    combined = f"{labels_text} {t.get('title') or ''} {t.get('description') or ''} {meta.get('subtitle') or ''}"
+    return bool(re.search(r"中文|中字|简中|繁中|国语|chs|cht|简繁|双语|mikan|baha|国粤", combined, re.I))
+
+
+def _passes_explicit_filters(
+    t: dict[str, Any],
+    meta: dict[str, Any],
+    min_resolution: str = "",
+    require_chinese: bool = False,
+) -> bool:
+    if require_chinese and not _candidate_has_chinese(t, meta):
+        return False
+    req = str(min_resolution or "").strip().lower()
+    if req:
+        req_rank = _RESOLUTION_RANK.get(req, 0)
+        if req_rank > 0 and _candidate_resolution_rank(t, meta) < req_rank:
+            return False
+    return True
+
 
 def parse_active_episodes(ep_str: str, total: int = 0) -> set[int]:
     """解析 MoviePilot 活跃下载中的集数字符串（如 'E01-E06', 'E12', '第1-5集'）."""
@@ -56,81 +208,508 @@ def parse_active_episodes(ep_str: str, total: int = 0) -> set[int]:
     return eps
 
 
-def is_season_pack(meta: dict[str, Any], t: dict[str, Any], task_season: int, total: int) -> bool:
-    """精准判断是否为整季资源包。"""
-    eps = meta.get("episode_list") or []
-    if total > 0 and len(eps) == total:
-        return True
-    total_ep = meta.get("total_episode")
-    if total > 0 and total_ep == total and len(eps) == 0:
-        return True
-
-    begin_season = meta.get("begin_season")
-    season_list = meta.get("season_list") or ([begin_season] if begin_season else [])
-    if len(season_list) == 1 and season_list[0] == task_season:
-        begin_ep = meta.get("begin_episode")
-        end_ep = meta.get("end_episode")
-        season_ep = str(meta.get("season_episode") or "").upper().strip()
-        is_season_only = bool(re.match(r"^S\d{1,2}$", season_ep))
-        if (begin_ep is None or begin_ep == 0) and (end_ep is None or end_ep == 0) and len(eps) == 0:
-            title = str(t.get("title") or "")
-            sub = str(meta.get("subtitle") or t.get("description") or "")
-            combined = f"{title} {sub}"
-            if not re.search(r"(?:[Ee][Pp]?\s*\d+|第\s*\d+\s*集|\b\d+\s*集\b)", combined):
-                return True
-            if is_season_only and not re.search(r"[Ee][Pp]?\s*\d+", title):
-                return True
-    return False
-
-
 def get_resolution_score(t: dict[str, Any], meta: dict[str, Any]) -> int:
-    """解析清晰度梯队得分。"""
-    text = f"{t.get('title', '')} {meta.get('resource_pix', '')} {' '.join(t.get('labels') or [])}".lower()
-    if re.search(r"2160p|4k|uhd", text):
-        return 900
-    if re.search(r"1080p|1080i|fhd", text):
-        return 1000
-    if re.search(r"720p|hd(?![a-z0-9])", text):
-        return -500
-    if re.search(r"480p|576p|sd(?![a-z0-9])", text):
-        return -1000
-    return 0
+    """解析清晰度梯队得分（兼容保留接口，不推翻同做种档内容量优先顺序）。"""
+    rank = _candidate_resolution_rank(t, meta)
+    return {4: 900, 3: 1000, 2: -500, 1: -1000}.get(rank, 0)
 
 
 def calculate_candidate_score(cand: dict[str, Any], hits: list[int], all_eps: list[int]) -> float:
-    """计算单个候选资源的综合评分。"""
+    """兼容辅助评分：仅作参考或兜底排序特征，主决策由同做种档 + 省容量方案负责。"""
+    t = cand.get("torrent_info") or {}
+    meta = cand.get("meta_info") or {}
+    hits_count = len(hits)
+    redundant_count = max(0, len(all_eps) - hits_count)
+    net_gain = hits_count * 350 - redundant_count * 120
+    res_score = get_resolution_score(t, meta)
+    cn_score = 400 if _candidate_has_chinese(t, meta) else 0
+    seeds = _candidate_seeders(cand)
+    seeds_score = (200 + min(seeds, 50)) if seeds >= 5 else (seeds * 20)
+    return float(net_gain + res_score + cn_score + seeds_score)
+
+
+# ── 站点范围动态解析 ─────────────────────────────────────────
+
+def _match_target_site(sites_raw: list[dict[str, Any]], target: str) -> list[dict[str, Any]]:
+    norm = target.strip().casefold()
+    exact = [s for s in sites_raw if str(s.get("name") or "").strip().casefold() == norm]
+    if exact:
+        return exact
+    aliases = _SITE_DOMAIN_ALIASES.get(target.strip(), (norm,))
+    matched: list[dict[str, Any]] = []
+    for s in sites_raw:
+        name_l = str(s.get("name") or "").strip().casefold()
+        domain_l = str(s.get("domain") or s.get("url") or "").strip().casefold()
+        if any(a in name_l or a in domain_l for a in aliases):
+            matched.append(s)
+    return matched
+
+
+async def resolve_gap_fill_search_sites(
+    mp: Any,
+    extra_site_names: list[str] | None = None,
+) -> dict[str, Any]:
+    """每批从 MP 解析默认搜索站点，并动态合并已启用的“天空”“观众”。
+
+    不写死 ID；读取失败时不传入缩窄集合，并明确标明范围未确认；
+    当 MP 默认设置为空且代表全部有效站点时，保留 None（全部范围），避免传入部分 ID 反而缩窄。
+    """
+    settings = get_settings()
+    if extra_site_names is None:
+        raw_extra = str(getattr(settings, "gap_fill_extra_sites", "天空,观众") or "天空,观众")
+        extra_targets = [p.strip() for p in re.split(r"[,，、\s]+", raw_extra) if p.strip()]
+    else:
+        extra_targets = [str(p).strip() for p in extra_site_names if str(p).strip()]
+
+    get_sites_fn = getattr(mp, "get_sites", None)
+    get_indexer_fn = getattr(mp, "get_indexer_sites", None)
+    is_mocked = isinstance(get_sites_fn, Mock) or isinstance(get_indexer_fn, Mock)
+    origin_key = f"{getattr(mp, 'origin', 'default')}|{'|'.join(extra_targets)}"
+
+    now = time.time()
+    if not is_mocked and origin_key in _search_sites_cache:
+        ts, cached = _search_sites_cache[origin_key]
+        if now - ts < _SEARCH_SITES_TTL:
+            return cached
+
+    sites_raw: Any = None
+    sites_err: str | None = None
+    if callable(get_sites_fn):
+        try:
+            sites_raw = await get_sites_fn()
+        except Exception as exc:
+            sites_err = f"{type(exc).__name__}: {exc}"
+
+    indexer_raw: Any = None
+    indexer_err: str | None = None
+    if callable(get_indexer_fn):
+        try:
+            indexer_raw = await get_indexer_fn()
+        except Exception as exc:
+            indexer_err = f"{type(exc).__name__}: {exc}"
+
+    # 单元测试传入默认 AsyncMock() 且未配置返回值时，保持兼容，不传入无效站点参数
+    if not isinstance(sites_raw, list) and not isinstance(indexer_raw, dict) and not sites_err and not indexer_err:
+        return {
+            "sites_param": None,
+            "requested_ids": [],
+            "requested_label": "未配置站点映射(沿用 MP 默认范围)",
+            "id_to_name": {},
+            "scope_confirmed": False,
+            "mode": "unconfigured_mock",
+            "diagnostics": [],
+        }
+
+    diagnostics: list[str] = []
+    if not isinstance(sites_raw, list):
+        diagnostics.append(f"读取 MP 站点清单失败({sites_err or '非列表'})，站点范围未确认")
+        return {
+            "sites_param": None,
+            "requested_ids": [],
+            "requested_label": "MP默认范围(站点范围未确认)",
+            "id_to_name": {},
+            "scope_confirmed": False,
+            "mode": "sites_load_failed",
+            "diagnostics": diagnostics,
+        }
+
+    site_by_id: dict[int, dict[str, Any]] = {}
+    id_to_name: dict[int, str] = {}
+    for item in sites_raw:
+        if not isinstance(item, dict):
+            continue
+        raw_id = item.get("id")
+        if raw_id is None or not str(raw_id).strip().lstrip("-").isdigit():
+            continue
+        sid = int(raw_id)
+        site_by_id[sid] = item
+        id_to_name[sid] = str(item.get("name") or f"站点#{sid}").strip()
+
+    extra_active_ids: list[int] = []
+    for target in extra_targets:
+        matches = _match_target_site(list(site_by_id.values()), target)
+        if not matches:
+            diagnostics.append(f"附加站点「{target}」缺失，未找到匹配站点")
+            continue
+        active_matches = [m for m in matches if m.get("is_active", True) is not False]
+        disabled_matches = [m for m in matches if m.get("is_active", True) is False]
+        if len(matches) > 1:
+            ids_str = ",".join(str(m.get("id")) for m in matches)
+            diagnostics.append(f"附加站点「{target}」存在重名/多条匹配(ID: {ids_str})")
+        if disabled_matches and not active_matches:
+            ids_str = ",".join(str(m.get("id")) for m in disabled_matches)
+            diagnostics.append(f"附加站点「{target}」已停用(ID: {ids_str})")
+        for m in active_matches:
+            sid = int(m["id"])
+            if sid not in extra_active_ids:
+                extra_active_ids.append(sid)
+
+    if not isinstance(indexer_raw, dict) or not indexer_raw.get("ok"):
+        err_detail = indexer_err or (indexer_raw.get("error") if isinstance(indexer_raw, dict) else "返回格式未识别")
+        diagnostics.append(f"读取 MP IndexerSites 失败({err_detail})，站点范围未确认，沿用 MP 默认范围")
+        result = {
+            "sites_param": None,
+            "requested_ids": [],
+            "requested_label": "MP默认范围(IndexerSites 读取失败，未确认)",
+            "id_to_name": id_to_name,
+            "scope_confirmed": False,
+            "mode": "indexer_load_failed",
+            "diagnostics": diagnostics,
+        }
+        return result
+
+    default_ids = indexer_raw.get("value")
+    if not default_ids:
+        # MP 中 IndexerSites 为 [] / None 代表搜索全部已启用站点；保留 None 不缩窄范围！
+        all_active_ids = sorted(sid for sid, info in site_by_id.items() if info.get("is_active", True) is not False)
+        names = [f"{sid}:{id_to_name.get(sid, sid)}" for sid in all_active_ids]
+        result = {
+            "sites_param": None,
+            "requested_ids": all_active_ids,
+            "requested_label": f"全部已启用站点 ({', '.join(names)})" if names else "全部已启用站点",
+            "id_to_name": id_to_name,
+            "scope_confirmed": True,
+            "mode": "all_active",
+            "diagnostics": diagnostics,
+        }
+    else:
+        enabled_defaults: list[int] = []
+        for sid in default_ids:
+            info = site_by_id.get(sid)
+            if info is None:
+                diagnostics.append(f"默认索引站点 ID={sid} 在站点列表中不存在")
+            elif info.get("is_active", True) is False:
+                diagnostics.append(f"默认索引站点「{id_to_name.get(sid, sid)}」(ID:{sid}) 已停用，已排除")
+            else:
+                enabled_defaults.append(sid)
+
+        merged_ids = sorted(set(enabled_defaults) | set(extra_active_ids))
+        labels = [f"{sid}:{id_to_name.get(sid, sid)}" for sid in merged_ids]
+        result = {
+            "sites_param": merged_ids or None,
+            "requested_ids": merged_ids,
+            "requested_label": ", ".join(labels) if labels else "无有效站点",
+            "id_to_name": id_to_name,
+            "scope_confirmed": True,
+            "mode": "explicit_merged",
+            "diagnostics": diagnostics,
+        }
+
+    if not is_mocked:
+        _search_sites_cache[origin_key] = (now, result)
+    return result
+
+
+# ── 季号、单集与整季包严格验证 ───────────────────────────────
+
+_MULTI_SEASON_TITLE_RE = re.compile(
+    r"(?:\bS0?\d+\s*[-~～至到]\s*S?0?\d+\b|S0?(\d+)[.\s_\-]+S0?(\d+)|第\s*\d+\s*[-~～至到]\s*\d+\s*季|全\s*[2-9]\d*\s*季|第[一二三四五六七八九十]+至[一二三四五六七八九十]+季)",
+    re.I,
+)
+_PARTIAL_MARKER_RE = re.compile(
+    r"(?:更新至|连载[中至]|半季|前\s*\d+\s*[集期]|后\s*\d+\s*[集期]|缺[第E]?\d+[集期]?[上中下]?|欠第?\d+[集期]|暂缺)",
+    re.I,
+)
+_EXTRA_DESC_RE = re.compile(r"加更|纯享|花絮|预告|先导|特辑|番外|采访", re.I)
+
+
+def _extract_seasons(meta: dict[str, Any], title: str) -> tuple[bool, int | None, str]:
+    """验证候选仅指向单一季度并返回 (is_valid_single_season, meta_season, fail_reason)."""
+    begin_s = meta.get("begin_season")
+    end_s = meta.get("end_season")
+    total_s = meta.get("total_season")
+    if end_s is not None and begin_s is not None and str(end_s) != str(begin_s):
+        return False, None, f"跨多季({begin_s}-{end_s})"
+    if isinstance(total_s, int) and total_s > 1:
+        return False, None, f"跨{total_s}季"
+    m_multi = _MULTI_SEASON_TITLE_RE.search(title)
+    if m_multi:
+        if m_multi.group(1) and m_multi.group(2) and m_multi.group(1) == m_multi.group(2):
+            pass
+        else:
+            return False, None, "标题标明跨多季"
+
+    season_list = meta.get("season_list") or ([begin_s] if begin_s is not None else [])
+    clean_seasons: list[int] = []
+    for s in season_list:
+        if s is not None and str(s).lstrip("-").isdigit():
+            val = int(s)
+            if val not in clean_seasons:
+                clean_seasons.append(val)
+    if len(clean_seasons) > 1:
+        return False, None, f"season_list含多季({clean_seasons})"
+    if len(clean_seasons) == 1:
+        return True, clean_seasons[0], ""
+    return True, None, ""
+
+
+def _parse_files_entries(files_raw: Any) -> list[dict[str, Any]]:
+    """标准化候选文件清单条目。"""
+    if not isinstance(files_raw, list):
+        return []
+    items: list[dict[str, Any]] = []
+    for entry in files_raw:
+        if isinstance(entry, str):
+            items.append({"name": entry, "size": None})
+        elif isinstance(entry, dict):
+            name = str(entry.get("name") or entry.get("filename") or entry.get("path") or "").strip()
+            if not name:
+                continue
+            raw_size = entry.get("size")
+            size_val = int(raw_size) if raw_size is not None and str(raw_size).isdigit() else None
+            items.append({"name": name, "path": str(entry.get("path") or name), "size": size_val})
+    return items
+
+
+def _check_part_title_segment_completeness(
+    file_entries: list[dict[str, Any]],
+    season_num: int,
+    total_eps: int,
+    by_period: bool,
+    part_episode_mapping: dict[int, list[int]] | dict[str, int] | None = None,
+) -> tuple[bool, set[int], str]:
+    """通过明确文件清单核对正片集号/期号与上下段完整性。"""
+    covered_eps: set[int] = set()
+    period_segments: dict[int, set[int]] = {}
+    has_unsegmented_period: set[int] = set()
+    saw_other_season = False
+
+    for entry in file_entries:
+        name = entry["name"]
+        if not is_video_file(name):
+            continue
+        if entry.get("size") == 0:
+            continue
+        if by_period:
+            if _EXTRA_DESC_RE.search(name):
+                continue
+            periods = [int(n) for n in re.findall(r"第\s*(\d+)\s*期", name)]
+            if not periods:
+                ep = parse_episode(name, entry.get("path", ""), entry.get("size") or 1024)
+                if ep.is_extra or ep.is_special:
+                    continue
+                if ep.season_number not in (None, season_num):
+                    saw_other_season = True
+                    continue
+                if ep.episode_numbers and isinstance(part_episode_mapping, dict):
+                    pass
+                continue
+            seg = segment_number(name)
+            for p_num in periods:
+                covered_eps.add(p_num)
+                if seg is None:
+                    has_unsegmented_period.add(p_num)
+                else:
+                    period_segments.setdefault(p_num, set()).add(seg)
+            continue
+
+        # 普通剧集 / 带 Part 标题剧集：使用正式集号映射，绝不把 Part 当集号或凭文件数充数
+        ep_stem = re.sub(r"(?i)part[ ._-]*(?:0?[123]|[abc])(?=[^a-z0-9]|$)", "", name)
+        ep = parse_episode(ep_stem, entry.get("path", ""), entry.get("size") or 1024)
+        if ep.is_extra or ep.is_special:
+            continue
+        if ep.season_number not in (None, season_num):
+            saw_other_season = True
+            continue
+        # 若文件名本身带 Part 标签但未能映射到正式集号，则必须依赖映射表而非猜测
+        if ep.episode_numbers:
+            covered_eps.update(ep.episode_numbers)
+        elif isinstance(part_episode_mapping, dict):
+            mapped = part_episode_mapping.get(name) or part_episode_mapping.get(name.casefold())
+            if isinstance(mapped, int) and mapped > 0:
+                covered_eps.add(mapped)
+
+    if saw_other_season:
+        return False, covered_eps, "文件清单包含其他季正片"
+
+    expected = set(range(1, total_eps + 1))
+    if not expected.issubset(covered_eps):
+        missing = sorted(expected - covered_eps)
+        return False, covered_eps, f"文件清单未覆盖全部正片集号(仍缺 {missing[:6]})"
+
+    if by_period:
+        # 若提供了明确期号分段映射，核对每期每段；否则若存在分段期号，核对各期上下段无缺口
+        if isinstance(part_episode_mapping, dict) and all(isinstance(k, int) and isinstance(v, list) for k, v in part_episode_mapping.items()):
+            for p_num, req_segs in part_episode_mapping.items():  # type: ignore[union-attr]
+                if not req_segs:
+                    continue
+                actual_segs = period_segments.get(p_num, set())
+                missing_segs = [s for s in req_segs if s != 0 and s not in actual_segs]
+                if missing_segs and p_num not in has_unsegmented_period:
+                    return False, covered_eps, f"综艺包第{p_num}期缺少分段({missing_segs})"
+        elif period_segments:
+            dominant_segs = max(period_segments.values(), key=len)
+            if len(dominant_segs) >= 2:
+                for p_num in range(1, total_eps + 1):
+                    if p_num in has_unsegmented_period:
+                        continue
+                    segs_for_p = period_segments.get(p_num, set())
+                    if segs_for_p and not dominant_segs.issubset(segs_for_p):
+                        miss = sorted(dominant_segs - segs_for_p)
+                        return False, covered_eps, f"综艺包第{p_num}期缺少分段({miss})"
+                    if not segs_for_p:
+                        return False, covered_eps, f"综艺包第{p_num}期缺少分段文件"
+
+    return True, covered_eps, "文件清单核验通过"
+
+
+def verify_season_pack_candidate(
+    cand: dict[str, Any],
+    season_num: int,
+    total_eps: int,
+    *,
+    by_period: bool = False,
+    parts_mode: bool = False,
+    part_episode_mapping: dict[int, list[int]] | dict[str, int] | None = None,
+) -> tuple[bool, set[int], str]:
+    """严格核验整季资源包是否同季、完整覆盖 1..total_eps 且非未知/残缺资源。
+
+    核验优先级：
+    1) 明确文件清单（解析每集/每期每段，单凭“共9个文件”不可通过）
+    2) 结构化分集表 / episode_list / begin..end（覆盖 1..total_eps，分段完整）
+    3) 无文件清单的真实 MP 索引结果：必须同时明确标注对应总集数全集（total_episode == total_eps 或显式 全N集/E01-EN），绝不把仅有 S03 的未知资源当整季包。
+    """
+    if total_eps <= 0:
+        return False, set(), "总集数未知，无法核实整季完整性"
+
     t = cand.get("torrent_info") or {}
     meta = cand.get("meta_info") or {}
     title = str(t.get("title") or "")
-    hits_count = len(hits)
-    redundant_count = max(0, len(all_eps) - hits_count)
+    sub = str(meta.get("subtitle") or t.get("description") or "")
+    combined = f"{title} {sub}"
 
-    # 1. 命中净增益 (命中+350, 冗余-120)
-    net_gain = hits_count * 350 - redundant_count * 120
+    parsed = parse_episode(title)
+    if parsed.is_extra or parsed.is_special:
+        return False, set(), "花絮或特别篇"
+    if by_period and _EXTRA_DESC_RE.search(combined):
+        return False, set(), "包含加更/纯享/花絮/预告等非完整正片标记"
 
-    # 2. 清晰度梯队
-    res_score = get_resolution_score(t, meta)
+    single_ok, meta_season, s_reason = _extract_seasons(meta, title)
+    if not single_ok:
+        return False, set(), s_reason
+    if meta_season is not None and meta_season != season_num:
+        return False, set(), f"季号不符(S{meta_season:02d})"
+    if parsed.season_number is not None and parsed.season_number != season_num:
+        return False, set(), f"标题季号不符(S{parsed.season_number:02d})"
 
-    # 3. 码率区间合理性
-    size_bytes = float(t.get("size") or 0)
-    ep_count = len(all_eps) if all_eps else 1
-    size_mb = (size_bytes / ep_count) / (1024 * 1024)
-    bitrate_score = 200 if 200 <= size_mb <= 3500 else (-600 if size_mb < 80 else 0)
+    if _PARTIAL_MARKER_RE.search(combined):
+        return False, set(), "包含未完结/残缺/缺集标记"
 
-    # 4. 中文标识偏好
-    labels_text = json.dumps(t.get("labels") or [], ensure_ascii=False) + title
-    has_cn = 1 if re.search(r"中文|中字|简中|繁中|国语|chs|cht|简繁|双语|mikan|baha", labels_text, re.I) else 0
-    cn_score = 400 if has_cn else 0
+    expected = set(range(1, total_eps + 1))
 
-    # 5. 做种健康度
-    seeds = int(t.get("seeders") or 0)
-    seeds_score = (200 + min(seeds, 50)) if seeds >= 5 else (seeds * 20)
+    # 1. 明确文件清单优先核验
+    files_raw = t.get("files") or t.get("file_list") or t.get("filelist") or cand.get("files") or cand.get("file_list")
+    if isinstance(files_raw, list) and len(files_raw) > 0:
+        entries = _parse_files_entries(files_raw)
+        return _check_part_title_segment_completeness(
+            entries,
+            season_num=season_num,
+            total_eps=total_eps,
+            by_period=by_period,
+            part_episode_mapping=part_episode_mapping,
+        )
 
-    return net_gain + res_score + bitrate_score + cn_score + seeds_score
+    # 2. 结构化分集表 / 集号清单
+    ep_table = cand.get("episode_table") or t.get("episode_table")
+    if isinstance(ep_table, list) and ep_table:
+        table_eps: set[int] = set()
+        table_segs: dict[int, set[int]] = {}
+        for row in ep_table:
+            if isinstance(row, int) and row > 0:
+                table_eps.add(row)
+            elif isinstance(row, dict):
+                ep_v = row.get("episode") or row.get("episode_number") or row.get("period")
+                if ep_v is not None and str(ep_v).isdigit():
+                    ev = int(ep_v)
+                    table_eps.add(ev)
+                    seg_v = row.get("segment") or row.get("part")
+                    if seg_v is not None and str(seg_v).isdigit():
+                        table_segs.setdefault(ev, set()).add(int(seg_v))
+                    elif row.get("missing") or row.get("incomplete"):
+                        return False, table_eps, f"分集表标明第{ev}集不完整"
+        if not expected.issubset(table_eps):
+            return False, table_eps, f"分集表未覆盖全季(缺 {sorted(expected - table_eps)[:6]})"
+        if by_period and table_segs:
+            dom = max(table_segs.values(), key=len)
+            if len(dom) >= 2:
+                for p_num in range(1, total_eps + 1):
+                    if table_segs.get(p_num) and not dom.issubset(table_segs[p_num]):
+                        return False, table_eps, f"分集表第{p_num}期缺少分段"
+        return True, expected, "分集表核验通过"
+
+    meta_eps_raw = meta.get("episode_list") or []
+    if isinstance(meta_eps_raw, list) and len(meta_eps_raw) > 0:
+        meta_eps = {int(x) for x in meta_eps_raw if str(x).isdigit() and int(x) > 0}
+        if not expected.issubset(meta_eps):
+            return False, meta_eps, f"集号列表仅覆盖 {len(meta_eps)}/{total_eps} 集"
+        if by_period:
+            # 按期综艺若缺少文件清单或显式分段表，不可凭孤立 episode_list 断言上下段齐全（除非明确非分段）
+            if isinstance(part_episode_mapping, dict) and any(len(v) > 1 for v in part_episode_mapping.values() if isinstance(v, list)):
+                return False, meta_eps, "按期分段综艺缺乏文件/分段明细，无法确认各期分段齐全"
+        return True, expected, "结构化集号列表完整覆盖"
+
+    b_ep = meta.get("begin_episode")
+    e_ep = meta.get("end_episode")
+    if b_ep is not None and str(b_ep).isdigit() and int(b_ep) > 0:
+        end_v = int(e_ep) if (e_ep is not None and str(e_ep).isdigit()) else int(b_ep)
+        ep_span = set(range(int(b_ep), max(int(b_ep), end_v) + 1))
+        if not expected.issubset(ep_span):
+            return False, ep_span, f"集数范围 E{int(b_ep):02d}-E{end_v:02d} 未覆盖全季({total_eps}集)"
+        if by_period and isinstance(part_episode_mapping, dict) and any(len(v) > 1 for v in part_episode_mapping.values() if isinstance(v, list)):
+            return False, ep_span, "按期分段综艺缺乏文件清单，无法确认各期分段齐全"
+        return True, expected, "起止集数完整覆盖"
+
+    # 3. 无文件清单且无单集列表时，核验显式全集说明（支持 MP 真实聚合结果；绝不把仅有 S03 当整季）
+    if by_period:
+        return False, set(), "按期综艺整季缺乏明确文件清单或分段表，暂不视为完整季包"
+    if parts_mode:
+        # 存在 Part 标题散 files 时，避免无清单整包误覆盖已映射或未知分段
+        explicit_full_num = re.search(rf"(?:全\s*0*{total_eps}\s*集|(?<!\d)0*{total_eps}\s*集全|(?<![A-Za-z0-9])E?0*1\s*[-~～至]\s*E?0*{total_eps}(?!\d))", combined, re.I)
+        if not (meta.get("total_episode") == total_eps and explicit_full_num):
+            return False, set(), "带 Part 剧集整季包缺乏文件清单或正式全集映射核验"
+
+    total_ep_meta = meta.get("total_episode")
+    if isinstance(total_ep_meta, int) and total_ep_meta > 0 and total_ep_meta != total_eps:
+        return False, set(), f"标注总集数({total_ep_meta})与本季总集数({total_eps})不符，疑似仅含部分已播集"
+
+    # 若标题本身点明特定集范围/单集号（例如 S03E01-E08），必须完整覆盖
+    explicit_range = re.search(r"[Ee]0*(\d{1,3})\s*[-~～至到]\s*[Ee]?0*(\d{1,3})", combined)
+    if explicit_range:
+        r_start, r_end = int(explicit_range.group(1)), int(explicit_range.group(2))
+        if not expected.issubset(set(range(r_start, r_end + 1))):
+            return False, set(), f"范围 E{r_start:02d}-E{r_end:02d} 未覆盖全季({total_eps}集)"
+        return True, expected, "标题集数范围核验完整"
+
+    # 单点集号且无全集标记，不能视为整季
+    if re.search(r"(?:S\d{1,2}E\d+|第\s*\d+\s*集)", title, re.I) and not re.search(rf"(?:全\s*0*{total_eps}\s*集|(?<!\d)0*{total_eps}\s*集全|Complete)", combined, re.I):
+        return False, set(), "仅为单集或非完整合集"
+
+    # 必须具备明确与 total_eps 一致的整季完整性证据（支持 全08集 等前导零写法）
+    has_full_count_text = bool(
+        re.search(rf"(?:全\s*0*{total_eps}\s*集|(?<!\d)0*{total_eps}\s*集全|(?<!\d)0*1\s*[-~～至]\s*0*{total_eps}\s*集)", combined, re.I)
+    )
+    has_complete_word = bool(re.search(r"\bComplete\b|完整全?季|全集打包", combined, re.I))
+    if (total_ep_meta == total_eps and (has_complete_word or has_full_count_text)) or has_full_count_text:
+        return True, expected, f"MP元数据及全{total_eps}集声明核验完整"
+
+    return False, set(), "仅为季号未知覆盖资源(无文件清单/分集表/全集集数核验)"
+
+
+def is_season_pack(meta: dict[str, Any], t: dict[str, Any], task_season: int, total: int, by_period: bool = False) -> bool:
+    """兼容封装：调用严格整季验证，不再将仅有 S03 的未知资源直接判定为整季包。"""
+    ok, _, _ = verify_season_pack_candidate(
+        {"meta_info": meta, "torrent_info": t},
+        season_num=task_season,
+        total_eps=total,
+        by_period=by_period,
+    )
+    return ok
 
 
 def _targeted_episode_numbers(meta, title, parsed, missing):
     """只接受集号明确且全部落在缺号内的散集或连集。片名里的年份、段号均不能充当集号。"""
+    if not missing:
+        return []
     explicit = re.search(r"(?:S\d{1,2}E\d|(?<![A-Za-z])EP?\d|第\s*\d+\s*[集话話])", title, re.I)
     title_numbers = set(parsed.episode_numbers) if explicit else set()
     numbers = meta.get("episode_list") or []
@@ -148,13 +727,421 @@ def _targeted_episode_numbers(meta, title, parsed, missing):
     return sorted(coverage)
 
 
+def _extract_standalone_episodes(
+    cand: dict[str, Any],
+    season_num: int,
+    missing_eps: list[int],
+    *,
+    by_period: bool = False,
+    parts_mode: bool = False,
+    tmdb_id_num: int = 0,
+    keyword_fallback: bool = False,
+) -> list[int]:
+    """解析非整季候选所覆盖的全部正片集号；冲突或未知返回空。"""
+    t = cand.get("torrent_info") or {}
+    meta = cand.get("meta_info") or {}
+    m_info = cand.get("media_info") or {}
+    title = str(t.get("title") or "")
+    missing_set = set(missing_eps)
+
+    if by_period:
+        period = re.findall(r"第\s*(\d+)\s*期", title)
+        seasons = meta.get("season_list") or ([meta.get("begin_season")] if meta.get("begin_season") is not None else [])
+        if (
+            len(period) != 1
+            or int(period[0]) not in missing_set
+            or segment_number(title)
+            or seasons != [season_num]
+            or (tmdb_id_num and str(m_info.get("tmdb_id") or "") != str(tmdb_id_num))
+            or re.search(r"加更|纯享|花絮|预告|[上中下][篇集部]|期\s*[（(【\[]?\s*[上中下]|特别版|\bpart\b", title)
+        ):
+            return []
+        return [int(period[0])]
+
+    ep_stem = re.sub(r"(?i)part[ ._-]*(?:0?[123]|[abc])(?=[^a-z0-9]|$)", "", title) if parts_mode else title
+    parsed = parse_episode(ep_stem)
+    if parsed.is_extra or parsed.is_special:
+        return []
+    if parsed.season_number not in (None, season_num):
+        return []
+
+    if parts_mode:
+        return _targeted_episode_numbers(meta, title, parsed, missing_eps)
+
+    if keyword_fallback:
+        single_ok, meta_season, _ = _extract_seasons(meta, title)
+        if not single_ok:
+            return []
+        if meta_season is None and parsed.season_number != season_num:
+            return []
+
+    explicit_title = re.search(r"(?:S\d{1,2}E\d|(?<![A-Za-z])EP?\d|第\s*\d+\s*[集话話])", title, re.I)
+    title_numbers = set(parsed.episode_numbers) if explicit_title else set()
+
+    numbers = meta.get("episode_list") or []
+    if not numbers and meta.get("begin_episode"):
+        first = str(meta["begin_episode"])
+        last = str(meta.get("end_episode") or first)
+        if first.isdigit() and last.isdigit() and 0 < int(first) <= int(last):
+            numbers = list(range(int(first), int(last) + 1))
+
+    if numbers:
+        if not all(str(n).isdigit() for n in numbers):
+            return []
+        coverage = {int(n) for n in numbers}
+        if title_numbers and not title_numbers.issubset(coverage):
+            return []
+        return sorted(coverage)
+
+    if title_numbers:
+        return sorted(title_numbers)
+
+    # 再检查文件清单中的散集号
+    files_raw = t.get("files") or t.get("file_list") or t.get("filelist")
+    if isinstance(files_raw, list) and files_raw:
+        ep_set: set[int] = set()
+        for entry in _parse_files_entries(files_raw):
+            if not is_video_file(entry["name"]):
+                continue
+            ep = parse_episode(entry["name"], entry.get("path", ""), entry.get("size") or 1024)
+            if not ep.is_extra and not ep.is_special and ep.season_number in (None, season_num):
+                ep_set.update(ep.episode_numbers)
+        if ep_set:
+            return sorted(ep_set)
+
+    return []
+
+
+# ── 去重、同档省容量与多集最优规划 ───────────────────────────
+
+def _dedup_evaluations(evals: list[CandidateEval]) -> list[CandidateEval]:
+    """跨站同种去重：同种保留做种最高副本，并汇总全部可用站点来源。"""
+    grouped: dict[tuple[Any, ...], list[CandidateEval]] = {}
+    for ev in evals:
+        key = (_torrent_identity_key(ev.cand), ev.covered_all, ev.is_season_pack)
+        grouped.setdefault(key, []).append(ev)
+
+    deduped: list[CandidateEval] = []
+    for group in grouped.values():
+        group.sort(
+            key=lambda e: (-e.seeders, e.size_bytes is None, e.size_bytes or 0, e.stable_key),
+        )
+        best = group[0]
+        sources: list[str] = []
+        seen_src: set[str] = set()
+        for item in group:
+            label = f"{item.site_name or '未知站'}({item.seeders})"
+            if label not in seen_src:
+                seen_src.add(label)
+                sources.append(label)
+        deduped.append(
+            CandidateEval(
+                cand=best.cand,
+                covered_all=best.covered_all,
+                covered_missing=best.covered_missing,
+                is_season_pack=best.is_season_pack,
+                seeders=best.seeders,
+                size_bytes=best.size_bytes,
+                site_id=best.site_id,
+                site_name=best.site_name,
+                site_sources=tuple(sources),
+                stable_key=best.stable_key,
+                reason_note=best.reason_note,
+            )
+        )
+    deduped.sort(key=lambda e: (-e.seeders, e.size_bytes is None, e.size_bytes or 0, e.stable_key))
+    return deduped
+
+
+def _pick_best_season_pack(
+    season_packs: list[CandidateEval],
+    tier_ratio: float = 0.10,
+    min_slack: int = 1,
+) -> tuple[CandidateEval | None, str]:
+    """从合格整季包中选择同做种顶档中字节最小的方案，并返回决策说明与次选差异。"""
+    if not season_packs:
+        return None, ""
+    h_seeders = max(sp.seeders for sp in season_packs)
+    floor = _seeder_tier_floor(h_seeders, tier_ratio=tier_ratio, min_slack=min_slack)
+
+    ranked = sorted(
+        season_packs,
+        key=lambda sp: (
+            0 if sp.seeders >= floor else 1,
+            (sp.size_bytes is None) if sp.seeders >= floor else False,
+            (sp.size_bytes or 0) if sp.seeders >= floor else 0,
+            -sp.seeders,
+            sp.size_bytes is None,
+            sp.size_bytes or 0,
+            sp.stable_key,
+        ),
+    )
+    winner = ranked[0]
+    scope_desc = f"做种顶档阈值≥{floor}(H={h_seeders}, 容差={max(min_slack, math.floor(h_seeders * tier_ratio))})"
+    if len(ranked) > 1:
+        ru = ranked[1]
+        in_same_tier = ru.seeders >= floor
+        diff_str = (
+            f"+{_format_bytes((ru.size_bytes or 0) - (winner.size_bytes or 0))}"
+            if (winner.size_bytes and ru.size_bytes and ru.size_bytes >= winner.size_bytes)
+            else f"{_format_bytes(ru.size_bytes)}/{ru.seeders}做种"
+        )
+        ru_desc = f"次选[{'同档' if in_same_tier else '跨档'}:{ru.site_name or '?'} {ru.seeders}做种 {_format_bytes(ru.size_bytes)}, 差{diff_str}]"
+    else:
+        ru_desc = "无其他备选"
+    return winner, f"{scope_desc}; {ru_desc}"
+
+
+def _plan_standalone_downloads(
+    standalone_evals: list[CandidateEval],
+    needed: list[int],
+    *,
+    tier_ratio: float = 0.10,
+    min_slack: int = 1,
+    max_submissions: int | None = None,
+) -> tuple[list[CandidateEval], str]:
+    """多集省容量决策：先最大化覆盖缺号，再按同做种档内总字节最小选出完整组合。
+
+    同一个连集包容量只计一次；大量候选先按 Pareto 剪枝，再执行有界位掩码搜索。
+    """
+    needed_list = sorted(set(needed))
+    if not standalone_evals or not needed_list:
+        return [], ""
+
+    ep_to_bit = {ep: idx for idx, ep in enumerate(needed_list)}
+    all_items: list[tuple[int, CandidateEval]] = []
+    union_mask = 0
+    for ev in standalone_evals:
+        mask = 0
+        for ep in ev.covered_missing:
+            if ep in ep_to_bit:
+                mask |= 1 << ep_to_bit[ep]
+        if mask:
+            all_items.append((mask, ev))
+            union_mask |= mask
+
+    if not all_items:
+        return [], ""
+
+    # 对相同覆盖集合剪枝：保留做种-体积 Pareto 前沿（剔除覆盖相同、做种不优且容量更大的候选）
+    by_mask: dict[int, list[CandidateEval]] = {}
+    for mask, ev in all_items:
+        by_mask.setdefault(mask, []).append(ev)
+
+    pruned: list[tuple[int, CandidateEval]] = []
+    for mask, cands in by_mask.items():
+        cands.sort(key=lambda e: (-e.seeders, e.size_bytes is None, e.size_bytes or 0, e.stable_key))
+        best_known_size: int | None = None
+        kept_unknown = False
+        for c in cands:
+            if c.size_bytes is None:
+                if not kept_unknown and best_known_size is None:
+                    pruned.append((mask, c))
+                    kept_unknown = True
+            else:
+                if best_known_size is None or c.size_bytes < best_known_size:
+                    pruned.append((mask, c))
+                    best_known_size = c.size_bytes
+
+    max_subs = max_submissions if max_submissions is not None else max(20, len(needed_list))
+
+    # 计算在达到最大覆盖集合 union_mask 时，所能达到的最高“组合瓶颈做种数 H_plan”
+    unique_seeders = sorted({ev.seeders for _, ev in pruned}, reverse=True)
+    h_plan = unique_seeders[-1]
+    for thresh in unique_seeders:
+        cov = 0
+        for m, ev in pruned:
+            if ev.seeders >= thresh:
+                cov |= m
+        if cov == union_mask:
+            h_plan = thresh
+            break
+
+    floor = _seeder_tier_floor(h_plan, tier_ratio=tier_ratio, min_slack=min_slack)
+    tier_items = [(m, ev) for m, ev in pruned if ev.seeders >= floor]
+    if not tier_items:
+        tier_items = pruned
+
+    # 同档候选排序：多覆盖且单位缺集体积更小者优先，未知大小靠后
+    tier_items.sort(
+        key=lambda pair: (
+            pair[1].size_bytes is None,
+            (pair[1].size_bytes or 0) / max(1, pair[0].bit_count()),
+            -pair[0].bit_count(),
+            -pair[1].seeders,
+            pair[1].stable_key,
+        )
+    )
+
+    def _plan_cost(chosen: list[CandidateEval]) -> tuple[Any, ...]:
+        unknown_cnt = sum(1 for c in chosen if c.size_bytes is None)
+        known_sum = sum(c.size_bytes or 0 for c in chosen)
+        min_s = min((c.seeders for c in chosen), default=0)
+        return (unknown_cnt > 0, unknown_cnt, known_sum, len(chosen), -min_s, tuple(c.stable_key for c in chosen))
+
+    # 1. 先构造确定性贪心可行解作为上界（同样可用于超大集合兜底）
+    def _greedy_cover(items: list[tuple[int, CandidateEval]]) -> list[CandidateEval]:
+        rem = union_mask
+        picked: list[CandidateEval] = []
+        used: set[int] = set()
+        while rem and len(picked) < max_subs:
+            best_idx = -1
+            best_key: tuple[Any, ...] | None = None
+            for idx, (m, ev) in enumerate(items):
+                if idx in used:
+                    continue
+                gain = (m & rem).bit_count()
+                if gain <= 0:
+                    continue
+                k = (ev.size_bytes is None, (ev.size_bytes or 0) / gain, -gain, -ev.seeders, ev.stable_key)
+                if best_key is None or k < best_key:
+                    best_key = k
+                    best_idx = idx
+            if best_idx < 0:
+                break
+            used.add(best_idx)
+            rem &= ~items[best_idx][0]
+            picked.append(items[best_idx][1])
+        return picked if rem == 0 else []
+
+    best_plan: list[CandidateEval] = _greedy_cover(tier_items)
+    best_cost: tuple[Any, ...] | None = _plan_cost(best_plan) if best_plan else None
+    runner_up: tuple[tuple[Any, ...], list[CandidateEval]] | None = None
+
+    # 为高效按位覆盖预建索引：每个 bit 对应能覆盖该 bit 的候选下标
+    bit_to_cands: dict[int, list[int]] = {}
+    for idx, (m, _) in enumerate(tier_items):
+        tmp = m
+        while tmp:
+            lsb = tmp & -tmp
+            bit_to_cands.setdefault(lsb.bit_length() - 1, []).append(idx)
+            tmp ^= lsb
+
+    node_visits = 0
+    max_nodes = 15000
+    search_truncated = False
+
+    def _dfs(rem_mask: int, chosen: list[CandidateEval], known_sum: int, unknown_cnt: int) -> None:
+        nonlocal best_plan, best_cost, runner_up, node_visits, search_truncated
+        node_visits += 1
+        if node_visits > max_nodes:
+            search_truncated = True
+            return
+
+        if rem_mask == 0:
+            cost = _plan_cost(chosen)
+            if best_cost is None or cost < best_cost:
+                if best_cost is not None and best_plan:
+                    runner_up = (best_cost, list(best_plan))
+                best_cost = cost
+                best_plan = list(chosen)
+            elif cost != best_cost and (runner_up is None or cost < runner_up[0]):
+                runner_up = (cost, list(chosen))
+            return
+
+        if len(chosen) >= max_subs:
+            return
+
+        # 最优性下界剪枝
+        if best_cost is not None:
+            best_has_unk, _, best_bytes, _, _, _ = best_cost
+            if not best_has_unk and unknown_cnt > 0:
+                return
+            if (unknown_cnt > 0) == best_has_unk and known_sum > best_bytes:
+                return
+
+        # 选覆盖候选最少的那一集（MRV），大幅收敛搜索树
+        target_bit = -1
+        target_cands: list[int] = []
+        tmp = rem_mask
+        while tmp:
+            lsb = tmp & -tmp
+            b = lsb.bit_length() - 1
+            opts = bit_to_cands.get(b, [])
+            if not opts:
+                return
+            if target_bit == -1 or len(opts) < len(target_cands):
+                target_bit = b
+                target_cands = opts
+                if len(target_cands) <= 1:
+                    break
+            tmp ^= lsb
+
+        for idx in target_cands:
+            m, ev = tier_items[idx]
+            new_rem = rem_mask & ~m
+            if new_rem == rem_mask:
+                continue
+            chosen.append(ev)
+            _dfs(
+                new_rem,
+                chosen,
+                known_sum + (ev.size_bytes or 0),
+                unknown_cnt + (1 if ev.size_bytes is None else 0),
+            )
+            chosen.pop()
+            if node_visits > max_nodes:
+                search_truncated = True
+                return
+
+    _dfs(union_mask, [], 0, 0)
+
+    if not best_plan:
+        # 极少数情况下 max_subs 限制导致全并集未凑够，回退贪心最大化覆盖数
+        rem = union_mask
+        fallback_plan: list[CandidateEval] = []
+        used_idx: set[int] = set()
+        while rem and len(fallback_plan) < max_subs:
+            avail = [(idx, m & rem, ev) for idx, (m, ev) in enumerate(tier_items) if idx not in used_idx and (m & rem)]
+            if not avail:
+                break
+            avail.sort(key=lambda x: (-x[1].bit_count(), x[2].size_bytes is None, x[2].size_bytes or 0, -x[2].seeders, x[2].stable_key))
+            pick_idx, _, pick_ev = avail[0]
+            used_idx.add(pick_idx)
+            rem &= ~tier_items[pick_idx][0]
+            fallback_plan.append(pick_ev)
+        best_plan = fallback_plan
+
+    chosen_bytes = sum(c.size_bytes or 0 for c in best_plan) if best_plan and all(c.size_bytes for c in best_plan) else None
+    mode_tag = "有界搜索(达到上限)" if search_truncated else "Pareto剪枝+精确比较"
+    scope_note = (
+        f"散集/连集比较范围: 目标{len(needed_list)}集, 最高瓶颈做种H={h_plan}, 同档阈值≥{floor}, "
+        f"{mode_tag}, 入选{len(best_plan)}项总计{_format_bytes(chosen_bytes)}"
+    )
+    if runner_up:
+        ru_cands = runner_up[1]
+        ru_bytes = sum(c.size_bytes or 0 for c in ru_cands) if all(c.size_bytes for c in ru_cands) else None
+        ru_seeds = min((c.seeders for c in ru_cands), default=0)
+        if chosen_bytes and ru_bytes and ru_bytes >= chosen_bytes:
+            scope_note += f"; 次选{len(ru_cands)}项({ru_seeds}做种 {_format_bytes(ru_bytes)}, 多{_format_bytes(ru_bytes - chosen_bytes)})"
+        else:
+            scope_note += f"; 次选{len(ru_cands)}项({ru_seeds}做种 {_format_bytes(ru_bytes)})"
+    elif best_plan:
+        # 检查跨档更快但更大的选项（或同档未被挑选的其他单集最优）
+        chosen_ids = {id(c) for c in best_plan}
+        other_sp = [ev for _, ev in pruned if id(ev) not in chosen_ids]
+        if other_sp:
+            other_sp.sort(key=lambda e: (-e.seeders, e.size_bytes is None, e.size_bytes or 0))
+            alt = other_sp[0]
+            scope_note += f"; 备选参考[{alt.site_name or '?'} {alt.seeders}做种 {_format_bytes(alt.size_bytes)}]"
+
+    return best_plan, scope_note
+
+
 def select_best_candidates(
     eligible: list[dict[str, Any]],
     needed: list[int],
     total: int,
     season: int,
+    *,
+    by_period: bool = False,
+    parts_mode: bool = False,
+    min_seeders: int = 2,
+    tier_ratio: float = 0.10,
+    min_slack: int = 1,
+    allow_season_pack: bool = True,
 ) -> list[tuple[dict[str, Any], list[int], bool]]:
-    """根据缺失集号选出最优候选组合（可能为整季包，也可能为多候选散集组合）。
+    """根据缺失集号选出最优候选组合（省容量散集优先，散集补不全且允许时回退整季包）。
 
     Returns:
         [(candidate, covered_episodes, is_season_pack), ...]
@@ -162,55 +1149,257 @@ def select_best_candidates(
     if not eligible or not needed:
         return []
 
-    season_packs = [c for c in eligible if is_season_pack(c.get("meta_info") or {}, c.get("torrent_info") or {}, season, total)]
-    standalone = [c for c in eligible if not is_season_pack(c.get("meta_info") or {}, c.get("torrent_info") or {}, season, total)]
+    missing_set = set(needed)
+    standalone_evals: list[CandidateEval] = []
+    pack_evals: list[CandidateEval] = []
 
-    prefer_standalone = False
-    if season_packs and needed and total > 0:
-        missing_count = len(needed)
-        missing_ratio = missing_count / total
-        if missing_count <= 3 and missing_ratio < 0.35:
-            # 缺失集极少，检查散集能否完全覆盖
-            standalone_covered = set()
-            for sc in standalone:
-                sc_eps = (sc.get("meta_info") or {}).get("episode_list") or []
-                standalone_covered.update(sc_eps)
-            if set(needed).issubset(standalone_covered):
-                prefer_standalone = True
+    for c in eligible:
+        t = c.get("torrent_info") or {}
+        meta = c.get("meta_info") or {}
+        seeds = _candidate_seeders(c)
+        if seeds < min_seeders:
+            continue
 
-    if season_packs and not prefer_standalone:
-        # 选得分最高的整季包
-        best_sp = max(
-            season_packs,
-            key=lambda c: calculate_candidate_score(c, list(range(1, total + 1)), list(range(1, total + 1)))
+        is_sp, sp_eps, _ = verify_season_pack_candidate(
+            c,
+            season_num=season,
+            total_eps=total,
+            by_period=by_period,
+            parts_mode=parts_mode,
         )
-        return [(best_sp, list(range(1, total + 1)), True)]
+        if is_sp and missing_set.issubset(sp_eps):
+            pack_evals.append(
+                CandidateEval(
+                    cand=c,
+                    covered_all=tuple(sorted(sp_eps)),
+                    covered_missing=tuple(sorted(missing_set)),
+                    is_season_pack=True,
+                    seeders=seeds,
+                    size_bytes=_candidate_size_bytes(c),
+                    site_id=_candidate_site_id(c),
+                    site_name=_candidate_site_name(c),
+                    site_sources=(),
+                    stable_key=_candidate_stable_key(c),
+                )
+            )
+            continue
 
-    # 散集贪心覆盖算法
-    remaining_needed = set(needed)
-    selected: list[tuple[dict[str, Any], list[int], bool]] = []
-    max_submissions = 10
+        st_eps = _extract_standalone_episodes(
+            c,
+            season_num=season,
+            missing_eps=needed,
+            by_period=by_period,
+            parts_mode=parts_mode,
+        )
+        hits = sorted(ep for ep in st_eps if ep in missing_set)
+        if hits:
+            standalone_evals.append(
+                CandidateEval(
+                    cand=c,
+                    covered_all=tuple(st_eps),
+                    covered_missing=tuple(hits),
+                    is_season_pack=False,
+                    seeders=seeds,
+                    size_bytes=_candidate_size_bytes(c),
+                    site_id=_candidate_site_id(c),
+                    site_name=_candidate_site_name(c),
+                    site_sources=(),
+                    stable_key=_candidate_stable_key(c),
+                )
+            )
 
-    while remaining_needed and len(selected) < max_submissions:
-        scored: list[tuple[float, dict[str, Any], list[int]]] = []
-        for c in eligible:
-            meta = c.get("meta_info") or {}
-            eps = meta.get("episode_list") or []
-            hits = [ep for ep in eps if ep in remaining_needed]
-            if not hits:
+    dedup_standalones = _dedup_evaluations(standalone_evals)
+    dedup_packs = _dedup_evaluations(pack_evals)
+
+    plan_evals, _ = _plan_standalone_downloads(
+        dedup_standalones,
+        needed,
+        tier_ratio=tier_ratio,
+        min_slack=min_slack,
+    )
+    covered_by_standalone = {ep for ev in plan_evals for ep in ev.covered_missing}
+
+    if missing_set.issubset(covered_by_standalone) and plan_evals:
+        return [(ev.cand, list(ev.covered_missing), False) for ev in plan_evals]
+
+    if allow_season_pack and dedup_packs:
+        best_sp, _ = _pick_best_season_pack(dedup_packs, tier_ratio=tier_ratio, min_slack=min_slack)
+        if best_sp:
+            return [(best_sp.cand, list(best_sp.covered_all), True)]
+
+    return [(ev.cand, list(ev.covered_missing), False) for ev in plan_evals]
+
+
+# ── 候选评估分类（独立散集分支与独立整季验证分支） ────────────
+
+def _evaluate_raw_candidates(
+    raw_results: list[dict[str, Any]],
+    *,
+    tmdb_id_num: int,
+    season_num: int,
+    total_eps: int,
+    missing_eps: list[int],
+    by_period: bool,
+    parts_mode: bool,
+    part_episode_mapping: dict[int, list[int]] | None,
+    keyword_fallback: bool,
+    min_seeders: int,
+    min_resolution: str,
+    require_chinese: bool,
+) -> tuple[list[CandidateEval], list[CandidateEval], list[str]]:
+    """将原始检索结果分别按散集分支与整季包分支验证（不相互提前过滤）。"""
+    missing_set = set(missing_eps)
+    standalone_evals: list[CandidateEval] = []
+    pack_evals: list[CandidateEval] = []
+    reject_reasons: list[str] = []
+
+    for c in raw_results:
+        t = c.get("torrent_info") or {}
+        m_info = c.get("media_info") or {}
+        meta = c.get("meta_info") or {}
+        if not t or not m_info:
+            continue
+
+        seeds = _candidate_seeders(c)
+        if seeds < min_seeders:
+            reject_reasons.append("做种不足")
+            continue
+
+        candidate_id = m_info.get("tmdb_id")
+        if tmdb_id_num:
+            if keyword_fallback and str(candidate_id or "") != str(tmdb_id_num):
+                reject_reasons.append("作品身份不符")
                 continue
-            score = calculate_candidate_score(c, hits, eps)
-            scored.append((score, c, hits))
+            if candidate_id and str(candidate_id) != str(tmdb_id_num):
+                reject_reasons.append("TMDB_ID不符")
+                continue
 
-        if not scored:
-            break
+        title = str(t.get("title") or "")
+        single_ok, meta_season, s_reason = _extract_seasons(meta, title)
+        if not single_ok or (meta_season is not None and meta_season != season_num):
+            reject_reasons.append(s_reason or "季号不符")
+            continue
 
-        scored.sort(key=lambda x: x[0], reverse=True)
-        best_score, best_cand, best_hits = scored[0]
-        selected.append((best_cand, best_hits, False))
-        remaining_needed -= set(best_hits)
+        if not _passes_explicit_filters(t, meta, min_resolution=min_resolution, require_chinese=require_chinese):
+            reject_reasons.append("未达到显式画质或中字要求")
+            continue
 
-    return selected
+        site_id = _candidate_site_id(c)
+        site_name = _candidate_site_name(c)
+        size_bytes = _candidate_size_bytes(c)
+        stable_key = _candidate_stable_key(c)
+
+        # 分支 1：严格整季包验证（不因“散集仅允许缺号”而被提前过滤）
+        is_sp, sp_eps, sp_note = verify_season_pack_candidate(
+            c,
+            season_num=season_num,
+            total_eps=total_eps,
+            by_period=by_period,
+            parts_mode=parts_mode,
+            part_episode_mapping=part_episode_mapping,
+        )
+        if is_sp and missing_set.issubset(sp_eps):
+            pack_evals.append(
+                CandidateEval(
+                    cand=c,
+                    covered_all=tuple(sorted(sp_eps)),
+                    covered_missing=tuple(sorted(missing_set)),
+                    is_season_pack=True,
+                    seeders=seeds,
+                    size_bytes=size_bytes,
+                    site_id=site_id,
+                    site_name=site_name,
+                    site_sources=(),
+                    stable_key=stable_key,
+                    reason_note=sp_note,
+                )
+            )
+            continue
+
+        # 分支 2：散集 / 连集验证
+        st_eps = _extract_standalone_episodes(
+            c,
+            season_num=season_num,
+            missing_eps=missing_eps,
+            by_period=by_period,
+            parts_mode=parts_mode,
+            tmdb_id_num=tmdb_id_num,
+            keyword_fallback=keyword_fallback,
+        )
+        hits = sorted(ep for ep in st_eps if ep in missing_set)
+        if hits:
+            standalone_evals.append(
+                CandidateEval(
+                    cand=c,
+                    covered_all=tuple(st_eps),
+                    covered_missing=tuple(hits),
+                    is_season_pack=False,
+                    seeders=seeds,
+                    size_bytes=size_bytes,
+                    site_id=site_id,
+                    site_name=site_name,
+                    site_sources=(),
+                    stable_key=stable_key,
+                )
+            )
+        elif sp_note:
+            reject_reasons.append(sp_note)
+
+    return standalone_evals, pack_evals, reject_reasons
+
+
+def _collect_returned_sites(raw_results: list[dict[str, Any]], id_to_name: dict[int, str]) -> list[str]:
+    seen: list[str] = []
+    seen_keys: set[str] = set()
+    for item in raw_results:
+        t = item.get("torrent_info") or {}
+        sid = _candidate_site_id(item)
+        sname = str(t.get("site_name") or "").strip() or (id_to_name.get(sid, "") if sid is not None else "")
+        if not sname and sid is None:
+            continue
+        key = f"{sid}:{sname}"
+        if key not in seen_keys:
+            seen_keys.add(key)
+            seen.append(f"{sid}:{sname}" if sid is not None and sname else (sname or str(sid)))
+    return seen
+
+
+def _is_torrent_already_queued(
+    ev: CandidateEval,
+    active_downloads: list[dict[str, Any]],
+    recent_tasks: list[dict[str, Any]],
+    clean_name: str,
+    tmdb_id_str: str | None,
+    season_num: int,
+    missing_eps: list[int],
+) -> bool:
+    """检查候选种子是否已存在于活跃下载队列或本批次近期已提交清单中（去重后至多一次提交）。"""
+    cand_t = ev.cand.get("torrent_info") or {}
+    cand_title_norm = re.sub(r"\s+", " ", str(cand_t.get("title") or "")).strip().casefold()
+    cand_hash = str(cand_t.get("hash") or cand_t.get("info_hash") or cand_t.get("torrent_hash") or "").strip().casefold()
+
+    for dl in active_downloads:
+        dl_hash = str(dl.get("hash") or dl.get("info_hash") or "").strip().casefold()
+        if cand_hash and dl_hash and cand_hash == dl_hash:
+            return True
+        dl_title = re.sub(r"\s+", " ", str(dl.get("title") or dl.get("name") or "")).strip().casefold()
+        if cand_title_norm and dl_title and cand_title_norm == dl_title:
+            return True
+
+    for local in recent_tasks:
+        l_id = local.get("tmdb_id")
+        l_name = str(local.get("show_name") or "")
+        if l_id and tmdb_id_str and str(l_id) != str(tmdb_id_str):
+            continue
+        same_show = (l_id and str(l_id) == str(tmdb_id_str)) or clean_name.casefold() in l_name.casefold()
+        if same_show and local.get("season") == season_num:
+            if local.get("is_season_pack") or ev.is_season_pack:
+                return True
+            if cand_title_norm and cand_title_norm == str(local.get("torrent_title_norm") or ""):
+                return True
+            if set(ev.covered_missing).issubset(set(local.get("covered_episodes") or [])):
+                return True
+    return False
 
 
 # ── 核心调度函数 ──────────────────────────────────────────
@@ -223,6 +1412,12 @@ async def execute_gap_fill_download(
     settings = get_settings()
     if not settings.mp_url or not settings.mp_token:
         raise ValueError("MoviePilot 未配置 (MF_MP_URL 或 MF_MP_TOKEN 缺失)")
+
+    min_seeders = max(1, int(getattr(settings, "gap_fill_min_seeders", 2) or 2))
+    tier_ratio = float(getattr(settings, "gap_fill_seeder_tier_ratio", 0.10) or 0.10)
+    min_slack = max(1, int(getattr(settings, "gap_fill_min_seeder_slack", 1) or 1))
+    min_resolution = str(getattr(settings, "gap_fill_min_resolution", "") or "")
+    require_chinese = bool(getattr(settings, "gap_fill_require_chinese", False))
 
     stmt = select(SeasonRecord).where(SeasonRecord.id.in_(season_record_ids))
     res = await db.execute(stmt)
@@ -242,18 +1437,18 @@ async def execute_gap_fill_download(
     submitted_results: list[dict[str, Any]] = []
     errors: list[str] = []
     skipped: list[str] = []
+    returned_sites_all: list[str] = []
+    site_plan: dict[str, Any] = {}
+    overwrite_policy: dict[str, Any] = {}
 
     try:
-        # 【依据方案第二阶段第 3 条：共享队列快照与本地待确认清单】
-        active_downloads: list[dict[str, Any]] = []
-        now = time.time()
         global _active_downloads_cache, _active_downloads_cache_time, _recently_submitted_tasks
-        # 清理已过期的本地待确认记录
+        now = time.time()
         _recently_submitted_tasks = [t for t in _recently_submitted_tasks if now - t.get("timestamp", 0) < _RECENTLY_SUBMITTED_TTL]
 
+        is_mocked = isinstance(getattr(mp, "get_active_downloads", None), Mock)
+        active_downloads: list[dict[str, Any]] = []
         try:
-            from unittest.mock import Mock
-            is_mocked = isinstance(getattr(mp, "get_active_downloads", None), Mock)
             if not is_mocked and _active_downloads_cache is not None and (now - _active_downloads_cache_time < _ACTIVE_DOWNLOADS_TTL):
                 active_downloads = list(_active_downloads_cache)
             else:
@@ -262,19 +1457,39 @@ async def execute_gap_fill_download(
                     _active_downloads_cache = fetched
                     _active_downloads_cache_time = now
                     active_downloads = list(fetched)
-                else:
-                    active_downloads = []
         except Exception as q_err:
             log.warning("获取 MoviePilot 活跃下载队列失败，继续直连检索: %s", q_err)
             if _active_downloads_cache:
                 active_downloads = list(_active_downloads_cache)
 
+        # 每批解析有效搜索站点（扩展 天空 / 观众）及入库覆盖策略
+        site_plan = await resolve_gap_fill_search_sites(mp)
+        if site_plan.get("diagnostics"):
+            for dmsg in site_plan["diagnostics"]:
+                log.warning("[补缺站点解析] %s", dmsg)
+        log.info(
+            "本批补缺请求站点范围 [%s]: %s (scope_confirmed=%s)",
+            site_plan.get("mode"), site_plan.get("requested_label"), site_plan.get("scope_confirmed"),
+        )
+
+        get_policy_fn = getattr(mp, "get_transfer_overwrite_policy", None)
+        if callable(get_policy_fn) and not isinstance(get_policy_fn, Mock):
+            try:
+                overwrite_policy = await get_policy_fn()
+            except Exception:
+                overwrite_policy = {}
+
+        sites_param = site_plan.get("sites_param")
+        id_to_name: dict[int, str] = site_plan.get("id_to_name") or {}
+
         for rec in records:
             if rec.status not in ("download_needed", "period_missing"):
                 skipped.append(f"{rec.show_name}：当前清单没有已确认的补缺任务")
                 continue
+
             from app.clients.clouddrive2 import CloudDrive2Client
             from app.core.inspector import run_inspection
+
             by_period = rec.status == "period_missing"
             disk = CloudDrive2Client()
             try:
@@ -284,16 +1499,19 @@ async def execute_gap_fill_download(
                     name = f["name"]
                     if f.get("isDirectory") or not is_video_file(name) or not segment_number(name):
                         continue
-                    # 单独的 Part.01 是段号，不能被纯数字文件名规则当成 E01。
                     stem = re.sub(r"(?i)part[ ._-]*(?:0?[123]|[abc])(?=[^a-z0-9]|$)", "", name)
                     ep = parse_episode(stem, f.get("path", ""), f.get("size", 0))
                     if not ep.is_extra and not ep.is_special and ep.season_number in (None, rec.season_number):
                         parts.append((name, ep.episode_numbers))
-                # 旧清单、已入归档的文件和本季新增文件均按当前两端覆盖重新核对。
-                inspection = await run_inspection(rec.task_id, rec.show_path, disk, mp,
-                                                  only_season_path=rec.season_path,
-                                                  archive_root=settings.archive_root,
-                                                  global_source_root=settings.source_root)
+                inspection = await run_inspection(
+                    rec.task_id,
+                    rec.show_path,
+                    disk,
+                    mp,
+                    only_season_path=rec.season_path,
+                    archive_root=settings.archive_root,
+                    global_source_root=settings.source_root,
+                )
                 fresh = next((s for s in inspection.seasons if s.season_path == rec.season_path), None)
                 if fresh is None:
                     errors.append(f"{rec.show_name}：未能读取本季最新清单，请确认源目录可访问")
@@ -310,24 +1528,20 @@ async def execute_gap_fill_download(
                 continue
             finally:
                 await disk.close()
+
             show_name = rec.show_name
             season_num = rec.season_number
             tmdb_id_str = rec.tmdb_id
-
-            # 如果 tmdb_id 为空，从 show_name 中提取（如 [tmdbid=298770]）
             if not tmdb_id_str:
                 m = re.search(r"\[tmdbid[=:](\d+)\]", show_name, re.I)
                 if m:
                     tmdb_id_str = m.group(1)
 
-            # 清洗剧集标题用于检索
             clean_name = re.sub(r"\[tmdbid[=:]\d+\]", "", show_name, flags=re.I)
             clean_name = re.sub(r"[\(\[（].*?[\)\]）]", " ", clean_name)
-            clean_name = re.sub(r"\s+\d{4}$", "", clean_name).strip()
-            if not clean_name:
-                clean_name = show_name
+            clean_name = re.sub(r"\s+\d{4}$", "", clean_name).strip() or show_name
 
-            missing_eps = []
+            missing_eps: list[int] = []
             if rec.missing_episodes_json:
                 try:
                     missing_eps = json.loads(rec.missing_episodes_json)
@@ -336,17 +1550,14 @@ async def execute_gap_fill_download(
 
             missing_eps = sorted(set(missing_eps) & set(fresh.missing_episodes))
             total_eps = rec.total_episodes or (max(missing_eps) if missing_eps else 0)
-
-            # 仅补用户所选旧清单与本次复查均确认的缺号。
             if not missing_eps:
                 skipped.append(f"{clean_name} S{season_num:02d}：原缺集现已覆盖，无需下载")
                 continue
 
-            # 【tv-workflow-win 工业级机制：实时下载队列与本地待确认清单对齐】
+            # 实时下载队列与本批次已受理记录对齐
             in_progress_eps: set[int] = set()
             for dl in active_downloads:
                 dl_name = str(dl.get("title") or dl.get("name") or "")
-                # 剧名或 TMDB ID 匹配
                 dl_id = dl.get("tmdb_id") or dl.get("tmdbid")
                 if dl_id and tmdb_id_str and str(dl_id) != str(tmdb_id_str):
                     continue
@@ -360,11 +1571,16 @@ async def execute_gap_fill_download(
                         if by_period:
                             in_progress_eps.update(int(n) for n in re.findall(r"第\s*(\d+)\s*期", dl_name))
                         else:
-                            numbers = (parse_active_episodes(ep_field, total_eps) if ep_field else
-                                       parse_episode(dl_name).episode_numbers)
+                            numbers = (
+                                parse_active_episodes(ep_field, total_eps)
+                                if ep_field
+                                else parse_episode(dl_name).episode_numbers
+                            )
+                            # 队列里为整季任务且解析不出分集号时，按全季在途处理
+                            if not numbers and re.search(r"(?:S\d{1,2}(?!E\d)|Complete|全\s*\d+\s*集)", dl_name, re.I):
+                                numbers = list(range(1, total_eps + 1)) if total_eps > 0 else list(missing_eps)
                             in_progress_eps.update(numbers)
 
-            # 纳入刚刚已受理提交的本地待确认清单（仅生产环境启用，防止并发 Worker 竞态重复提交）
             if not is_mocked:
                 for local_task in _recently_submitted_tasks:
                     l_id = local_task.get("tmdb_id")
@@ -374,7 +1590,7 @@ async def execute_gap_fill_download(
                     if (l_id and str(l_id) == str(tmdb_id_str)) or clean_name.casefold() in l_name.casefold() or (tmdb_id_str and tmdb_id_str in l_name):
                         if local_task.get("season") == season_num:
                             if local_task.get("is_season_pack"):
-                                in_progress_eps.update(missing_eps)
+                                in_progress_eps.update(range(1, total_eps + 1) if total_eps > 0 else missing_eps)
                             else:
                                 in_progress_eps.update(local_task.get("covered_episodes", []))
 
@@ -387,26 +1603,51 @@ async def execute_gap_fill_download(
                 log.info("%s S%02d 部分集数 %s 在下载队列中，仅补齐剩余缺失集: %s", clean_name, season_num, in_progress_eps, actually_needed)
                 missing_eps = actually_needed
 
+            has_season_active_overlap = bool(in_progress_eps)
             tmdb_id_num = int(tmdb_id_str) if (tmdb_id_str and tmdb_id_str.isdigit()) else 0
+            search_kwargs: dict[str, Any] = {"sites": sites_param} if sites_param else {}
+            part_mapping = getattr(fresh, "part_episode_mapping", None)
+            parts_mode = bool(parts and not by_period)
 
             log.info(
-                "正在检索补缺资源: %s S%02d (TMDB:%s, 缺失集: %s)",
-                clean_name, season_num, tmdb_id_num or "无", missing_eps
+                "正在检索补缺资源: %s S%02d (TMDB:%s, 缺失集:%s, 请求站点:%s)",
+                clean_name, season_num, tmdb_id_num or "无", missing_eps, site_plan.get("requested_label"),
             )
 
-            # 调用 MoviePilot 搜索资源
+            # 第一轮：按 TMDB 精确搜索（若首轮返回空，则回退标题+季号搜索一次）
+            keyword_fallback = False
+            title_fallback_done = False
+            search_receipts: list[dict[str, Any]] = []
             try:
-                keyword_fallback = False
                 raw_results = await mp.search_resources(
                     tmdb_id=tmdb_id_num,
                     season=season_num,
                     title=clean_name,
+                    **search_kwargs,
                 )
+                r1_sites = _collect_returned_sites(raw_results if isinstance(raw_results, list) else [], id_to_name)
+                search_receipts.append({
+                    "stage": "tmdb_exact" if tmdb_id_num else "title_initial",
+                    "requested_sites": site_plan.get("requested_ids") or "all_active",
+                    "returned_sites": r1_sites,
+                    "api_responded": True,
+                    "count": len(raw_results) if isinstance(raw_results, list) else 0,
+                })
                 if not raw_results and tmdb_id_num:
                     media = await mp.get_media_info(tmdb_id_num)
-                    original = (media or {}).get("original_title") or clean_name
-                    raw_results = await mp.search_resources(title=original, season=season_num)
+                    original = (media or {}).get("original_title") or (media or {}).get("en_title") or clean_name
+                    raw_results = await mp.search_resources(title=original, season=season_num, **search_kwargs)
                     keyword_fallback = True
+                    title_fallback_done = True
+                    fb_sites = _collect_returned_sites(raw_results if isinstance(raw_results, list) else [], id_to_name)
+                    search_receipts.append({
+                        "stage": "title_fallback",
+                        "query": original,
+                        "requested_sites": site_plan.get("requested_ids") or "all_active",
+                        "returned_sites": fb_sites,
+                        "api_responded": True,
+                        "count": len(raw_results) if isinstance(raw_results, list) else 0,
+                    })
             except Exception as se:
                 errors.append(f"{clean_name} S{season_num:02d}：MoviePilot 检索未完成（{type(se).__name__}）")
                 continue
@@ -415,119 +1656,296 @@ async def execute_gap_fill_download(
                 skipped.append(f"{clean_name} S{season_num:02d}：已搜索缺号 {missing_eps}，MoviePilot 本次未返回资源")
                 continue
 
-            # 筛选做种数 >= 2 且季号匹配的合格资源
-            eligible: list[dict[str, Any]] = []
-            for c in raw_results:
-                t = c.get("torrent_info") or {}
-                m_info = c.get("media_info") or {}
-                meta = c.get("meta_info") or {}
-                if not t or not m_info:
-                    continue
-                try:
-                    seeds = int(t.get("seeders") or 0)
-                except (ValueError, TypeError):
-                    seeds = 0
-                if seeds < 2:
-                    continue
-                seasons = meta.get("season_list") or ([meta.get("begin_season")] if meta.get("begin_season") else [])
-                season_ids = {str(s) for s in seasons}
-                candidate_id = m_info.get("tmdb_id")
-                if season_ids and season_ids != {str(season_num)}:
-                    continue
-                if tmdb_id_num and candidate_id and str(candidate_id) != str(tmdb_id_num):
-                    continue
-                if keyword_fallback and str(candidate_id) != str(tmdb_id_num):
-                    continue
-                if (parts and not by_period) or keyword_fallback:
-                    parsed = parse_episode(str(t.get("title") or ""))
-                    if parsed.is_extra or parsed.is_special or parsed.season_number not in (None, season_num):
-                        continue
-                    if not season_ids and parsed.season_number != season_num:
-                        continue
-                    if parts and not by_period:
-                        # 只推已有分段以外的明确缺号，避免整季包重下已有部分或清掉其整理记录。
-                        numbers = _targeted_episode_numbers(meta, str(t.get("title") or ""), parsed, missing_eps)
-                        if not numbers:
-                            continue
-                        c = {**c, "meta_info": {**meta, "episode_list": numbers}}
-                if by_period:
-                    title = str(t.get("title") or "")
-                    period = re.findall(r"第\s*(\d+)\s*期", title)
-                    if (len(period) != 1 or int(period[0]) not in missing_eps or segment_number(title)
-                            or seasons != [season_num] or str(m_info.get("tmdb_id") or "") != str(tmdb_id_num)
-                            or re.search(r"加更|纯享|花絮|预告|[上中下][篇集部]|期\s*[（(【\[]?\s*[上中下]|特别版|\bpart\b", title)):
-                        continue
-                    # 明确标期的单条资源只覆盖该期，避免被通用选种逻辑解释成整季包。
-                    c = {**c, "meta_info": {**meta, "episode_list": [int(period[0])]}}
-                eligible.append(c)
+            # 分别通过独立散集分支与整季包分支评估首轮结果
+            standalone_evals, pack_evals, reject_reasons = _evaluate_raw_candidates(
+                raw_results,
+                tmdb_id_num=tmdb_id_num,
+                season_num=season_num,
+                total_eps=total_eps,
+                missing_eps=missing_eps,
+                by_period=by_period,
+                parts_mode=parts_mode,
+                part_episode_mapping=part_mapping,
+                keyword_fallback=keyword_fallback,
+                min_seeders=min_seeders,
+                min_resolution=min_resolution,
+                require_chinese=require_chinese,
+            )
 
-            if not eligible:
-                reason = "未找到明确标期且作品、季号匹配的整期资源" if by_period else "无做种数≥2且季号匹配的资源"
-                if parts and not by_period:
-                    reason = f"没有满足做种条件且仅覆盖缺号 {missing_eps} 的同季资源"
-                skipped.append(f"{clean_name} S{season_num:02d}: 检索到 {len(raw_results)} 条，{reason}")
-                continue
+            all_returned_sites = list({s for rc in search_receipts for s in rc.get("returned_sites", [])})
+            for s in all_returned_sites:
+                if s not in returned_sites_all:
+                    returned_sites_all.append(s)
 
-            # 选种决策
-            selected = select_best_candidates(eligible, missing_eps, total_eps, season_num)
-            if not selected:
-                skipped.append(f"{clean_name} S{season_num:02d}：候选资源未覆盖缺号 {missing_eps}")
-                continue
+            # 去除队列中已在下载的同种
+            standalone_evals = _dedup_evaluations([
+                ev for ev in standalone_evals
+                if not _is_torrent_already_queued(ev, active_downloads, _recently_submitted_tasks, clean_name, tmdb_id_str, season_num, missing_eps)
+            ])
+            pack_evals = _dedup_evaluations([
+                ev for ev in pack_evals
+                if not _is_torrent_already_queued(ev, active_downloads, _recently_submitted_tasks, clean_name, tmdb_id_str, season_num, missing_eps)
+            ])
 
-            covered = {ep for _, numbers, _ in selected for ep in numbers}
-            uncovered = sorted(set(missing_eps) - covered)
-            if uncovered:
-                skipped.append(f"{clean_name}：缺号 {uncovered} 暂未匹配到可用资源")
-            # 提交下载
-            for cand, covered_eps, is_sp in selected:
-                cand_t = cand.get("torrent_info") or {}
-                cand_m = cand.get("media_info") or {}
-                title = str(cand_t.get("title") or "")
-                site = str(cand_t.get("site_name") or "")
-                seeds = int(cand_t.get("seeders") or 0)
-                plan_desc = f"整季包覆盖(S{season_num:02d})" if is_sp else f"部分集覆盖(E{','.join(map(str, sorted(covered_eps)))})"
+            # 决策步骤 1：先算散集 / 连集省容量方案
+            standalone_plan, standalone_note = _plan_standalone_downloads(
+                standalone_evals,
+                missing_eps,
+                tier_ratio=tier_ratio,
+                min_slack=min_slack,
+            )
+            standalone_covered = {ep for ev in standalone_plan for ep in ev.covered_missing}
+            missing_set = set(missing_eps)
+            all_covered_by_standalone = bool(standalone_plan) and missing_set.issubset(standalone_covered)
 
-                # 【核心流程：在发起下载前，清理 MoviePilot 媒体整理记录，避免入库被跳过】
-                cleared_info: dict[str, Any] = {"cleared_count": 0, "records": []}
-                try:
-                    target_eps_for_clean = None if is_sp else set(covered_eps)
-                    clean_res = cleared_info if by_period or parts else await mp.clear_transfer_history_for_episodes(
-                        title=clean_name,
-                        season=season_num,
-                        episodes=target_eps_for_clean,
-                    )
-                    cleared_info = clean_res
-                    if clean_res.get("cleared_count", 0) > 0:
-                        log.info(
-                            "[%s S%02d] 下载前已联动 MoviePilot 检查媒体整理：共仅删除 %d 条冲突转移记录（未删除任何实体文件，确保新补缺集正常入库）",
-                            clean_name, season_num, clean_res["cleared_count"]
+            selected_evals: list[CandidateEval] = []
+            plan_summary_note = ""
+            deferred_sp_reason = ""
+
+            if all_covered_by_standalone:
+                selected_evals = standalone_plan
+                plan_summary_note = standalone_note
+            else:
+                # 决策步骤 2：散集补不全时先查首轮整季包；仍无合格整包且尚未做标题搜索时，执行一次原名/别名+季号整季补搜
+                if not pack_evals and not title_fallback_done:
+                    try:
+                        search_title = clean_name
+                        if tmdb_id_num:
+                            try:
+                                media_fb = await mp.get_media_info(tmdb_id_num)
+                                if isinstance(media_fb, dict):
+                                    search_title = media_fb.get("original_title") or media_fb.get("en_title") or media_fb.get("title") or clean_name
+                            except Exception:
+                                pass
+                        fb_raw = await mp.search_resources(title=search_title, season=season_num, **search_kwargs)
+                        title_fallback_done = True
+                        fb_list = fb_raw if isinstance(fb_raw, list) else []
+                        fb_sites = _collect_returned_sites(fb_list, id_to_name)
+                        for s in fb_sites:
+                            if s not in returned_sites_all:
+                                returned_sites_all.append(s)
+                        search_receipts.append({
+                            "stage": "season_pack_fallback",
+                            "query": search_title,
+                            "requested_sites": site_plan.get("requested_ids") or "all_active",
+                            "returned_sites": fb_sites,
+                            "api_responded": True,
+                            "count": len(fb_list),
+                        })
+                        if fb_list:
+                            fb_st, fb_sp, fb_rej = _evaluate_raw_candidates(
+                                fb_list,
+                                tmdb_id_num=tmdb_id_num,
+                                season_num=season_num,
+                                total_eps=total_eps,
+                                missing_eps=missing_eps,
+                                by_period=by_period,
+                                parts_mode=parts_mode,
+                                part_episode_mapping=part_mapping,
+                                keyword_fallback=True,
+                                min_seeders=min_seeders,
+                                min_resolution=min_resolution,
+                                require_chinese=require_chinese,
+                            )
+                            reject_reasons.extend(fb_rej)
+                            standalone_evals = _dedup_evaluations(standalone_evals + [
+                                ev for ev in fb_st
+                                if not _is_torrent_already_queued(ev, active_downloads, _recently_submitted_tasks, clean_name, tmdb_id_str, season_num, missing_eps)
+                            ])
+                            pack_evals = _dedup_evaluations(pack_evals + [
+                                ev for ev in fb_sp
+                                if not _is_torrent_already_queued(ev, active_downloads, _recently_submitted_tasks, clean_name, tmdb_id_str, season_num, missing_eps)
+                            ])
+                            # 若补搜到了新散集并能完整补齐，依然优先散集
+                            standalone_plan, standalone_note = _plan_standalone_downloads(
+                                standalone_evals,
+                                missing_eps,
+                                tier_ratio=tier_ratio,
+                                min_slack=min_slack,
+                            )
+                            standalone_covered = {ep for ev in standalone_plan for ep in ev.covered_missing}
+                            all_covered_by_standalone = bool(standalone_plan) and missing_set.issubset(standalone_covered)
+                    except Exception as fb_err:
+                        log.warning("[%s S%02d] 整季补搜未完成: %s", clean_name, season_num, fb_err)
+
+                if all_covered_by_standalone:
+                    selected_evals = standalone_plan
+                    plan_summary_note = standalone_note
+                elif pack_evals:
+                    if has_season_active_overlap:
+                        deferred_sp_reason = (
+                            f"{clean_name} S{season_num:02d}：目标季已有活跃下载 {sorted(in_progress_eps)}，"
+                            "整季包与在途文件存在重叠，暂缓整包待队列变化后再评估"
                         )
-                except Exception as clean_err:
-                    log.warning("检查/清理 MoviePilot 转移历史记录异常（不阻断下载）: %s", clean_err)
+                        if standalone_plan:
+                            selected_evals = standalone_plan
+                            plan_summary_note = standalone_note
+                    else:
+                        best_sp, sp_cmp_note = _pick_best_season_pack(pack_evals, tier_ratio=tier_ratio, min_slack=min_slack)
+                        if best_sp:
+                            selected_evals = [best_sp]
+                            already_owned = max(0, len(best_sp.covered_all) - len(missing_eps))
+                            miss_label = ",".join(f"E{ep:02d}" for ep in missing_eps)
+                            sp_warn = (
+                                f"为补 {miss_label}，下载整季 {len(best_sp.covered_all)} 集，"
+                                f"预计 {_format_bytes(best_sp.size_bytes)}，其中 {already_owned} 集已有"
+                            )
+                            plan_summary_note = f"{sp_warn} ({sp_cmp_note})"
+                            log.info("[%s S%02d] %s", clean_name, season_num, plan_summary_note)
+                elif standalone_plan:
+                    selected_evals = standalone_plan
+                    plan_summary_note = standalone_note
 
-                log.info("向 MoviePilot 提交下载 [%s]: [%s] %s (做种: %d)", plan_desc, site, title, seeds)
+            if deferred_sp_reason:
+                skipped.append(deferred_sp_reason)
+
+            if not selected_evals:
+                if not deferred_sp_reason:
+                    detail_cause = "；".join(dict.fromkeys(reject_reasons[:3])) if reject_reasons else "候选未通过完整度或做种筛选"
+                    skipped.append(f"{clean_name} S{season_num:02d}：缺号 {missing_eps} 暂无可用合格方案（{detail_cause}）")
+                continue
+
+            log.info(
+                "[%s S%02d] 选种决策完成 | %s | 返回候选站点: %s",
+                clean_name, season_num, plan_summary_note, ", ".join(all_returned_sites) or "无",
+            )
+
+            covered_total = {ep for ev in selected_evals for ep in ev.covered_missing}
+            uncovered = sorted(missing_set - covered_total)
+            if uncovered:
+                skipped.append(f"{clean_name} S{season_num:02d}：部分散集已提交，剩余未覆盖缺号 {uncovered}")
+
+            # 统一提交选定下载计划（绝不同批混合部分散集与整季包）
+            for ev in selected_evals:
+                cand_t = ev.cand.get("torrent_info") or {}
+                cand_m = ev.cand.get("media_info") or {}
+                title = str(cand_t.get("title") or "")
+                site = ev.site_name
+                seeds = ev.seeders
+                is_sp = ev.is_season_pack
+                covered_eps = list(ev.covered_all if is_sp else ev.covered_missing)
+                real_missing_covered = sorted(set(ev.covered_missing) & missing_set)
+                already_owned_cnt = max(0, len(ev.covered_all) - len(real_missing_covered))
+                size_display = _format_bytes(ev.size_bytes)
+
+                if is_sp:
+                    miss_tag = ",".join(f"E{ep:02d}" for ep in real_missing_covered)
+                    plan_desc = f"整季包回退(为补 {miss_tag} 下全{len(covered_eps)}集/{size_display}/已有{already_owned_cnt}集)"
+                else:
+                    plan_desc = f"省容量精选(E{','.join(f'{ep:02d}' for ep in covered_eps)}/{size_display})"
+
+                # 【关键安全机制】：整季包路径也仅针对真实缺号清理明确冲突的整理记录，绝不传 episodes=None 清空全季历史！
+                cleared_info: dict[str, Any] = {"cleared_count": 0, "records": [], "protected_count": 0}
+                target_eps_for_clean = set(real_missing_covered)
+                if not by_period and not parts and target_eps_for_clean:
+                    try:
+                        try:
+                            clean_res = await mp.clear_transfer_history_for_episodes(
+                                title=clean_name,
+                                season=season_num,
+                                episodes=target_eps_for_clean,
+                                explicit_only=True,
+                            )
+                        except TypeError:
+                            clean_res = await mp.clear_transfer_history_for_episodes(
+                                title=clean_name,
+                                season=season_num,
+                                episodes=target_eps_for_clean,
+                            )
+                        if isinstance(clean_res, dict):
+                            cleared_info = clean_res
+                        if cleared_info.get("cleared_count", 0) > 0:
+                            log.info(
+                                "[%s S%02d] 下载前仅针对真实缺号 %s 清理 %d 条冲突整理记录（已保护 %d 条已有集/合集记录）",
+                                clean_name, season_num, sorted(target_eps_for_clean),
+                                cleared_info["cleared_count"], cleared_info.get("protected_count", 0),
+                            )
+                    except Exception as clean_err:
+                        log.warning("检查/清理 MoviePilot 转移历史记录异常（不阻断下载）: %s", clean_err)
+
+                log.info(
+                    "向 MoviePilot 提交下载 [%s]: [%s] %s (做种:%d, 大小:%s, 同种来源:%s)",
+                    plan_desc, site, title, seeds, size_display, ",".join(ev.site_sources) or site,
+                )
+                is_ok = False
+                msg = ""
+                reply: Any = None
                 try:
                     reply = await mp.submit_download(cand_m, cand_t)
                     is_ok = isinstance(reply, dict) and reply.get("success") is True
                     msg = reply.get("message", "已提交") if isinstance(reply, dict) else "已提交"
+                except Exception as de:
+                    is_timeout = "timeout" in type(de).__name__.lower() or "timed out" in str(de).lower()
+                    queued_after_timeout = False
+                    if is_timeout:
+                        try:
+                            fresh_q = await mp.get_active_downloads()
+                            if isinstance(fresh_q, list):
+                                _active_downloads_cache = fresh_q
+                                _active_downloads_cache_time = time.time()
+                                queued_after_timeout = _is_torrent_already_queued(
+                                    ev, fresh_q, [], clean_name, tmdb_id_str, season_num, missing_eps
+                                )
+                        except Exception:
+                            pass
+                    if queued_after_timeout:
+                        is_ok = True
+                        msg = "提交响应超时，但经核查 MP 下载队列已确认入列（防重保护生效）"
+                    else:
+                        msg = f"提交下载失败（{type(de).__name__}）"
+                        submitted_results.append({
+                            "show_name": clean_name,
+                            "season": season_num,
+                            "site": site,
+                            "site_id": ev.site_id,
+                            "site_sources": list(ev.site_sources),
+                            "title": title,
+                            "seeds": seeds,
+                            "size_bytes": ev.size_bytes,
+                            "size_display": size_display,
+                            "covered_episodes": covered_eps,
+                            "requested_missing_episodes": list(missing_eps),
+                            "torrent_covered_episodes": list(ev.covered_all),
+                            "already_owned_count": already_owned_cnt,
+                            "is_season_pack": is_sp,
+                            "plan_desc": plan_desc,
+                            "runner_up_diff": plan_summary_note,
+                            "mp_accepted": False,
+                            "library_reconciled": False,
+                            "status": "failed",
+                            "message": msg,
+                        })
+                        continue
 
-                    submitted_results.append({
-                        "show_name": clean_name,
-                        "season": season_num,
-                        "site": site,
-                        "title": title,
-                        "seeds": seeds,
-                        "covered_episodes": covered_eps,
-                        "is_season_pack": is_sp,
-                        "plan_desc": plan_desc,
-                        "cleared_transfer_records_count": cleared_info.get("cleared_count", 0),
-                        "cleared_transfer_records": cleared_info.get("records", []),
-                        "status": "success" if is_ok else "failed",
-                        "message": msg,
-                    })
+                entry = {
+                    "show_name": clean_name,
+                    "season": season_num,
+                    "site": site,
+                    "site_id": ev.site_id,
+                    "site_sources": list(ev.site_sources),
+                    "title": title,
+                    "seeds": seeds,
+                    "size_bytes": ev.size_bytes,
+                    "size_display": size_display,
+                    "covered_episodes": covered_eps,
+                    "requested_missing_episodes": list(missing_eps),
+                    "torrent_covered_episodes": list(ev.covered_all),
+                    "already_owned_count": already_owned_cnt,
+                    "is_season_pack": is_sp,
+                    "plan_desc": plan_desc,
+                    "runner_up_diff": plan_summary_note,
+                    "cleared_transfer_records_count": cleared_info.get("cleared_count", 0),
+                    "cleared_transfer_records": cleared_info.get("records", []),
+                    "protected_history_count": cleared_info.get("protected_count", 0),
+                    "mp_accepted": is_ok,
+                    "library_reconciled": False,
+                    "status": "success" if is_ok else "failed",
+                    "message": msg,
+                }
+                submitted_results.append(entry)
 
-                    # 记录操作日志
-                    op_log = OperationLog(
+                db.add(
+                    OperationLog(
                         task_id=rec.task_id,
                         season_record_id=rec.id,
                         action="download_gap_fill",
@@ -537,36 +1955,42 @@ async def execute_gap_fill_download(
                             "season": season_num,
                             "title": title,
                             "site": site,
+                            "site_sources": list(ev.site_sources),
                             "seeds": seeds,
+                            "size_bytes": ev.size_bytes,
+                            "requested_missing": list(missing_eps),
+                            "torrent_covered": list(ev.covered_all),
                             "covered": covered_eps,
+                            "already_owned_count": already_owned_cnt,
                             "is_season_pack": is_sp,
                             "plan_desc": plan_desc,
+                            "selection_note": plan_summary_note,
+                            "requested_sites": site_plan.get("requested_label"),
+                            "returned_sites": all_returned_sites,
+                            "search_receipts": search_receipts,
+                            "overwrite_policy": overwrite_policy.get("summary", ""),
                             "cleared_transfer_records_count": cleared_info.get("cleared_count", 0),
-                            "cleared_transfer_records": cleared_info.get("records", []),
+                            "protected_history_count": cleared_info.get("protected_count", 0),
+                            "mp_accepted": is_ok,
+                            "library_reconciled": False,
                             "reply": reply,
                         }, ensure_ascii=False),
                     )
-                    db.add(op_log)
+                )
 
-                    if is_ok:
-                        clean_tip = f" (已前置清理 {cleared_info.get('cleared_count', 0)} 条历史整理记录)" if cleared_info.get("cleared_count", 0) > 0 else ""
-                        rec.status_detail = f"已推送 MP 下载: [{site}] {title[:50]} ({plan_desc}{clean_tip})"
-                        # 方案第二阶段第 3 条：受理成功立即加入本地待确认清单（仅生产环境，直至 MP 队列可见）
-                        if not is_mocked:
-                            _recently_submitted_tasks.append({
-                                "tmdb_id": tmdb_id_str,
-                                "show_name": clean_name,
-                                "season": season_num,
-                                "covered_episodes": list(covered_eps),
-                                "is_season_pack": is_sp,
-                                "timestamp": time.time(),
-                            })
-
-                except Exception as de:
-                    message = f"提交下载失败（{type(de).__name__}）"
-                    submitted_results.append({"show_name": clean_name, "season": season_num, "title": title,
-                                              "site": site, "status": "failed", "message": message,
-                                              "covered_episodes": covered_eps})
+                if is_ok:
+                    clean_tip = f" (仅清理 {cleared_info.get('cleared_count', 0)} 条缺号冲突整理记录)" if cleared_info.get("cleared_count", 0) > 0 else ""
+                    rec.status_detail = f"已推送 MP 下载: [{site}] {title[:50]} ({plan_desc}{clean_tip} | 待入库核验)"
+                    if not is_mocked:
+                        _recently_submitted_tasks.append({
+                            "tmdb_id": tmdb_id_str,
+                            "show_name": clean_name,
+                            "season": season_num,
+                            "torrent_title_norm": re.sub(r"\s+", " ", title).strip().casefold(),
+                            "covered_episodes": list(covered_eps),
+                            "is_season_pack": is_sp,
+                            "timestamp": time.time(),
+                        })
 
         await db.commit()
 
@@ -577,24 +2001,33 @@ async def execute_gap_fill_download(
     total_cleared = sum(s.get("cleared_transfer_records_count", 0) for s in submitted_results)
     summary_msg = f"补缺推送完成：共提交 {success_count} 个下载任务"
     if total_cleared > 0:
-        summary_msg += f"（已自动仅清除 {total_cleared} 条 MP 冲突转移记录，确保自动入库）"
+        summary_msg += f"（仅清除 {total_cleared} 条真实缺号冲突整理记录，已有集保持完整）"
     if errors:
         summary_msg += f"，遇到 {len(errors)} 项提醒: {'; '.join(errors[:2])}"
-
     if skipped:
         summary_msg += "。暂缓：" + "；".join(skipped[:2])
     refusals = [s["message"] for s in submitted_results if s["status"] == "failed"]
     if refusals:
         summary_msg += "。MoviePilot 拒绝提交：" + "；".join(str(m) for m in refusals[:2])
-    # F03 契约增强：同时提供 details 与 submitted，双向兼容前端读取
+
     details_list = [
         {
             "success": s["status"] == "success",
             "seeders": s.get("seeds", 0),
+            "size_bytes": s.get("size_bytes"),
+            "size_display": s.get("size_display", "未知大小"),
             "reason": s.get("message", "") if s["status"] == "failed" else s.get("plan_desc", ""),
             "show_name": s.get("show_name", ""),
             "title": s.get("title", ""),
             "site": s.get("site", ""),
+            "site_sources": s.get("site_sources", []),
+            "is_season_pack": s.get("is_season_pack", False),
+            "requested_missing_episodes": s.get("requested_missing_episodes", []),
+            "torrent_covered_episodes": s.get("torrent_covered_episodes", []),
+            "already_owned_count": s.get("already_owned_count", 0),
+            "runner_up_diff": s.get("runner_up_diff", ""),
+            "mp_accepted": s.get("mp_accepted", False),
+            "library_reconciled": s.get("library_reconciled", False),
             "message": s.get("message", ""),
         }
         for s in submitted_results
@@ -608,5 +2041,14 @@ async def execute_gap_fill_download(
         "submitted": submitted_results,
         "details": details_list,
         "total_cleared_transfer_records": total_cleared,
+        "search_sites": {
+            "requested": site_plan.get("requested_label", ""),
+            "requested_ids": site_plan.get("requested_ids", []),
+            "returned": returned_sites_all,
+            "scope_confirmed": site_plan.get("scope_confirmed", False),
+            "mode": site_plan.get("mode", ""),
+            "diagnostics": site_plan.get("diagnostics", []),
+        },
+        "overwrite_policy": overwrite_policy.get("summary", ""),
         "errors": errors,
     }

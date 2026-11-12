@@ -116,19 +116,41 @@ class MoviePilotClient:
         return await self._get(f"/api/v1/media/tmdb:{tmdb_id}", type_name="电视剧")
 
     # ── 资源搜索 ──────────────────────────────────────────
-    async def search_resources(self, tmdb_id: int | None = None, season: int | None = None, title: str | None = None) -> list[dict]:
+    @staticmethod
+    def _format_sites_param(sites: list[int] | tuple[int, ...] | set[int] | str | None) -> str | None:
+        if sites is None:
+            return None
+        if isinstance(sites, str):
+            parts = [p.strip() for p in sites.split(",") if p.strip()]
+            return ",".join(parts) if parts else None
+        ids = sorted({int(s) for s in sites if str(s).strip().lstrip("-").isdigit()})
+        return ",".join(str(s) for s in ids) if ids else None
+
+    async def search_resources(
+        self,
+        tmdb_id: int | None = None,
+        season: int | None = None,
+        title: str | None = None,
+        sites: list[int] | tuple[int, ...] | set[int] | str | None = None,
+    ) -> list[dict]:
+        sites_param = self._format_sites_param(sites)
         if tmdb_id and tmdb_id > 0:
             params: dict[str, Any] = {"mtype": "电视剧"}
             if season is not None:
                 params["season"] = season
             if title:
                 params["title"] = title
+            if sites_param:
+                params["sites"] = sites_param
             res = await self._get(f"/api/v1/search/media/tmdb:{tmdb_id}", **params)
         else:
             keyword = title or ""
             if season is not None:
                 keyword = f"{keyword} S{str(season).zfill(2)}"
-            res = await self._get("/api/v1/search/title", keyword=keyword)
+            params = {"keyword": keyword}
+            if sites_param:
+                params["sites"] = sites_param
+            res = await self._get("/api/v1/search/title", **params)
 
         if isinstance(res, dict) and res.get("success") is False:
             message = str(res.get("message") or "")
@@ -222,6 +244,7 @@ class MoviePilotClient:
         title: str,
         season: int | None = None,
         episodes: set[int] | list[int] | None = None,
+        explicit_only: bool = False,
     ) -> list[dict]:
         """按剧名、季号和集数查找重叠的转移历史记录。
 
@@ -229,6 +252,7 @@ class MoviePilotClient:
             title: 剧集标题（清洗后）
             season: 目标季号（如 1）
             episodes: 目标集数集合（如 {14}）。若为 None 或空，代表整季所有集数。
+            explicit_only: 为 True 且提供目标集数时，仅匹配有明确集号且完全落入 target_eps 内的冲突记录，保护已有集或整季历史不被误删。
         """
         all_items = await self.get_all_transfer_history_for_title(title)
         if not all_items:
@@ -248,9 +272,13 @@ class MoviePilotClient:
             # 2. 集数匹配
             if target_eps is not None and len(target_eps) > 0:
                 item_eps = parse_episode_str(item.get("episodes"))
-                # 如果历史记录有明确集数，且与目标集数无交集，则不匹配
-                if item_eps and not (item_eps & target_eps):
-                    continue
+                if explicit_only:
+                    if not item_eps or not (item_eps & target_eps) or not item_eps.issubset(target_eps):
+                        continue
+                else:
+                    # 如果历史记录有明确集数，且与目标集数无交集，则不匹配
+                    if item_eps and not (item_eps & target_eps):
+                        continue
 
             matched.append(item)
 
@@ -261,13 +289,31 @@ class MoviePilotClient:
         title: str,
         season: int,
         episodes: set[int] | list[int] | None = None,
+        explicit_only: bool = False,
     ) -> dict[str, Any]:
         """针对指定剧集与评估下载的集数，查找并【仅删除转移记录】（绝对不删实体文件）。
 
         Returns:
-            {"cleared_count": int, "records": list[dict], "errors": list[str]}
+            {"cleared_count": int, "records": list[dict], "errors": list[str], "protected_count": int}
         """
-        conflicting = await self.find_transfer_history(title=title, season=season, episodes=episodes)
+        target_eps = set(episodes) if episodes is not None else None
+        conflicting = await self.find_transfer_history(
+            title=title,
+            season=season,
+            episodes=target_eps,
+            explicit_only=explicit_only,
+        )
+        protected_count = 0
+        if explicit_only and target_eps:
+            broad = await self.find_transfer_history(
+                title=title,
+                season=season,
+                episodes=target_eps,
+                explicit_only=False,
+            )
+            matched_ids = {item.get("id") for item in conflicting if item.get("id") is not None}
+            protected_count = sum(1 for item in broad if item.get("id") not in matched_ids)
+
         cleared: list[dict] = []
         errors: list[str] = []
 
@@ -300,6 +346,7 @@ class MoviePilotClient:
             "cleared_count": len(cleared),
             "records": cleared,
             "errors": errors,
+            "protected_count": protected_count,
         }
 
     async def manual_transfer(self, source_path: str, target_path: str | None = None, preview: bool = False) -> dict:
@@ -327,6 +374,59 @@ class MoviePilotClient:
         if isinstance(res, dict):
             return res.get("data") or []
         return []
+
+    async def get_indexer_sites(self) -> dict[str, Any]:
+        """读取 MoviePilot 默认搜索站点配置 (IndexerSites)。"""
+        try:
+            res = await self._get("/api/v1/system/setting/IndexerSites")
+            if isinstance(res, dict):
+                if res.get("success") is False:
+                    return {"ok": False, "value": None, "error": str(res.get("message") or "接口返回失败")}
+                data = res.get("data")
+                if isinstance(data, dict) and "value" in data:
+                    val = data.get("value")
+                    if val is None or val == []:
+                        return {"ok": True, "value": [], "error": None}
+                    if isinstance(val, list):
+                        return {"ok": True, "value": [int(x) for x in val if str(x).lstrip("-").isdigit()], "error": None}
+                if "value" in res:
+                    val = res.get("value")
+                    if val is None or val == []:
+                        return {"ok": True, "value": [], "error": None}
+                    if isinstance(val, list):
+                        return {"ok": True, "value": [int(x) for x in val if str(x).lstrip("-").isdigit()], "error": None}
+            return {"ok": False, "value": None, "error": "返回格式未识别"}
+        except Exception as exc:
+            return {"ok": False, "value": None, "error": f"{type(exc).__name__}: {exc}"}
+
+    async def get_transfer_overwrite_policy(self) -> dict[str, Any]:
+        """读取 MoviePilot 目录整理覆盖策略（仅读取配置，不做任何写入）。"""
+        try:
+            res = await self._get("/api/v1/system/setting/Directories")
+            dirs = (res.get("data") or {}).get("value") if isinstance(res, dict) and isinstance(res.get("data"), dict) else None
+            if not isinstance(dirs, list):
+                return {"ok": False, "tv_modes": [], "protects_existing": None, "summary": "未读到目录覆盖策略"}
+            tv_modes: list[str] = []
+            details: list[dict[str, Any]] = []
+            for d in dirs:
+                if not isinstance(d, dict):
+                    continue
+                mtype = str(d.get("media_type") or "").strip()
+                if mtype in ("", "电视剧", "TV"):
+                    mode = str(d.get("overwrite_mode") or "").strip() or "unknown"
+                    tv_modes.append(mode)
+                    details.append({"name": d.get("name"), "download_path": d.get("download_path"), "overwrite_mode": mode})
+            unique_modes = sorted(set(tv_modes))
+            protects_existing = bool(tv_modes) and all(m == "never" for m in tv_modes)
+            return {
+                "ok": True,
+                "tv_modes": unique_modes,
+                "protects_existing": protects_existing,
+                "details": details,
+                "summary": f"TV目录覆盖策略={','.join(unique_modes) or '未知'}",
+            }
+        except Exception as exc:
+            return {"ok": False, "tv_modes": [], "protects_existing": None, "summary": f"读取覆盖策略失败({type(exc).__name__})"}
 
     # ── 系统 ──────────────────────────────────────────────
     async def get_system_info(self) -> dict:

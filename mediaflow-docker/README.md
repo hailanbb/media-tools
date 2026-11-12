@@ -3,7 +3,7 @@
 > **面向家庭影院与云原生 NAS 的一键容器化部署版本。支持群晖 Synology、QNAP、TrueNAS、Unraid 及各类 Linux 主机。**
 
 [![Docker](https://img.shields.io/badge/Container-Docker%20Compose-2496ed.svg?style=flat-square&logo=docker)](#)
-[![Version](https://img.shields.io/badge/Release-v2.5.15-6366f1.svg?style=flat-square)](#)
+[![Version](https://img.shields.io/badge/Release-v2.5.16-6366f1.svg?style=flat-square)](#)
 
 ---
 

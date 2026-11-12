@@ -4,7 +4,7 @@
 
 > **面向家庭影院与云原生 NAS（115网盘 / CloudDrive2 / MoviePilot / Emby / Jellyfin）的新一代智能影视媒体整理、跨库无损归档与双轨运维治理系统。**
 
-[![Version](https://img.shields.io/badge/Release-v2.5.15-6366f1.svg?style=flat-square&logo=github)](https://github.com/hailanbb/media-tools/releases)
+[![Version](https://img.shields.io/badge/Release-v2.5.16-6366f1.svg?style=flat-square&logo=github)](https://github.com/hailanbb/media-tools/releases)
 [![Docker](https://img.shields.io/badge/Docker-Supported-2496ed.svg?style=flat-square&logo=docker)](mediaflow-docker/)
 [![Windows](https://img.shields.io/badge/Windows-Native-0078d4.svg?style=flat-square&logo=windows)](mediaflow-win/)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776ab.svg?style=flat-square&logo=python)](https://www.python.org/)
@@ -215,13 +215,21 @@ MediaFlow 的每一项核心机制均遵循严谨的第一性原理设计方案�
 * 📘 [《MediaFlow剧季元数据交叉核对与纠错方案》](MediaFlow剧季元数据交叉核对与纠错方案.md) —— 双轨主动核对、播出版型自适应与断崖剥离的核心理论模型；
 * 📗 [《MediaFlow批量一键归档加速与安全并发方案》](MediaFlow批量一键归档加速与安全并发方案-2026-11-10.md) —— 归档完成判断修正、无损同名跳过、剧级互斥锁与快照复用规范；
 * 📙 [《MediaFlow批量冗余清理加速与受控并发方案》](MediaFlow批量冗余清理加速与受控并发方案-2026-11-10.md) —— 单次实物重读双向核验、主视频优先从属删除与受控工作池；
-* 📕 [《MediaFlow批量推送MoviePilot补缺加速与优雅中止方案》](MediaFlow批量推送MoviePilot补缺加速与优雅中止方案-2026-11-10.md) —— 瞬时 AbortController 熔断、批次隔离与短时 TTL 队列快照。
+* 📕 [《MediaFlow批量推送MoviePilot补缺加速与优雅中止方案》](MediaFlow批量推送MoviePilot补缺加速与优雅中止方案-2026-11-10.md) —— 瞬时 AbortController 熔断、批次隔离与短时 TTL 队列快照；
+* 📒 [《MediaFlow批量补缺选种、站点与整季回退优化方案》](MediaFlow批量补缺选种、站点与整季回退优化方案-2026-11-12.md) —— 做种同档内省容量优先、动态六站扩展（含天空/观众）、整季安全回退与已有集保护。
 
 ---
 
 ## 📜 版本演进历史 (Changelog)
 
-### 🚀 最新稳定版：v2.5.15 (2026-11-11)
+### 🚀 最新稳定版：v2.5.16 (2026-11-12)
+
+* **批量补缺选种省容量、站点扩展与整季安全回退优化**：
+  * **同做种档内省容量优先**：以本轮最高做种数 $H$ 划分同档边界 $H - \text{seeders} \le \max(1, \lfloor H \times 10\% \rfloor)$，同档内严格按实际需下载总字节升序选种；大小 `0` 或为空视作未知排在已知之后；支持跨站同种去重（保留多站来源）；多集拼包通过 Pareto 剪枝与有界搜索优先最大化覆盖并比总字节（连集包容量仅计一次），日志详列次选体积差；
+  * **动态将“天空”“观众”纳入补缺默认搜索**：每次按实例实时读取 MP 默认站点 `IndexerSites` 与站点状态（禁止写死 ID），仅合并已启用有效站并统一传递至 TMDB 精确搜索、标题回退与整季补搜；MP 默认为空代表全站时保留全范围不缩窄，配置读取失败不缩窄且明确标明范围未确认；
+  * **散集不全时安全回退整季包并保护已有集**：合格散集能补齐时优先散集；存在未覆盖缺号且同季队列无文件重叠时，优先凭文件清单、完整分集表或显式全集声明严格核验 `1..total_episodes`（拒收仅标 `S03`、缺段综艺或部分已播集），然后触发最多一次原名/别名整季补搜与单次提交；提交前仅清理真实缺号的明确冲突整理记录，绝不传 `episodes=None` 清空全季历史，提交超时先查 MP 下载队列防重。
+
+#### v2.5.15 (2026-11-11)
 
 * **批量一键归档加速、完成判断修正与安全并发体系**：
   * **增量合并完成条件修正（P0）**：显式区分“读取成功且为空”与“读取失败”。当末次读取源季失败时，记为待核实，保存已处理文件并安全保留源季，坚决杜绝误标已归档或误删源目录；
