@@ -1,5 +1,6 @@
 """ORM 模型汇总导出 - 确保所有模型注册到 Base.metadata。"""
 
+from app.models.directory_group import DirectoryGroup
 from app.models.gap_fill import GapFillEpisode, GapFillSeasonRun
 from app.models.metadata_cache import MetadataCache
 from app.models.operation import OperationLog
@@ -15,4 +16,5 @@ __all__ = [
     "MetadataCache",
     "GapFillEpisode",
     "GapFillSeasonRun",
+    "DirectoryGroup",
 ]

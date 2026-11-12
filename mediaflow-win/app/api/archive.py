@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clients.clouddrive2 import CloudDrive2Client
 from app.config import get_settings
+from app.core.directory_governance import find_blocking_group_for_record, normalize_dir_path
 from app.core.episode_parser import is_subtitle_file, is_video_file, parse_episode
 from app.core.inspector import _parse_season_number, _verified_video, diagnose_season
 from app.core.segments import segment_number
@@ -240,6 +241,22 @@ async def execute_archive(
 
     try:
         for (norm_src_show, norm_target_parent), show_seasons in show_groups.items():
+            # 多目录/异名目录组级安全门禁（含实时漂移/目标失效检测）
+            blocked_group = None
+            for rec_probe in show_seasons:
+                blocked_group = await find_blocking_group_for_record(
+                    db, rec_probe, cd2_client=cd2, operation="execute_archive"
+                )
+                if blocked_group is not None:
+                    break
+            if blocked_group is not None:
+                msg_reason = blocked_group.invalidated_reason or "请先查看目录内容并确认目标归档目录或标记有意共存"
+                errors.append(
+                    f"{show_seasons[0].show_name}: 存在未确认的{blocked_group.title or '同 ID 多目录组'}（TMDB {blocked_group.tmdb_id}），已暂停自动归档 — {msg_reason}"
+                )
+                await db.commit()
+                continue
+
             # 认领规范化的源剧根路径和实际目标剧根路径锁
             locks = await _acquire_show_locks([norm_src_show, norm_target_parent])
             target_parent_files_cache: list[dict] | None = None
@@ -567,6 +584,15 @@ async def clean_duplicates(
             c_info = json.loads(rec.conflict_json or "{}") if getattr(rec, "conflict_json", None) else {}
             if isinstance(c_info, dict) and c_info.get("blocking"):
                 errors.append(f"{rec.show_name}：存在未解除的身份冲突，安全拦截清理")
+                continue
+            blocked_group = await find_blocking_group_for_record(
+                db, rec, cd2_client=cd2, operation="clean_duplicates"
+            )
+            if blocked_group is not None:
+                errors.append(
+                    f"{rec.show_name}: 存在未确认的{blocked_group.title or '同 ID 多目录组'}（TMDB {blocked_group.tmdb_id}），已暂停自动清理"
+                )
+                await db.commit()
                 continue
 
             # 获取该季目录在 CD2 上的实时最新文件（强制刷新缓存）
@@ -913,6 +939,19 @@ async def clean_source_redundant(
                 errors.append(err_msg)
                 continue
 
+            blocked_group = await find_blocking_group_for_record(
+                db, rec, cd2_client=cd2, operation="clean_source_redundant"
+            )
+            if blocked_group is not None:
+                err_msg = (
+                    f"{rec.show_name} S{rec.season_number:02d}: 存在未确认或已标记共存的{blocked_group.title or '多目录组'}"
+                    f"（TMDB {blocked_group.tmdb_id}），已暂停删除源端冗余：{blocked_group.invalidated_reason or '请先确认归档目标'}"
+                )
+                log.warning(err_msg)
+                errors.append(err_msg)
+                await db.commit()
+                continue
+
             # 门禁 3: 重新实时获取源端与目标端文件清单，执行集号与独有附件覆盖比对
             try:
                 import re
@@ -935,7 +974,7 @@ async def clean_source_redundant(
                     seasons = await cd2.list_files(dst_parent, force_refresh=True)
                     paths = [i["path"] for i in seasons if i["isDirectory"]
                              and _parse_season_number(i["name"]) == rec.season_number]
-                    if matches != [dst_parent] or paths != [norm_target]:
+                    if (dst_parent not in matches or paths != [norm_target]) if len(matches) > 1 else (matches != [dst_parent] or paths != [norm_target]):
                         raise ValueError("同作品及季号未匹配到唯一归档目录")
                 src_files = await cd2.list_files(source_season_path, force_refresh=True)
                 target_files = await cd2.list_files(archive_target, force_refresh=True)
@@ -1168,6 +1207,18 @@ async def delete_source_show(
 
     cd2 = CloudDrive2Client()
     try:
+        blocked_group = await find_blocking_group_for_record(
+            db, rec, cd2_client=cd2, operation="delete_source_show"
+        )
+        if blocked_group is not None:
+            await db.commit()
+            return StatusResponse(
+                ok=False,
+                message=(
+                    f"存在未确认的{blocked_group.title or '同 ID 多目录组'}（TMDB {blocked_group.tmdb_id}），"
+                    f"安全拦截删除源端目录：{blocked_group.invalidated_reason or '请先确认归档目标或标记有意共存'}"
+                ),
+            )
         # 1. 物理删除源端剧集完整目录（移至回收站）
         log.warning("用户主动请求删除源端剧集目录: %s (关联记录: %s)", show_path, rec.id)
         await cd2.delete_file(show_path)

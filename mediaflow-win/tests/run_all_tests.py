@@ -18,6 +18,7 @@ sys.stdout.reconfigure(encoding='utf-8')
 
 SUITES = [
     {"name": "分段及订阅联合操作", "cmd": [sys.executable, "tests/test_governance.py"], "type": "python"},
+    {"name": "外文发行名防误报与同TMDB多目录治理验收", "cmd": [sys.executable, "tests/test_release_alias_and_multi_dir.py"], "type": "python"},
     {"name": "补缺选种、站点扩展与整季回退验收", "cmd": [sys.executable, "tests/test_gap_fill_optimization.py"], "type": "python"},
     {"name": "作品归属冲突、跨条目映射与缓存状态验收", "cmd": [sys.executable, "tests/test_identity_and_mapping.py"], "type": "python"},
     {"name": "补缺持久化回执、部分扣减、对账与中止验收", "cmd": [sys.executable, "tests/test_gap_fill_persistence.py"], "type": "python"},

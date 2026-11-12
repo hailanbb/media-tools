@@ -17,6 +17,7 @@ class TaskSummary(BaseModel):
     archive_check: int = 0
     already_archived: int = 0
     total_seasons: int = 0
+    pending_directory_groups: int = 0
 
 
 class TaskCreate(BaseModel):

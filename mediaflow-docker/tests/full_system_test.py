@@ -60,10 +60,10 @@ def test_task_lifecycle_and_controls():
     assert r.status_code == 200, f"Resume failed: {r.text}"
     print(f"✓ 继续指令下发成功: {r.json()}")
 
-    # E. 轮询等待初检完成（最高等待 90s）
+    # E. 轮询等待初检完成（最高等待 210s，兼容在线 115/TMDB/豆瓣实时请求抖动）
     print("  -> 等待并发初检完成中...")
     completed = False
-    for i in range(90):
+    for i in range(210):
         time.sleep(1)
         r = requests.get(f"{BASE_URL}/api/tasks/{task_id}", timeout=10)
         task_info = r.json()
@@ -113,7 +113,7 @@ def test_moviepilot_governance():
     print("【3. MoviePilot 智能订阅治理双轨分离模块测试】")
 
     # A. 获取订阅列表
-    r = requests.get(f"{BASE_URL}/api/moviepilot/subscriptions", timeout=15)
+    r = requests.get(f"{BASE_URL}/api/moviepilot/subscriptions", timeout=60)
     if r.status_code == 503:
         print("! MoviePilot 未配置或不可用，跳过测试")
         return
@@ -123,19 +123,19 @@ def test_moviepilot_governance():
     print(f"✓ 成功读取 MoviePilot 全量订阅: 共 {len(items)} 部")
 
     # B. 双轨清理预检（电视剧）
-    r = requests.post(f"{BASE_URL}/api/moviepilot/subscriptions/clean-preview", json={"media_type": "tv", "mode": "safe"}, timeout=15)
+    r = requests.post(f"{BASE_URL}/api/moviepilot/subscriptions/clean-preview", json={"media_type": "tv", "mode": "safe"}, timeout=60)
     assert r.status_code == 200, f"TV clean preview failed: {r.text}"
     tv_preview = r.json()
     print(f"✓ 电视剧安全模式清理预览正常: 可清理 {len(tv_preview.get('to_delete', []))} 项，保留 {len(tv_preview.get('to_keep', []))} 项")
 
     # C. 双轨清理预检（电影）
-    r = requests.post(f"{BASE_URL}/api/moviepilot/subscriptions/clean-preview", json={"media_type": "movie", "mode": "safe"}, timeout=15)
+    r = requests.post(f"{BASE_URL}/api/moviepilot/subscriptions/clean-preview", json={"media_type": "movie", "mode": "safe"}, timeout=60)
     assert r.status_code == 200, f"Movie clean preview failed: {r.text}"
     movie_preview = r.json()
     print(f"✓ 电影安全模式清理预览正常: 可清理 {len(movie_preview.get('to_delete', []))} 项，保留 {len(movie_preview.get('to_keep', []))} 项")
 
     # D. 获取转移历史队列
-    r = requests.get(f"{BASE_URL}/api/moviepilot/transfer-queue", timeout=15)
+    r = requests.get(f"{BASE_URL}/api/moviepilot/transfer-queue", timeout=60)
     assert r.status_code == 200, f"Transfer queue failed: {r.text}"
     items = r.json()
     print(f"✓ 转移队列与历史读取正常: 共 {len(items)} 项")

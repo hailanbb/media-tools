@@ -4,7 +4,7 @@
 
 > **面向家庭影院与云原生 NAS（115网盘 / CloudDrive2 / MoviePilot / Emby / Jellyfin）的新一代智能影视媒体整理、跨库无损归档与双轨运维治理系统。**
 
-[![Version](https://img.shields.io/badge/Release-v2.5.17-6366f1.svg?style=flat-square&logo=github)](https://github.com/hailanbb/media-tools/releases)
+[![Version](https://img.shields.io/badge/Release-v2.5.18-6366f1.svg?style=flat-square&logo=github)](https://github.com/hailanbb/media-tools/releases)
 [![Docker](https://img.shields.io/badge/Docker-Supported-2496ed.svg?style=flat-square&logo=docker)](mediaflow-docker/)
 [![Windows](https://img.shields.io/badge/Windows-Native-0078d4.svg?style=flat-square&logo=windows)](mediaflow-win/)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776ab.svg?style=flat-square&logo=python)](https://www.python.org/)
@@ -218,13 +218,21 @@ MediaFlow 的每一项核心机制均遵循严谨的第一性原理设计方案�
 * 📕 [《MediaFlow批量推送MoviePilot补缺加速与优雅中止方案》](MediaFlow批量推送MoviePilot补缺加速与优雅中止方案-2026-11-10.md) —— 瞬时 AbortController 熔断、批次隔离与短时 TTL 队列快照；
 * 📒 [《MediaFlow批量补缺选种、站点与整季回退优化方案》](MediaFlow批量补缺选种、站点与整季回退优化方案-2026-11-12.md) —— 做种同档内省容量优先、动态六站扩展（含天空/观众）、整季安全回退与已有集保护；
 * 🧩 [《MediaFlow季号错配与跨条目集数核对方案》](MediaFlow季号错配与跨条目集数核对方案-2026-11-12.md) —— 作品归属冲突隔离、短标题防误绑、单季可逆跨条目映射、元数据失败态分层与只读重算；
-* 🔄 [《MediaFlow批量补缺完成刷新与待补清单优化方案》](MediaFlow批量补缺完成刷新与待补清单优化方案-2026-11-12.md) —— 推种前落盘意图、脱敏回执逐集扣减、真缺集待补与已推送待入库同页切换及一键核对入库。
+* 🔄 [《MediaFlow批量补缺完成刷新与待补清单优化方案》](MediaFlow批量补缺完成刷新与待补清单优化方案-2026-11-12.md) —— 推种前落盘意图、脱敏回执逐集扣减、真缺集待补与已推送待入库同页切换及一键核对入库；
+* 🧭 [《MediaFlow外文发行名误报与同一TMDB多目录复核方案》](MediaFlow外文发行名误报与同一TMDB多目录复核方案-2026-11-12.md) —— 显式 TMDB ID 外文发行名去误报、英文/多语言别名缓存、只读重评估，以及同 ID 多目录合并确认门禁与漂移自动失效。
 
 ---
 
 ## 📜 版本演进历史 (Changelog)
 
-### 🚀 最新稳定版：v2.5.17 (2026-11-12)
+### 🚀 最新稳定版：v2.5.18 (2026-11-12)
+
+* **外文发行名误报消除与同一 TMDB 多目录组级治理**：
+  * **外文发行名与双语前缀误报拦截修复（`identity_resolver` + `inspector` + `tmdb`）**：目录含有效显式 `[tmdbid=...]` 且当前季已在官方 `seasons` 中收录时，不再仅因韩/日/英等外文发行片名（如韩剧英文发行名）或翻译接口失败而误报 `identity_review`；中英双语/字幕组前缀做语义合并聚类（`What.a.Boss.Wants`、`[最后一桌] Final Table` 等零误报），同时严格保留同目录混放不同作品（`mixed_works`）、文件显式 `[tmdbid=...]` 冲突以及真正错配季号/集名（如 `Gravesend S08` / `Kingdom` 同名异剧）的高优拦截；新增 TMDB 多语言别名与英文剧名持久化缓存（`tmdb_aliases:{id}`）；
+  * **只读归属重评估与撤销映射防复活**：撤销单季映射与一键“重新评估本任务归属提示”（`POST /api/tasks/{task_id}/reevaluate`）按最新规则重算过时误报并展示变更对比，全程零网盘写入且完整保留 `manually_handled` 与 `GapFillEpisode` 补缺回执；
+  * **同一 TMDB 多目录组级归并确认与写删安全门禁（`directory_governance` + `DirectoryGroup`）**：基于 `(category_key, tmdb_id)` 物理扫描索引（忽略大小写/全半角/标点，不合并同剧名不同 ID，不把计算路径当物理存在），将同侧多源/多归档目录（如 `307478`）或双库异名别名目录合并为**单张组级复核卡**（多季同剧只亮主卡），提供目标目录选择与“有意共存”确认并持久化；在归档执行、同库去重、清理源冗余、删除整剧及 MoviePilot 退订联动清理前强制校验证书，一旦网盘目录数/路径发生漂移或已确认目标消失，立即自动失效原确认并安全中止。
+
+#### v2.5.17 (2026-11-12)
 
 * **季号错配防线、单季跨条目映射与批量补缺持久化闭环**：
   * **作品身份冲突与跨条目映射（`identity_resolver` + `season_mappings.json`）**：识别文件名发布组/英文别名线索触发 `identity_review` 并核对分集标题重合，脱壳文件统一标记 `not_listed`/`unknown`（拒绝错配豆瓣条目）；短标题重名（如《王国》）严格阻断并绝不自动改绑，提供前端可逆单季映射弹窗，保持其余季口径完全独立；支持跨条目拆条别名（如《极地恶灵 S03》`75191/S03 <-> douban:36768839 <-> tmdb:323903/S01`）双库取证与补缺过滤错剧；

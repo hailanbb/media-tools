@@ -957,6 +957,24 @@ async def refresh_task_summary(task_id: str, db: AsyncSession) -> dict[str, Any]
             elif not view["pushed_episodes"] and not view["reconciled_in_library_episodes"]:
                 download_needed_count += 1
 
+    import inspect as _inspect
+    from app.models.directory_group import DirectoryGroup
+
+    scalars_fn = getattr(db, "scalars", None)
+    dg_call = (
+        scalars_fn(
+            select(DirectoryGroup.id).where(
+                DirectoryGroup.task_id == task_id,
+                DirectoryGroup.status == "pending_confirm",
+            )
+        )
+        if callable(scalars_fn)
+        else None
+    )
+    pending_dir_groups = (
+        len(list((await dg_call).all())) if _inspect.isawaitable(dg_call) else 0
+    )
+
     summary = {
         "archive_ready": archive_ready_count,
         "review_needed": review_needed_count,
@@ -966,6 +984,7 @@ async def refresh_task_summary(task_id: str, db: AsyncSession) -> dict[str, Any]
         "archive_check": archive_check_count,
         "already_archived": already_archived_count,
         "total_seasons": len(all_seasons),
+        "pending_directory_groups": pending_dir_groups,
     }
     if task:
         task.summary_json = json.dumps(summary, ensure_ascii=False)  # type: ignore[assignment]

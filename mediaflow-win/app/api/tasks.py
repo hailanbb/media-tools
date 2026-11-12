@@ -8,18 +8,33 @@ from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from typing import Any
 
+from collections import Counter
+
 from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
+from app.core.directory_governance import (
+    build_physical_dir_entry,
+    classify_tmdb_directory_group,
+    confirm_directory_group,
+    extract_dir_tmdb_id,
+    normalize_dir_path,
+    resolve_category_key,
+    serialize_directory_group,
+    sync_directory_groups_for_task,
+)
 from app.core.identity_resolver import (
     build_season_mapping_payload,
     get_verified_metadata_snapshot,
+    reevaluate_offline_conflict,
     resolve_active_season_mapping,
 )
 from app.core.inspector import diagnose_season
 from app.database import get_db
+from app.models.directory_group import DirectoryGroup
 from app.models.operation import OperationLog
 from app.models.season import SeasonRecord
 from app.models.season_mapping import SeasonMapping
@@ -316,23 +331,44 @@ async def _apply_in_place_recalculate(
         await supersede_changed_identity_records(db, rec.task_id, rec.season_path, active_key, rec.id)
         return True
 
-    # 无激活映射：若存在先前保存的冲突（如撤销映射后恢复原身份冲突提示）则恢复，否则读取已核实缓存或保持原安全诊断
-    prev_conflict = (conflict or {}).get("previous_conflict") if isinstance(conflict, dict) else None
-    if isinstance(prev_conflict, dict) and prev_conflict.get("blocking"):
-        rec.conflict_json = json.dumps(prev_conflict, ensure_ascii=False)
-        rec.mapping_json = "{}"
-        rec.status = "identity_review"
-        rec.status_detail = prev_conflict.get("reason") or "已撤销单季映射，恢复原作品/季号冲突拦截，待人工核对"
-        rec.last_checked_at = now_dt
-        active_key = build_identity_key(rec.show_name, rec.tmdb_id, rec.season_number, None)
-        await supersede_changed_identity_records(db, rec.task_id, rec.season_path, active_key, rec.id)
-        return True
+    # 无激活映射：按最新规则重新评估既有冲突/前冲突，消除外文译名误报并保留真实错配拦截
+    cached_tv = await get_verified_metadata_snapshot(db, f"tmdb_tv:{int(tid_int)}") if tid_int else None
+    cached_aliases = await get_verified_metadata_snapshot(db, f"tmdb_aliases:{int(tid_int)}") if tid_int else None
+    if isinstance(cached_aliases, dict) and cached_aliases.get("aliases"):
+        cached_tv = dict(cached_tv or {})
+        cached_tv["aliases"] = list(
+            dict.fromkeys([*(cached_tv.get("aliases") or []), *(cached_aliases.get("aliases") or [])])
+        )
+        if cached_aliases.get("en_name") and not cached_tv.get("en_name"):
+            cached_tv["en_name"] = cached_aliases["en_name"]
 
-    if isinstance(conflict, dict) and conflict.get("blocking"):
-        rec.mapping_json = "{}"
-        rec.status = "identity_review"
-        rec.last_checked_at = now_dt
-        return True
+    prev_conflict = (conflict or {}).get("previous_conflict") if isinstance(conflict, dict) else None
+    candidate_conflict = (
+        prev_conflict
+        if (isinstance(prev_conflict, dict) and prev_conflict.get("blocking"))
+        else (conflict if isinstance(conflict, dict) and conflict.get("blocking") else None)
+    )
+    conflict_cleared = False
+    if isinstance(candidate_conflict, dict) and candidate_conflict.get("blocking"):
+        still_blocking, eval_conflict, _ = reevaluate_offline_conflict(
+            show_name=rec.show_name,
+            tmdb_id=rec.tmdb_id,
+            season_number=rec.season_number,
+            conflict=candidate_conflict,
+            evidence=evidence,
+            primary_work_snapshot=cached_tv,
+        )
+        if still_blocking:
+            rec.conflict_json = json.dumps(eval_conflict, ensure_ascii=False)
+            rec.mapping_json = "{}"
+            rec.status = "identity_review"
+            rec.status_detail = eval_conflict.get("reason") or eval_conflict.get("message") or rec.status_detail
+            rec.last_checked_at = now_dt
+            active_key = build_identity_key(rec.show_name, rec.tmdb_id, rec.season_number, None)
+            await supersede_changed_identity_records(db, rec.task_id, rec.season_path, active_key, rec.id)
+            return True
+        rec.conflict_json = "{}"
+        conflict_cleared = True
 
     cached_season = (
         (
@@ -345,26 +381,205 @@ async def _apply_in_place_recalculate(
     cached_tot = int(cached_season.get("total") or cached_season.get("episode_count") or 0) if cached_season else 0
     tot = cached_tot if cached_tot > 0 else rec.total_episodes
     finished = bool(cached_season.get("finished", rec.season_finished)) if cached_season else bool(rec.season_finished)
+    present_seasons = list(
+        (cached_tv or {}).get("seasons")
+        or ((evidence or {}).get("matched_work") or {}).get("seasons_present")
+        or []
+    )
+    dual_info = (evidence or {}).get("dual_archive_info") or {}
+    archived_eps = {int(x) for x in (dual_info.get("archived_episodes") or []) if str(x).isdigit()}
+
     if tot and tot > 0:
-        missing = [ep for ep in range(1, tot + 1) if ep not in set(recognized)]
+        combined_eps = sorted(set(recognized) | archived_eps) if archived_eps else recognized
+        expected_set = set(range(1, tot + 1))
+        missing = [ep for ep in range(1, tot + 1) if ep not in set(combined_eps)]
         rec.total_episodes = tot
         rec.season_finished = finished
         rec.missing_episodes_json = json.dumps(missing)
-        new_status, new_detail = diagnose_season(
-            recognized=recognized,
-            total_episodes=tot,
-            season_finished=finished,
-            has_duplicates=bool(duplicates),
-            duplicate_episodes=duplicates,
-            allow_bonus_specials=True,
-        )
-        rec.status = new_status
-        rec.status_detail = new_detail
+        if archived_eps and expected_set <= archived_eps and recognized and set(recognized) <= archived_eps:
+            rec.status = "already_archived"
+            rec.status_detail = f"归档库已包含源端正片集号 {sorted(set(recognized))}，可复核源端重复版本"
+        elif archived_eps and not missing and not duplicates and (set(recognized) - archived_eps):
+            rec.status = "archive_ready"
+            rec.status_detail = f"两库合计已齐，源端含增量集 {sorted(set(recognized) - archived_eps)}"
+        else:
+            new_status, new_detail = diagnose_season(
+                recognized=combined_eps,
+                total_episodes=tot,
+                season_finished=finished,
+                has_duplicates=bool(duplicates),
+                duplicate_episodes=duplicates,
+                allow_bonus_specials=True,
+            )
+            rec.status = new_status
+            rec.status_detail = new_detail
+    elif conflict_cleared:
+        if present_seasons and rec.season_number not in [int(s) for s in present_seasons if str(s).isdigit()]:
+            rec.status = "unknown"
+            present_text = "、".join(f"S{int(s):02d}" for s in present_seasons if str(s).isdigit())
+            rec.status_detail = f"主条目 TMDB {tid_int or '?'} 仅收录 {present_text}，当前季表未收录 S{rec.season_number:02d}，请人工核对片源来源。"
+        elif recognized:
+            rec.status = "unknown"
+            rec.status_detail = "已解除外文发行名误报冲突，待重新匹配官方集数后核算。"
     rec.mapping_json = "{}"
     rec.last_checked_at = now_dt
     active_key = build_identity_key(rec.show_name, rec.tmdb_id, rec.season_number, None)
     await supersede_changed_identity_records(db, rec.task_id, rec.season_path, active_key, rec.id)
     return True
+
+
+async def _rebuild_offline_directory_groups(
+    db: AsyncSession,
+    task_id: str,
+    rows: list[SeasonRecord],
+) -> list[dict[str, Any]]:
+    """根据任务当前数据库季记录与已有归档库索引快照重建同 TMDB 多目录/异名目录组。"""
+    settings = get_settings()
+    if not settings.enable_multi_dir_governance:
+        synced = await sync_directory_groups_for_task(db, task_id, [])
+        return [serialize_directory_group(g) for g in synced]
+
+    existing_groups = list(
+        (await db.scalars(select(DirectoryGroup).where(DirectoryGroup.task_id == task_id))).all()
+    )
+    entries_by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
+
+    # 1. 保留此前初检发现并持久化下来的归档库物理目录（确保离线重算时不会丢掉异名归档目录对比）
+    for eg in existing_groups:
+        try:
+            old_entries = json.loads(eg.paths_json or "[]")
+        except Exception:
+            old_entries = []
+        arc_entries = [
+            e for e in old_entries
+            if isinstance(e, dict) and e.get("side") == "archive" and e.get("norm_path")
+        ]
+        if arc_entries:
+            entries_by_key.setdefault((eg.category_key, eg.tmdb_id), []).extend(arc_entries)
+
+    # 2. 按当前任务下激活的 SeasonRecord 重建源端物理剧集目录与季集覆盖
+    by_show: dict[str, list[SeasonRecord]] = {}
+    for rec in rows:
+        if rec.status in ("source_absent", "cleaned_redundant"):
+            continue
+        by_show.setdefault(normalize_dir_path(rec.show_path), []).append(rec)
+
+    for norm_show, recs in by_show.items():
+        if not norm_show:
+            continue
+        rep = recs[0]
+        tid_str = str(rep.tmdb_id or extract_dir_tmdb_id(rep.show_name) or "").strip()
+        if not tid_str.isdigit():
+            continue
+        cat_key = resolve_category_key(norm_show, settings.source_root, settings.archive_root)
+        seasons_cov = sorted({int(r.season_number) for r in recs})
+        ep_cov = {
+            str(r.season_number): sorted(
+                {int(x) for x in _safe_json(r.recognized_episodes_json, []) if str(x).isdigit()}
+            )
+            for r in recs
+        }
+        entries_by_key.setdefault((cat_key, tid_str), []).append(
+            build_physical_dir_entry(
+                side="source",
+                category=cat_key,
+                show_path=norm_show,
+                tmdb_id=tid_str,
+                seasons=seasons_cov,
+                episodes_by_season=ep_cov,
+            )
+        )
+        # 若 dual_archive_info 记录了物理归档主目录，一并纳入（仅存在于归档且非源同路径时）
+        for r in recs:
+            ev = _safe_json(getattr(r, "evidence_json", None), {})
+            dual = (ev or {}).get("dual_archive_info") or {}
+            p_arc = normalize_dir_path(dual.get("primary_path") or "")
+            if p_arc and p_arc != "/" and normalize_dir_path(r.season_path) != norm_show:
+                arc_show = normalize_dir_path(p_arc.rsplit("/", 1)[0])
+                if arc_show and arc_show != norm_show:
+                    entries_by_key[(cat_key, tid_str)].append(
+                        build_physical_dir_entry(
+                            side="archive",
+                            category=cat_key,
+                            show_path=arc_show,
+                            tmdb_id=tid_str,
+                            seasons=[r.season_number],
+                            episodes_by_season={
+                                str(r.season_number): [
+                                    int(x) for x in (dual.get("archived_episodes") or []) if str(x).isdigit()
+                                ]
+                            },
+                        )
+                    )
+
+    detected: list[dict[str, Any]] = []
+    for (_, _), ents in sorted(entries_by_key.items()):
+        grp = classify_tmdb_directory_group(ents)
+        if grp:
+            detected.append(grp)
+
+    synced = await sync_directory_groups_for_task(db, task_id, detected)
+    return [serialize_directory_group(g) for g in synced]
+
+
+async def _run_task_reevaluate_impl(
+    db: AsyncSession,
+    task_id: str,
+    req: RecalculateRequest,
+) -> dict[str, Any]:
+    stmt = select(SeasonRecord).where(SeasonRecord.task_id == task_id)
+    all_rows = list((await db.execute(stmt)).scalars().all())
+    target_set = set(req.record_ids) if req.record_ids else None
+
+    preserved_statuses = ("manually_handled", "verified_complete", "cleaned_redundant", "source_absent")
+    active_before = [r for r in all_rows if r.status not in preserved_statuses]
+    before_counts = dict(Counter(r.status for r in active_before))
+
+    updated_count = 0
+    preserved_handled = 0
+    changes: list[dict[str, Any]] = []
+    for rec in all_rows:
+        if target_set is not None and rec.id not in target_set:
+            continue
+        if rec.status in preserved_statuses:
+            preserved_handled += 1
+            continue
+        prev_status = rec.status
+        prev_conflict = _safe_json(getattr(rec, "conflict_json", None), {})
+        if await _apply_in_place_recalculate(db, rec, fetch_remote=req.fetch_remote):
+            updated_count += 1
+            new_conflict = _safe_json(getattr(rec, "conflict_json", None), {})
+            if prev_status != rec.status or bool(prev_conflict.get("blocking")) != bool(new_conflict.get("blocking")):
+                changes.append(
+                    {
+                        "id": rec.id,
+                        "show_name": rec.show_name,
+                        "season_number": rec.season_number,
+                        "before_status": prev_status,
+                        "after_status": rec.status,
+                        "detail": rec.status_detail,
+                    }
+                )
+
+    dir_groups = await _rebuild_offline_directory_groups(db, task_id, all_rows)
+    active_after = [r for r in all_rows if r.status not in preserved_statuses]
+    after_counts = dict(Counter(r.status for r in active_after))
+    task_summary = await refresh_task_summary(task_id, db)
+    await db.commit()
+    return {
+        "ok": True,
+        "updated_count": updated_count,
+        "preserved_handled": preserved_handled,
+        "before_counts": before_counts,
+        "after_counts": after_counts,
+        "changes": changes,
+        "directory_groups": dir_groups,
+        "summary": task_summary,
+        "message": (
+            f"已完成只读归属重评估与核算（重算 {updated_count} 季，状态/冲突变更 {len(changes)} 项，"
+            f"保留已处理记录 {preserved_handled} 季，多目录待确认组 {task_summary.get('pending_directory_groups', 0)} 个）"
+        ),
+    }
 
 
 @router.post("/{task_id}/recalculate")
@@ -373,34 +588,86 @@ async def recalculate_task(
     body: RecalculateRequest | None = Body(default=None),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """只读重新核算现有季记录（保留记录ID与manually_handled，不删源/归档文件，不重推下载）。"""
+    """只读重新核算并按新规则重评估归属提示（保留手动处理、跨条目映射与已推送回执）。"""
     task = await db.get(Task, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
+    return await _run_task_reevaluate_impl(db, task_id, body or RecalculateRequest())
 
-    req = body or RecalculateRequest()
-    stmt = select(SeasonRecord).where(SeasonRecord.task_id == task_id)
-    if req.record_ids:
-        stmt = stmt.where(SeasonRecord.id.in_(req.record_ids))
-    rows = list((await db.execute(stmt)).scalars().all())
 
-    updated_count = 0
-    preserved_handled = 0
-    for rec in rows:
-        if rec.status in ("manually_handled", "verified_complete", "cleaned_redundant", "source_absent"):
-            preserved_handled += 1
-            continue
-        if await _apply_in_place_recalculate(db, rec, fetch_remote=req.fetch_remote):
-            updated_count += 1
+@router.post("/{task_id}/reevaluate")
+async def reevaluate_task_identities(
+    task_id: str,
+    body: RecalculateRequest | None = Body(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """只读重新评估本任务归属提示（返回前后状态差异与多目录组级索引，不改动网盘与下载队列）。"""
+    task = await db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return await _run_task_reevaluate_impl(db, task_id, body or RecalculateRequest())
 
-    task_summary = await refresh_task_summary(task_id, db)
-    await db.commit()
+
+class DirectoryGroupConfirmRequest(BaseModel):
+    mode: str  # "use_archive_target" | "intentional_coexist"
+    target_path: str = ""
+
+
+@router.get("/{task_id}/directory-groups")
+async def list_task_directory_groups(
+    task_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """列出任务下检测到的同 TMDB 多目录 / 异名目录组级复核卡。"""
+    task = await db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    groups = list(
+        (
+            await db.scalars(
+                select(DirectoryGroup)
+                .where(DirectoryGroup.task_id == task_id)
+                .order_by(DirectoryGroup.status, DirectoryGroup.tmdb_id)
+            )
+        ).all()
+    )
     return {
         "ok": True,
-        "updated_count": updated_count,
-        "preserved_handled": preserved_handled,
-        "summary": task_summary,
-        "message": f"已完成只读重新核算（更新 {updated_count} 季，保留已处理记录 {preserved_handled} 季）",
+        "groups": [serialize_directory_group(g) for g in groups],
+    }
+
+
+@router.post("/{task_id}/directory-groups/{group_id}/confirm")
+async def confirm_task_directory_group(
+    task_id: str,
+    group_id: str,
+    body: DirectoryGroupConfirmRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """确认同一 TMDB 多目录/异名目录的目标归档路径或标记有意共存（绝不自动移动或删除文件）。"""
+    task = await db.get(Task, task_id)
+    group = await db.get(DirectoryGroup, group_id)
+    if not task or not group or group.task_id != task_id:
+        raise HTTPException(status_code=404, detail="多目录确认组不存在")
+    try:
+        updated = await confirm_directory_group(
+            db, group, mode=body.mode, target_path=body.target_path
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    summary = await refresh_task_summary(task_id, db)
+    await db.commit()
+    await db.refresh(updated)
+    return {
+        "ok": True,
+        "group": serialize_directory_group(updated),
+        "summary": summary,
+        "message": (
+            f"已确认 TMDB {updated.tmdb_id} 目标归档目录：{updated.confirmed_target_path}（未自动移动或删除文件）"
+            if updated.confirmation_mode == "use_archive_target"
+            else f"已将 TMDB {updated.tmdb_id} 的目录组标记为“有意共存”（仍保留覆盖与清理保护）"
+        ),
     }
 
 

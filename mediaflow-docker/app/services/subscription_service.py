@@ -10,6 +10,7 @@ from app.models.season import SeasonRecord
 from app.config import get_settings
 from app.clients.clouddrive2 import CloudDrive2Client
 from app.clients.moviepilot import MoviePilotClient
+from app.core.directory_governance import find_blocking_group_for_record
 from app.core.episode_parser import parse_episode, is_video_file
 from app.core.subscription_cleaner import diagnose_subscription
 
@@ -102,10 +103,23 @@ async def preview(db, mp, disk, sub_id, cleanup, record_id=None):
             raise HTTPException(409, "作品 ID 未确认")
         records = list(await db.scalars(select(SeasonRecord).where(
             SeasonRecord.tmdb_id == tid, SeasonRecord.season_number == season)))
-        paths = {r.season_path for r in records if record_id is None or r.id == record_id}
+        target_recs = [r for r in records if record_id is None or r.id == record_id]
+        for tr in target_recs:
+            blocked_group = await find_blocking_group_for_record(
+                db, tr, cd2_client=disk, operation="subscription_cleanup"
+            )
+            if blocked_group is not None:
+                await db.commit()
+                raise HTTPException(
+                    409,
+                    f"存在未确认的{blocked_group.title or '同 ID 多目录组'}（TMDB {blocked_group.tmdb_id}），"
+                    f"已暂停退订联动清理：{blocked_group.invalidated_reason or '请先确认归档目标或标记有意共存'}",
+                )
+        paths = {r.season_path for r in target_recs}
         if len(paths) != 1:
             raise HTTPException(409, "未定位到唯一源季目录，请先初检或明确选择该季记录")
         path = source_path(paths.pop())
+        data["record_ids"] = [r.id for r in target_recs]
         # 裸剧目录可能包含多季，联合操作只处理已识别的独立季目录。
         if any(r.show_path == path for r in records):
             raise HTTPException(409, "该目录与整剧目录相同，请先人工确认季目录")
@@ -168,6 +182,20 @@ async def execute(db, mp, disk, operation_id):
         await check_queues(mp, current or data["subscription"])
         if data["cleanup"]:
             path = source_path(data["path"])
+            check_recs = list(
+                await db.scalars(select(SeasonRecord).where(SeasonRecord.season_path == path))
+            )
+            for cr in check_recs:
+                blocked_group = await find_blocking_group_for_record(
+                    db, cr, cd2_client=disk, operation="subscription_cleanup"
+                )
+                if blocked_group is not None:
+                    op.status = "failed"
+                    await db.commit()
+                    raise HTTPException(
+                        409,
+                        f"存在未确认或已失效的{blocked_group.title or '同 ID 多目录组'}（TMDB {blocked_group.tmdb_id}），已中止退订清理",
+                    )
             items = [fingerprint(f) for f in await disk.list_files(path, force_refresh=True)]
             expected = [f for f in data["inventory"] if f["path"] not in data["deleted"]]
             # 删除请求响应丢失时，仅允许已确认待删文件消失。

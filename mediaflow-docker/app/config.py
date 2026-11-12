@@ -7,7 +7,7 @@ from functools import lru_cache
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-VERSION = "2.5.17"
+VERSION = "2.5.18"
 
 
 
@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     gap_fill_extra_sites: str = "天空,观众"
     gap_fill_min_resolution: str = ""
     gap_fill_require_chinese: bool = False
+
+    # ── 同一 TMDB ID 多目录复核治理 ────────────────────────
+    enable_multi_dir_governance: bool = True
 
 
 @lru_cache

@@ -77,6 +77,52 @@ class TMDBClient:
             return data.get("results", []) or [], status_kind, err
         return [], status_kind, err
 
+    async def fetch_tv_aliases(self, tv_id: int) -> dict[str, Any]:
+        """获取剧集英文译名与多语言别名（仅用于解释/辅助匹配，失败时安全降级）。"""
+        aliases: list[str] = []
+        en_name = ""
+        translations_ok = False
+        try:
+            data, status_kind, _ = await self._request(
+                f"/tv/{tv_id}",
+                append_to_response="alternative_titles,translations",
+            )
+            if status_kind == "ok" and isinstance(data, dict):
+                translations_ok = True
+                for key in ("name", "original_name"):
+                    v = str(data.get(key) or "").strip()
+                    if v and v not in aliases:
+                        aliases.append(v)
+                alt_block = data.get("alternative_titles") or {}
+                for item in alt_block.get("results") or []:
+                    t = str(item.get("title") or "").strip() if isinstance(item, dict) else ""
+                    if t and t not in aliases:
+                        aliases.append(t)
+                trans_block = data.get("translations") or {}
+                for tr in trans_block.get("translations") or []:
+                    if not isinstance(tr, dict):
+                        continue
+                    tr_data = tr.get("data") or {}
+                    tname = str(tr_data.get("name") or tr_data.get("title") or "").strip()
+                    if tname and tname not in aliases:
+                        aliases.append(tname)
+                    if str(tr.get("iso_639_1") or "").lower() == "en" and tname and not en_name:
+                        en_name = tname
+            if not en_name:
+                en_data, en_status, _ = await self._request(f"/tv/{tv_id}", language="en-US")
+                if en_status == "ok" and isinstance(en_data, dict):
+                    translations_ok = True
+                    en_name = str(en_data.get("name") or "").strip()
+                    if en_name and en_name not in aliases:
+                        aliases.append(en_name)
+        except Exception:
+            translations_ok = False
+        return {
+            "aliases": aliases,
+            "en_name": en_name,
+            "translations_ok": translations_ok,
+        }
+
     async def get_tv_detail(self, tv_id: int) -> dict:
         """获取电视剧详情（含季列表概要）。"""
         res = await self._get(f"/tv/{tv_id}")

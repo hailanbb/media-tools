@@ -18,8 +18,8 @@
 from __future__ import annotations
 
 import asyncio
-
 import json
+import posixpath
 import urllib.parse
 import httpx
 import re
@@ -28,6 +28,15 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from app.clients.clouddrive2 import GrpcError
+from app.core.directory_governance import (
+    build_physical_dir_entry,
+    classify_tmdb_directory_group,
+    extract_dir_tmdb_id,
+    normalize_dir_path,
+    resolve_category_key,
+    serialize_directory_group,
+    sync_directory_groups_for_task,
+)
 from app.core.segments import episode_segments, diagnose_periods, segment_number
 from app.core.episode_parser import ParsedEpisode, is_video_file, parse_episode
 from app.core.identity_resolver import (
@@ -98,6 +107,7 @@ class InspectionResult:
     airing_count: int = 0
     archive_check_count: int = 0
     already_archived_count: int = 0
+    directory_groups: list[dict[str, Any]] = field(default_factory=list)
 
     def compute_summary(self) -> None:
         """根据 seasons 计算汇总统计。"""
@@ -135,6 +145,8 @@ async def _find_archive_season(
     tagged_show: re.Match | None,
     mapped_targets: list[dict[str, Any]] | None = None,
     extra_targets_out: list[dict[str, Any]] | None = None,
+    confirmed_target_dir: str = "",
+    multi_archive_dirs_out: list[str] | None = None,
 ) -> tuple[str | None, bool]:
     """在归档分类内按显式作品 ID 和季号匹配；兼容跨条目映射目标目录双向取证。"""
     async def directories(path):
@@ -193,7 +205,19 @@ async def _find_archive_season(
         same_work = [e["name"] for e in await directories(cat_prefix or "/")
                      if re.search(rf"\[tmdbid[=:]{tag}\]", e["name"], re.I)]
         if len(same_work) > 1:
-            raise ValueError("同分类有多个相同 TMDB ID 的归档目录：" + "、".join(same_work))
+            chosen_name = ""
+            if confirmed_target_dir:
+                cand_base = posixpath.basename(confirmed_target_dir.rstrip("/"))
+                for sw in same_work:
+                    if sw == cand_base or f"{cat_prefix}/{sw}" == confirmed_target_dir.rstrip("/"):
+                        chosen_name = sw
+                        break
+            if not chosen_name:
+                if multi_archive_dirs_out is not None:
+                    multi_archive_dirs_out.extend(f"{cat_prefix}/{sw}" for sw in same_work)
+                    return None, True
+                raise ValueError("同分类有多个相同 TMDB ID 的归档目录：" + "、".join(same_work))
+            same_work = [chosen_name]
         if not same_work:
             return None, False
         alias = same_work[0] != expected_name
@@ -502,7 +526,35 @@ async def _investigate_season_identity(
     present_seasons = primary_work_info.get("seasons_present") or sorted(sn for sn in primary_seasons_data if sn > 0)
     present_label = "、".join(f"S{s:02d}" for s in present_seasons) if present_seasons else "未知"
 
-    # 1. 同季目录混放多个发行作品文件
+    # 0. 文件名显式携带与目录主条目冲突的 [tmdbid=...] 或多套显式 TMDB ID 混装：始终高优拦截
+    explicit_file_conflicts = release_signals.get("explicit_file_tmdb_conflicts") or []
+    distinct_file_ids = release_signals.get("distinct_file_tmdb_ids") or []
+    if len(distinct_file_ids) >= 2:
+        return {
+            "kind": "mixed_works",
+            "blocking": True,
+            "ambiguous": False,
+            "message": f"同季目录内文件显式携带多个不同 TMDB ID（{', '.join(distinct_file_ids)}），请拆清来源或人工确认后处理。",
+            "detected_work": {},
+            "clues": distinct_file_ids,
+            "sample_files": release_signals.get("sample_files") or [],
+        }, release_signals
+    if explicit_file_conflicts:
+        bad = explicit_file_conflicts[0]
+        return {
+            "kind": "identity_conflict",
+            "blocking": True,
+            "ambiguous": False,
+            "message": (
+                f"作品归属冲突：目录主条目 {primary_name} (TMDB {tmdb_id_num or '?'})，"
+                f"但文件 {bad['filename']} 显式标注了外部 TMDB {bad['file_tmdb_id']}。"
+            ),
+            "detected_work": {"tmdb_id": int(bad["file_tmdb_id"])} if str(bad["file_tmdb_id"]).isdigit() else {},
+            "clues": [str(bad["file_tmdb_id"])],
+            "sample_files": [c["filename"] for c in explicit_file_conflicts],
+        }, release_signals
+
+    # 1. 同季目录混放多个发行作品文件（已语义合并同作品多前缀）
     if release_signals.get("mixed_works"):
         titles = " / ".join(release_signals.get("distinct_release_titles") or [])
         return {
@@ -514,6 +566,13 @@ async def _investigate_season_identity(
             "clues": release_signals.get("distinct_release_titles") or [],
             "sample_files": release_signals.get("sample_files") or [],
         }, release_signals
+
+    # 核心判决顺序：当目录带有明确且有效的 TMDB ID、目录内仅为单一作品发行文件且当前季已收录在该作品官方季表中时，
+    # 不得仅因外文发行名、双语/字幕组前缀差异或缺少英文译名而误报 identity_conflict / mixed_works。
+    has_explicit_dir_tmdb = bool(tmdb_id_num and re.search(r"\[tmdbid[=:]\d+\]", show_name, re.I))
+    season_listed_in_primary = bool(tmdb_id_num and present_seasons and season_num in present_seasons)
+    if has_explicit_dir_tmdb and season_listed_in_primary:
+        return {}, release_signals
 
     # 2. 文件实际发行片名与目录主作品明确不一致（例如 Gravesend 目录内实为 The.Neighborhood）
     dominant = str(release_signals.get("dominant_release_title") or "")
@@ -713,6 +772,31 @@ async def run_inspection(
     lock = asyncio.Lock()
     db_lock = asyncio.Lock()
     sem = asyncio.Semaphore(max(1, concurrency))
+    physical_dir_entries_by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    confirmed_targets_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    if db is not None:
+        try:
+            from sqlalchemy import select as _sa_select
+            from app.models.directory_group import DirectoryGroup as _DirGroup
+
+            async with db_lock:
+                dg_rows = list(
+                    (
+                        await db.scalars(
+                            _sa_select(_DirGroup).where(_DirGroup.task_id == task_id)
+                        )
+                    ).all()
+                )
+            for dg in dg_rows:
+                confirmed_targets_by_key[(str(dg.category_key), str(dg.tmdb_id))] = {
+                    "id": dg.id,
+                    "status": dg.status,
+                    "confirmation_mode": dg.confirmation_mode,
+                    "confirmed_target_path": dg.confirmed_target_path or "",
+                    "paths_signature": dg.paths_signature or "",
+                }
+        except Exception:
+            confirmed_targets_by_key = {}
 
     async def _inspect_single_show(show_item: dict) -> list[SeasonDiagnosis]:
         show_name = show_item["name"]
@@ -799,6 +883,27 @@ async def run_inspection(
                     None,
                     {"seasons": primary_work_info.get("seasons_present"), **primary_work_info},
                 )
+                if primary_work_info.get("aliases"):
+                    await save_verified_metadata_snapshot(
+                        db,
+                        f"tmdb_aliases:{primary_work_info['tmdb_id']}",
+                        "tmdb_aliases",
+                        str(primary_work_info["tmdb_id"]),
+                        None,
+                        {
+                            "aliases": primary_work_info.get("aliases") or [],
+                            "en_name": primary_work_info.get("en_name") or "",
+                        },
+                    )
+        if db is not None and (tmdb_id_num or primary_work_info.get("tmdb_id")) and not primary_work_info.get("aliases"):
+            alias_tid = primary_work_info.get("tmdb_id") or tmdb_id_num
+            async with db_lock:
+                cached_aliases = await get_verified_metadata_snapshot(db, f"tmdb_aliases:{alias_tid}")
+            if isinstance(cached_aliases, dict):
+                if cached_aliases.get("aliases"):
+                    primary_work_info["aliases"] = list(cached_aliases["aliases"])
+                if cached_aliases.get("en_name") and not primary_work_info.get("en_name"):
+                    primary_work_info["en_name"] = str(cached_aliases["en_name"])
 
         if resolved_tmdb_id:
             if tmdb_match and str(resolved_tmdb_id) != tmdb_match.group(1):
@@ -806,6 +911,46 @@ async def run_inspection(
                     info.setdefault("candidate_id", resolved_tmdb_id)
             else:
                 tmdb_id_num = resolved_tmdb_id
+
+        show_cat_key = resolve_category_key(show_path, global_source_root, archive_root)
+        show_tid_str = str(tmdb_id_num or (tmdb_match.group(1) if tmdb_match else "") or "").strip()
+        if show_tid_str.isdigit():
+            confirmed_group_info = confirmed_targets_by_key.get((show_cat_key, show_tid_str), {})
+            confirmed_target_dir = (
+                confirmed_group_info.get("confirmed_target_path") or ""
+                if confirmed_group_info.get("status") == "confirmed"
+                and confirmed_group_info.get("confirmation_mode") == "use_archive_target"
+                else ""
+            )
+            # 单季局部重检时补充扫描源端同分类父目录，避免漏检同侧重复目录
+            if only_season_path is not None:
+                src_parent_dir = posixpath.dirname(normalize_dir_path(show_path))
+                if src_parent_dir and src_parent_dir != "/":
+                    try:
+                        sibs = await cd2_client.list_files(src_parent_dir)
+                        sib_entries = []
+                        for sib in sibs:
+                            if sib.get("isDirectory") and extract_dir_tmdb_id(sib.get("name")) == show_tid_str:
+                                sp = normalize_dir_path(sib.get("path") or f"{src_parent_dir}/{sib.get('name')}")
+                                sib_entries.append(
+                                    build_physical_dir_entry(
+                                        side="source",
+                                        category=show_cat_key,
+                                        show_path=sp,
+                                        tmdb_id=show_tid_str,
+                                        stable_id=str(sib.get("id") or sib.get("fileId") or ""),
+                                    )
+                                )
+                        if sib_entries:
+                            async with lock:
+                                physical_dir_entries_by_key.setdefault((show_cat_key, show_tid_str), []).extend(sib_entries)
+                    except Exception:
+                        pass
+        else:
+            confirmed_target_dir = ""
+
+        show_src_ep_map: dict[str, list[int]] = {}
+        show_src_seasons: list[int] = []
 
         for season_num, season_item in sorted(season_dirs, key=lambda x: x[0]):
             season_path = season_item["path"]
@@ -1025,8 +1170,16 @@ async def run_inspection(
             actual = None
             alias = False
             extra_archive_targets: list[dict[str, Any]] = []
+            multi_archive_dirs: list[str] = []
+            archived_eps_this_season: list[int] = []
             if archive_root:
-                archive_target = compute_archive_target(show_path, season_path, archive_root, global_source_root)
+                if confirmed_target_dir:
+                    if normalize_dir_path(season_path) == normalize_dir_path(show_path):
+                        archive_target = confirmed_target_dir
+                    else:
+                        archive_target = f"{confirmed_target_dir}/{posixpath.basename(normalize_dir_path(season_path))}"
+                else:
+                    archive_target = compute_archive_target(show_path, season_path, archive_root, global_source_root)
 
             missing: list[int] = []
             if total_eps and total_eps > 0:
@@ -1051,7 +1204,28 @@ async def run_inspection(
                         tmdb_match if season_path != show_path else None,
                         mapped_targets=mapped_targets_arg,
                         extra_targets_out=extra_archive_targets,
+                        confirmed_target_dir=confirmed_target_dir,
+                        multi_archive_dirs_out=multi_archive_dirs,
                     )
+                    if multi_archive_dirs:
+                        tid_label = show_tid_str or (tmdb_match.group(1) if tmdb_match else "?")
+                        status = "archive_check"
+                        detail = (
+                            f"归档库同一 TMDB ID ({tid_label}) 存在多个（{len(multi_archive_dirs)} 个）目录，"
+                            "已归并到组级复核卡，确认目标目录前暂停写入与删除。"
+                        )
+                        if show_tid_str.isdigit():
+                            arc_entries = [
+                                build_physical_dir_entry(
+                                    side="archive",
+                                    category=show_cat_key,
+                                    show_path=mp_dir,
+                                    tmdb_id=show_tid_str,
+                                )
+                                for mp_dir in multi_archive_dirs
+                            ]
+                            async with lock:
+                                physical_dir_entries_by_key.setdefault((show_cat_key, show_tid_str), []).extend(arc_entries)
                     archived_eps: set[int] = set()
                     if actual:
                         archive_target = actual
@@ -1062,6 +1236,24 @@ async def run_inspection(
                             ep = parse_episode(item["name"], item["path"], item.get("size", 0))
                             if _verified_video(ep, season_num):
                                 archived_eps.update(ep.episode_numbers)
+                        archived_eps_this_season = sorted(archived_eps)
+                        if show_tid_str.isdigit():
+                            actual_show_dir = (
+                                normalize_dir_path(actual)
+                                if normalize_dir_path(season_path) == normalize_dir_path(show_path)
+                                else posixpath.dirname(normalize_dir_path(actual))
+                            )
+                            async with lock:
+                                physical_dir_entries_by_key.setdefault((show_cat_key, show_tid_str), []).append(
+                                    build_physical_dir_entry(
+                                        side="archive",
+                                        category=show_cat_key,
+                                        show_path=actual_show_dir,
+                                        tmdb_id=show_tid_str,
+                                        seasons=[season_num],
+                                        episodes_by_season={str(season_num): archived_eps_this_season},
+                                    )
+                                )
 
                     mapped_archive_eps: set[int] = set()
                     mapped_archive_items: list[dict] = []
@@ -1154,11 +1346,11 @@ async def run_inspection(
                             elif expected:
                                 status = "download_needed" if (missing and season_finished) else "archive_check"
                                 detail = f"跨条目归档已识别 {sorted(archived_eps)}；结合源端仍缺 {missing}" if missing else detail
-                    elif not recognized:
+                    elif not recognized and not multi_archive_dirs:
                         status = "archive_check"
                         detail = (f"资料总集数 {total_eps or '未知'}；未找到对应归档季。"
                                   + _source_inventory(season_files, parsed_episodes, season_num) + "。")
-                    elif alias and status == "archive_ready":
+                    elif alias and status == "archive_ready" and not multi_archive_dirs:
                         status = "archive_check"
                         detail = "归档分类中存在同 TMDB ID 的别名目录，但未找到对应季，需核对归档位置。"
                 except Exception as arc_err:
@@ -1276,6 +1468,8 @@ async def run_inspection(
                         "tmdb_id": tmdb_id_num,
                         "name": primary_work_info.get("name") or "",
                         "original_name": primary_work_info.get("original_name") or "",
+                        "en_name": primary_work_info.get("en_name") or "",
+                        "aliases": list(primary_work_info.get("aliases") or []),
                         "status": primary_work_info.get("status") or "",
                         "seasons_present": primary_work_info.get("seasons_present") or sorted(sn for sn in tmdb_seasons_data if sn > 0),
                     }
@@ -1290,6 +1484,9 @@ async def run_inspection(
                 },
                 "dual_archive_info": dual_archive_info,
             }
+
+            show_src_seasons.append(season_num)
+            show_src_ep_map[str(season_num)] = list(recognized)
 
             diag = SeasonDiagnosis(
                 show_name=show_name,
@@ -1311,6 +1508,41 @@ async def run_inspection(
                 mapping=active_mapping or {},
             )
             diagnosed_seasons.append(diag)
+
+        # 登记本剧集源端物理目录条目及归档分类下同 TMDB ID 存在的物理别名目录（不含尚未建立的预期目录）
+        if show_tid_str.isdigit():
+            entries_to_add = [
+                build_physical_dir_entry(
+                    side="source",
+                    category=show_cat_key,
+                    show_path=show_path,
+                    tmdb_id=show_tid_str,
+                    stable_id=str(show_item.get("stable_id") or ""),
+                    seasons=show_src_seasons,
+                    episodes_by_season=show_src_ep_map,
+                )
+            ]
+            if archive_root:
+                exp_arch_show = (
+                    compute_archive_target(show_path, f"{show_path}/Season 1", archive_root, global_source_root).rsplit("/", 1)[0]
+                    if show_path
+                    else ""
+                )
+                arc_cat_dir = posixpath.dirname(normalize_dir_path(exp_arch_show)) if exp_arch_show else ""
+                for arc_d in archive_show_cache.get(arc_cat_dir, []) or []:
+                    if arc_d.get("isDirectory") and extract_dir_tmdb_id(arc_d.get("name")) == show_tid_str:
+                        arc_show_path = normalize_dir_path(arc_d.get("path") or f"{arc_cat_dir}/{arc_d.get('name')}")
+                        entries_to_add.append(
+                            build_physical_dir_entry(
+                                side="archive",
+                                category=show_cat_key,
+                                show_path=arc_show_path,
+                                tmdb_id=show_tid_str,
+                                stable_id=str(arc_d.get("id") or arc_d.get("fileId") or ""),
+                            )
+                        )
+            async with lock:
+                physical_dir_entries_by_key.setdefault((show_cat_key, show_tid_str), []).extend(entries_to_add)
 
         return diagnosed_seasons
 
@@ -1359,6 +1591,72 @@ async def run_inspection(
         tasks = [asyncio.create_task(_worker(item)) for item in show_list]
         await asyncio.gather(*tasks)
 
+        # 汇总同一分类、同一 TMDB ID 下的多目录 / 异名目录组级状态
+        raw_groups: list[dict[str, Any]] = []
+        for (_, _), entries in sorted(physical_dir_entries_by_key.items()):
+            grp = classify_tmdb_directory_group(entries)
+            if grp:
+                raw_groups.append(grp)
+
+        if db is not None:
+            partial_keys_arg = (
+                {
+                    (
+                        resolve_category_key(s.show_path, global_source_root, archive_root),
+                        str(s.tmdb_id or extract_dir_tmdb_id(s.show_name) or ""),
+                    )
+                    for s in result.seasons
+                    if str(s.tmdb_id or extract_dir_tmdb_id(s.show_name) or "").isdigit()
+                }
+                if only_season_path is not None
+                else None
+            )
+            synced = await sync_directory_groups_for_task(
+                db, task_id, raw_groups, partial_keys=partial_keys_arg
+            )
+            result.directory_groups = [serialize_directory_group(g) for g in synced]
+        else:
+            result.directory_groups = [
+                {
+                    **g,
+                    "status": "pending_confirm",
+                    "requires_confirm": True,
+                    "confirmed_target_path": "",
+                    "confirmation_mode": "",
+                    "invalidated_reason": "",
+                }
+                for g in raw_groups
+            ]
+
+        group_by_key: dict[tuple[str, str], dict[str, Any]] = {
+            (str(g.get("category_key") or ""), str(g.get("tmdb_id") or "")): g
+            for g in result.directory_groups
+        }
+        primary_card_marked: set[tuple[str, str]] = set()
+        for diag in result.seasons:
+            tid_k = str(diag.tmdb_id or extract_dir_tmdb_id(diag.show_name) or "").strip()
+            cat_k = resolve_category_key(diag.show_path, global_source_root, archive_root)
+            ginfo = group_by_key.get((cat_k, tid_k))
+            if not ginfo:
+                continue
+            is_primary = (cat_k, tid_k) not in primary_card_marked
+            if is_primary:
+                primary_card_marked.add((cat_k, tid_k))
+            diag.evidence["directory_group"] = {
+                "id": ginfo.get("id") or f"{cat_k}:{tid_k}",
+                "tmdb_id": tid_k,
+                "group_kind": ginfo.get("group_kind") or "",
+                "title": ginfo.get("title") or "",
+                "status": ginfo.get("status") or "pending_confirm",
+                "requires_confirm": bool(ginfo.get("requires_confirm", True)),
+                "confirmation_mode": ginfo.get("confirmation_mode") or "",
+                "confirmed_target_path": ginfo.get("confirmed_target_path") or "",
+                "suggested_target_path": ginfo.get("suggested_target_path") or "",
+                "invalidated_reason": ginfo.get("invalidated_reason") or "",
+                "entries": ginfo.get("entries") or [],
+                "is_primary_group_card": is_primary,
+            }
+
         result.compute_summary()
     log.info(
         "初检完成: %d季 (归档=%d, 复核=%d, 补集=%d, 连载=%d, 已归档=%d)",
@@ -1393,7 +1691,7 @@ _SKIP_DIRS = {"mount-check", ".recycle", "@eaDir", "#recycle", ".trash"}
 
 
 async def _discover_shows(
-    cd2_client, dir_path: str, results: list[dict], max_depth: int = 4, log=None, progress_callback=None
+    cd2_client, dir_path: str, results: list[dict], max_depth: int = 4, log=None, progress_callback=None, stable_id: str = ""
 ) -> None:
     """递归发现剧集目录。
 
@@ -1447,11 +1745,23 @@ async def _discover_shows(
     if has_season_dir or (has_video and not labelled_children):
         # 这是一个剧集目录
         dir_name = dir_path.rstrip("/").rsplit("/", 1)[-1] if "/" in dir_path else dir_path
-        results.append({"name": dir_name, "path": dir_path})
+        item_rec: dict[str, Any] = {"name": dir_name, "path": dir_path}
+        if stable_id:
+            item_rec["stable_id"] = stable_id
+        results.append(item_rec)
     else:
         # 这是分类目录，继续递归
         for sub in subdirs:
-            await _discover_shows(cd2_client, sub["path"], results, max_depth - 1, log, progress_callback)
+            sub_sid = str(sub.get("id") or sub.get("fileId") or "")
+            await _discover_shows(
+                cd2_client,
+                sub["path"],
+                results,
+                max_depth - 1,
+                log,
+                progress_callback,
+                stable_id=sub_sid,
+            )
 
 
 
@@ -1521,17 +1831,35 @@ async def _fetch_tv_summary(
         for s in (detail.get("seasons") or [])
         if isinstance(s, dict) and s.get("season_number") is not None and int(s["season_number"]) > 0
     )
+    aliases: list[str] = []
+    for t in (detail.get("alternative_titles") or detail.get("names") or []):
+        sval = t if isinstance(t, str) else (str(t.get("title") or "") if isinstance(t, dict) else "")
+        if sval.strip() and sval.strip() not in aliases:
+            aliases.append(sval.strip())
+    en_name = ""
+    translations_ok = False
+    if tmdb_client is not None and callable(getattr(type(tmdb_client), "fetch_tv_aliases", None)):
+        try:
+            al_info = await tmdb_client.fetch_tv_aliases(tmdb_id)
+            if isinstance(al_info, dict):
+                translations_ok = bool(al_info.get("translations_ok"))
+                en_name = str(al_info.get("en_name") or "").strip()
+                for a in (al_info.get("aliases") or []):
+                    sa = str(a or "").strip()
+                    if sa and sa not in aliases:
+                        aliases.append(sa)
+        except Exception:
+            translations_ok = False
     summary = {
         "tmdb_id": int(tmdb_id),
         "name": str(detail.get("name") or detail.get("title") or ""),
         "original_name": str(detail.get("original_name") or detail.get("original_title") or ""),
+        "en_name": en_name,
         "status": str(detail.get("status") or ""),
         "first_air_date": str(detail.get("first_air_date") or ""),
-        "alternative_titles": [
-            t if isinstance(t, str) else str(t.get("title") or "")
-            for t in (detail.get("alternative_titles") or detail.get("names") or [])
-            if isinstance(t, (str, dict))
-        ],
+        "alternative_titles": aliases,
+        "aliases": aliases,
+        "translations_ok": translations_ok,
         "seasons_present": seasons_present,
         "seasons_raw": [s for s in (detail.get("seasons") or []) if isinstance(s, dict)],
     }
