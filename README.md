@@ -4,7 +4,7 @@
 
 > **面向家庭影院与云原生 NAS（115网盘 / CloudDrive2 / MoviePilot / Emby / Jellyfin）的新一代智能影视媒体整理、跨库无损归档与双轨运维治理系统。**
 
-[![Version](https://img.shields.io/badge/Release-v2.5.18-6366f1.svg?style=flat-square&logo=github)](https://github.com/hailanbb/media-tools/releases)
+[![Version](https://img.shields.io/badge/Release-v2.5.19-6366f1.svg?style=flat-square&logo=github)](https://github.com/hailanbb/media-tools/releases)
 [![Docker](https://img.shields.io/badge/Docker-Supported-2496ed.svg?style=flat-square&logo=docker)](mediaflow-docker/)
 [![Windows](https://img.shields.io/badge/Windows-Native-0078d4.svg?style=flat-square&logo=windows)](mediaflow-win/)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776ab.svg?style=flat-square&logo=python)](https://www.python.org/)
@@ -225,7 +225,13 @@ MediaFlow 的每一项核心机制均遵循严谨的第一性原理设计方案�
 
 ## 📜 版本演进历史 (Changelog)
 
-### 🚀 最新稳定版：v2.5.18 (2026-11-12)
+### 🚀 最新稳定版：v2.5.19 (2026-11-12)
+
+* **多目录单选确认与 TMDB 正名默认推荐、详情页无冲突降噪**：
+  * **同 TMDB 多目录归档目标改用单选勾选 + TMDB 官网显示名默认推荐（`directory_governance` + `tasks` + `index.html`）**：弹出确认窗口不再要求手工填写目标路径，自动生成各源端/归档库对应的候选目标单选列表（另附可选自定义路径开关），并在弹窗顶部提示「TMDB 官网页面 (tmdbid=...) 当前显示名称」，自动默认勾选与 TMDB 当前页面名称一致的那一项；同时兼容全新初检任务与历史持久化任务；
+  * **详情弹窗「识别证据与冲突拦截」误导修复**：仅在确实存在 `conflict.blocking`、冲突原因或分集标题重合冲突时才以红色警戒展示「识别证据与冲突拦截」；对仅存在多平台/重复版本或常规别名的季条目（如仅因同集双版本进入待复核），改用中性参考卡「作品识别与别名参考（无归属冲突）」。
+
+#### v2.5.18 (2026-11-12)
 
 * **外文发行名误报消除与同一 TMDB 多目录组级治理**：
   * **外文发行名与双语前缀误报拦截修复（`identity_resolver` + `inspector` + `tmdb`）**：目录含有效显式 `[tmdbid=...]` 且当前季已在官方 `seasons` 中收录时，不再仅因韩/日/英等外文发行片名（如韩剧英文发行名）或翻译接口失败而误报 `identity_review`；中英双语/字幕组前缀做语义合并聚类（`What.a.Boss.Wants`、`[最后一桌] Final Table` 等零误报），同时严格保留同目录混放不同作品（`mixed_works`）、文件显式 `[tmdbid=...]` 冲突以及真正错配季号/集名（如 `Gravesend S08` / `Kingdom` 同名异剧）的高优拦截；新增 TMDB 多语言别名与英文剧名持久化缓存（`tmdb_aliases:{id}`）；

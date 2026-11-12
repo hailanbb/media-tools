@@ -20,6 +20,7 @@ from app.core.directory_governance import (
     build_physical_dir_entry,
     classify_tmdb_directory_group,
     confirm_directory_group,
+    enrich_directory_groups_from_db,
     extract_dir_tmdb_id,
     normalize_dir_path,
     resolve_category_key,
@@ -519,7 +520,9 @@ async def _rebuild_offline_directory_groups(
             detected.append(grp)
 
     synced = await sync_directory_groups_for_task(db, task_id, detected)
-    return [serialize_directory_group(g) for g in synced]
+    return await enrich_directory_groups_from_db(
+        db, task_id, [serialize_directory_group(g) for g in synced]
+    )
 
 
 async def _run_task_reevaluate_impl(
@@ -631,9 +634,12 @@ async def list_task_directory_groups(
             )
         ).all()
     )
+    enriched = await enrich_directory_groups_from_db(
+        db, task_id, [serialize_directory_group(g) for g in groups]
+    )
     return {
         "ok": True,
-        "groups": [serialize_directory_group(g) for g in groups],
+        "groups": enriched,
     }
 
 
@@ -659,9 +665,12 @@ async def confirm_task_directory_group(
     summary = await refresh_task_summary(task_id, db)
     await db.commit()
     await db.refresh(updated)
+    enriched = await enrich_directory_groups_from_db(
+        db, task_id, [serialize_directory_group(updated)]
+    )
     return {
         "ok": True,
-        "group": serialize_directory_group(updated),
+        "group": enriched[0],
         "summary": summary,
         "message": (
             f"已确认 TMDB {updated.tmdb_id} 目标归档目录：{updated.confirmed_target_path}（未自动移动或删除文件）"

@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.models.directory_group import DirectoryGroup
+from app.models.metadata_cache import MetadataCache
 from app.models.season import SeasonRecord
 
 _TMDB_TAG_RE = re.compile(r"\[tmdbid[=:](\d+)\]", re.IGNORECASE)
@@ -160,7 +161,166 @@ def compute_group_paths_signature(entries: list[dict[str, Any]]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
 
 
-def classify_tmdb_directory_group(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+def _derive_archive_show_path(
+    show_path: str,
+    category: str = "",
+    source_root: str = "",
+    archive_root: str = "",
+) -> str:
+    """将源端剧集目录路径映射为归档库下的对应剧集目标目录（仅推导字符串，不触盘）。"""
+    norm_show = normalize_dir_path(show_path)
+    norm_src = normalize_dir_path(source_root) if source_root else ""
+    norm_arc = normalize_dir_path(archive_root) if archive_root else ""
+    if not norm_arc or norm_arc == "/":
+        return norm_show
+    if norm_src and norm_src != "/" and (norm_show == norm_src or norm_show.startswith(norm_src + "/")):
+        rel = norm_show[len(norm_src):].lstrip("/")
+        return normalize_dir_path(f"{norm_arc}/{rel}")
+    base_name = posixpath.basename(norm_show)
+    if category.startswith("cat:"):
+        rel_cat = "" if category == "cat:_root_" else category[4:].strip("/")
+        return normalize_dir_path(f"{norm_arc}/{rel_cat}/{base_name}" if rel_cat else f"{norm_arc}/{base_name}")
+    return normalize_dir_path(f"{norm_arc}/{base_name}")
+
+
+def build_directory_group_target_options(
+    entries: list[dict[str, Any]],
+    *,
+    category: str = "",
+    tmdb_id: str = "",
+    tmdb_meta: dict[str, Any] | None = None,
+    source_root: str = "",
+    archive_root: str = "",
+) -> dict[str, Any]:
+    """构建可供前端单选勾选的归档目标候选列表，并自动识别与 TMDB 官网页面名称一致的默认推荐项。"""
+    meta = tmdb_meta if isinstance(tmdb_meta, dict) else {}
+    canonical_title = str(meta.get("name") or "").strip()
+    canonical_original = str(meta.get("original_name") or "").strip()
+    canonical_year = str(meta.get("first_air_date") or "")[:4].strip()
+    canonical_norm = normalize_dir_basename(canonical_title)
+
+    by_target: dict[str, dict[str, Any]] = {}
+
+    def _matches_tmdb(raw_name: str) -> bool:
+        if not canonical_title:
+            return False
+        base = str(raw_name or "").strip()
+        if not base:
+            return False
+        clean_title = normalize_dir_basename(base)
+        if canonical_norm and clean_title and clean_title == canonical_norm:
+            return True
+        return base.casefold() == canonical_title.casefold()
+
+    for ent in entries:
+        if ent.get("side") != "archive":
+            continue
+        tpath = normalize_dir_path(ent.get("norm_path") or "")
+        if not tpath:
+            continue
+        rname = str(ent.get("raw_name") or posixpath.basename(tpath))
+        by_target[tpath] = {
+            "target_path": tpath,
+            "raw_name": rname,
+            "option_kind": "existing_archive",
+            "option_label": "归档库现有目录",
+            "exists_in_archive": True,
+            "source_show_paths": [],
+            "seasons": sorted({int(s) for s in (ent.get("seasons") or [])}),
+            "matches_tmdb_page": _matches_tmdb(rname),
+            "is_recommended": False,
+        }
+
+    for ent in entries:
+        if ent.get("side") != "source":
+            continue
+        spath = normalize_dir_path(ent.get("norm_path") or "")
+        if not spath:
+            continue
+        rname = str(ent.get("raw_name") or posixpath.basename(spath))
+        derived = _derive_archive_show_path(
+            spath,
+            category=category or str(ent.get("category") or ""),
+            source_root=source_root,
+            archive_root=archive_root,
+        )
+        if not derived:
+            continue
+        existing = by_target.get(derived)
+        if existing is not None:
+            if spath not in existing["source_show_paths"]:
+                existing["source_show_paths"].append(spath)
+            existing["seasons"] = sorted(
+                set(existing["seasons"]) | {int(s) for s in (ent.get("seasons") or [])}
+            )
+            if _matches_tmdb(rname):
+                existing["matches_tmdb_page"] = True
+        else:
+            by_target[derived] = {
+                "target_path": derived,
+                "raw_name": rname,
+                "option_kind": "from_source_name",
+                "option_label": "按源端目录名归档",
+                "exists_in_archive": False,
+                "source_show_paths": [spath],
+                "seasons": sorted({int(s) for s in (ent.get("seasons") or [])}),
+                "matches_tmdb_page": _matches_tmdb(rname),
+                "is_recommended": False,
+            }
+
+    candidates = list(by_target.values())
+    if canonical_title and not any(c["matches_tmdb_page"] for c in candidates):
+        parent_dir = posixpath.dirname(candidates[0]["target_path"]) if candidates else ""
+        if parent_dir:
+            yr_part = f" ({canonical_year})" if canonical_year.isdigit() else ""
+            tid_part = f" [tmdbid={tmdb_id}]" if str(tmdb_id).isdigit() else ""
+            synth_name = f"{canonical_title}{yr_part}{tid_part}"
+            synth_path = normalize_dir_path(f"{parent_dir}/{synth_name}")
+            if synth_path not in by_target:
+                candidates.append(
+                    {
+                        "target_path": synth_path,
+                        "raw_name": synth_name,
+                        "option_kind": "tmdb_canonical_new",
+                        "option_label": "TMDB 官网正名标准目录",
+                        "exists_in_archive": False,
+                        "source_show_paths": [],
+                        "seasons": [],
+                        "matches_tmdb_page": True,
+                        "is_recommended": False,
+                    }
+                )
+
+    def _pick_priority(c: dict[str, Any]) -> tuple[int, int, int, str]:
+        # 优先：与 TMDB 页面一致 + 归档库现有；其次：与 TMDB 页面一致；再次：归档库现有；最后按路径排序
+        return (
+            0 if (c["matches_tmdb_page"] and c["exists_in_archive"]) else 1,
+            0 if c["matches_tmdb_page"] else 1,
+            0 if c["exists_in_archive"] else 1,
+            c["target_path"],
+        )
+
+    candidates.sort(key=_pick_priority)
+    suggested_target = candidates[0]["target_path"] if candidates else ""
+    for c in candidates:
+        c["is_recommended"] = bool(suggested_target and c["target_path"] == suggested_target)
+
+    return {
+        "canonical_tmdb_title": canonical_title,
+        "canonical_tmdb_original_name": canonical_original,
+        "canonical_tmdb_year": canonical_year,
+        "candidate_targets": candidates,
+        "suggested_target_path": suggested_target,
+    }
+
+
+def classify_tmdb_directory_group(
+    entries: list[dict[str, Any]],
+    *,
+    tmdb_meta: dict[str, Any] | None = None,
+    source_root: str = "",
+    archive_root: str = "",
+) -> dict[str, Any] | None:
     """根据同分类同 TMDB ID 下的物理目录集合判定是否需要生成组级复核/确认。"""
     merged = merge_physical_entries(entries)
     if not merged:
@@ -181,22 +341,17 @@ def classify_tmdb_directory_group(entries: list[dict[str, Any]]) -> dict[str, An
 
     group_kind = ""
     title = ""
-    suggested_target = ""
 
     if len(source_entries) >= 2:
         group_kind = "multi_source_dirs"
         title = "同一作品有多个目录"
-        if len(archive_entries) == 1:
-            suggested_target = archive_entries[0]["norm_path"]
     elif len(archive_entries) >= 2:
         group_kind = "multi_archive_dirs"
         title = "同一作品在归档库有多个目录"
-        suggested_target = archive_entries[0]["norm_path"]
     elif len(source_entries) == 1 and len(archive_entries) == 1:
         if is_substantive_alias_dir(source_entries[0]["raw_name"], archive_entries[0]["raw_name"]):
             group_kind = "alias_dir_confirm"
             title = "同 ID 异名目录"
-            suggested_target = archive_entries[0]["norm_path"]
         else:
             return None
     else:
@@ -208,6 +363,16 @@ def classify_tmdb_directory_group(entries: list[dict[str, Any]]) -> dict[str, An
     for e in all_entries:
         season_nums.update(int(s) for s in (e.get("seasons") or []))
 
+    settings = get_settings()
+    opts = build_directory_group_target_options(
+        all_entries,
+        category=category,
+        tmdb_id=tmdb_id,
+        tmdb_meta=tmdb_meta,
+        source_root=source_root or settings.source_root or "",
+        archive_root=archive_root or settings.archive_root or "",
+    )
+
     return {
         "tmdb_id": tmdb_id,
         "category_key": category,
@@ -217,7 +382,11 @@ def classify_tmdb_directory_group(entries: list[dict[str, Any]]) -> dict[str, An
         "source_count": len(source_entries),
         "archive_count": len(archive_entries),
         "paths_signature": compute_group_paths_signature(all_entries),
-        "suggested_target_path": suggested_target,
+        "suggested_target_path": opts["suggested_target_path"],
+        "canonical_tmdb_title": opts["canonical_tmdb_title"],
+        "canonical_tmdb_original_name": opts["canonical_tmdb_original_name"],
+        "canonical_tmdb_year": opts["canonical_tmdb_year"],
+        "candidate_targets": opts["candidate_targets"],
         "season_count": len(season_nums),
     }
 
@@ -240,6 +409,9 @@ def serialize_directory_group(group: DirectoryGroup) -> dict[str, Any]:
         ev = json.loads(group.evidence_json or "{}")
     except Exception:
         ev = {}
+    if not isinstance(ev, dict):
+        ev = {}
+    candidates = ev.get("candidate_targets") if isinstance(ev.get("candidate_targets"), list) else []
     return {
         "id": group.id,
         "task_id": group.task_id,
@@ -256,11 +428,160 @@ def serialize_directory_group(group: DirectoryGroup) -> dict[str, Any]:
         "status": group.status,
         "requires_confirm": group.status == "pending_confirm",
         "invalidated_reason": group.invalidated_reason or "",
-        "evidence": ev if isinstance(ev, dict) else {},
+        "evidence": ev,
+        "canonical_tmdb_title": str(ev.get("canonical_tmdb_title") or ""),
+        "canonical_tmdb_original_name": str(ev.get("canonical_tmdb_original_name") or ""),
+        "canonical_tmdb_year": str(ev.get("canonical_tmdb_year") or ""),
+        "candidate_targets": candidates,
         "season_count": group.season_count or 0,
         "confirmed_at": group.confirmed_at.isoformat() if group.confirmed_at else None,
         "updated_at": group.updated_at.isoformat() if group.updated_at else None,
     }
+
+
+def enrich_directory_group_dict(
+    group_dict: dict[str, Any],
+    *,
+    tmdb_meta: dict[str, Any] | None = None,
+    source_root: str = "",
+    archive_root: str = "",
+) -> dict[str, Any]:
+    """用最新 TMDB 元数据与源/归档根路径实时补全多目录组的候选项列表与默认推荐项。"""
+    entries = group_dict.get("entries") if isinstance(group_dict.get("entries"), list) else []
+    tmdb_id = str(group_dict.get("tmdb_id") or "")
+    category = str(group_dict.get("category_key") or "")
+    meta = dict(tmdb_meta) if isinstance(tmdb_meta, dict) else {}
+    if not meta.get("name") and group_dict.get("canonical_tmdb_title"):
+        meta["name"] = group_dict["canonical_tmdb_title"]
+    if not meta.get("original_name") and group_dict.get("canonical_tmdb_original_name"):
+        meta["original_name"] = group_dict["canonical_tmdb_original_name"]
+    if not meta.get("first_air_date") and group_dict.get("canonical_tmdb_year"):
+        meta["first_air_date"] = f"{group_dict['canonical_tmdb_year']}-01-01"
+
+    opts = build_directory_group_target_options(
+        entries,
+        category=category,
+        tmdb_id=tmdb_id,
+        tmdb_meta=meta if meta else None,
+        source_root=source_root,
+        archive_root=archive_root,
+    )
+    ev = dict(group_dict.get("evidence") or {})
+    if opts["canonical_tmdb_title"]:
+        ev["canonical_tmdb_title"] = opts["canonical_tmdb_title"]
+    if opts["canonical_tmdb_original_name"]:
+        ev["canonical_tmdb_original_name"] = opts["canonical_tmdb_original_name"]
+    if opts["canonical_tmdb_year"]:
+        ev["canonical_tmdb_year"] = opts["canonical_tmdb_year"]
+    if opts["candidate_targets"]:
+        ev["candidate_targets"] = opts["candidate_targets"]
+
+    suggested = str(group_dict.get("suggested_target_path") or "")
+    if opts["suggested_target_path"] and (
+        not suggested
+        or not archive_root
+        or suggested != opts["suggested_target_path"]
+    ):
+        suggested = opts["suggested_target_path"]
+
+    return {
+        **group_dict,
+        "suggested_target_path": suggested,
+        "canonical_tmdb_title": str(ev.get("canonical_tmdb_title") or ""),
+        "canonical_tmdb_original_name": str(ev.get("canonical_tmdb_original_name") or ""),
+        "canonical_tmdb_year": str(ev.get("canonical_tmdb_year") or ""),
+        "candidate_targets": opts["candidate_targets"] or group_dict.get("candidate_targets") or [],
+        "evidence": ev,
+    }
+
+
+async def enrich_directory_groups_from_db(
+    db: AsyncSession,
+    task_id: str,
+    group_dicts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """结合 DB 中的 MetadataCache（tmdb_tv:<id>）与 SeasonRecord，补全历史任务多目录组的候选列表。"""
+    if not group_dicts:
+        return group_dicts
+
+    import inspect as _inspect
+
+    settings = get_settings()
+    tids = sorted(
+        {
+            str(g.get("tmdb_id") or "").strip()
+            for g in group_dicts
+            if str(g.get("tmdb_id") or "").strip().isdigit()
+        }
+    )
+    meta_by_tid: dict[str, dict[str, Any]] = {}
+    scalars_fn = getattr(db, "scalars", None)
+
+    if tids and callable(scalars_fn):
+        keys = [f"tmdb_tv:{tid}" for tid in tids]
+        q = scalars_fn(select(MetadataCache).where(MetadataCache.cache_key.in_(keys)))
+        if _inspect.isawaitable(q):
+            for mc in (await q).all():
+                try:
+                    payload = json.loads(mc.payload_json or "{}")
+                except Exception:
+                    payload = {}
+                if isinstance(payload, dict) and payload.get("name"):
+                    tid_str = str(mc.media_id or mc.cache_key.split(":", 1)[-1]).strip()
+                    meta_by_tid[tid_str] = payload
+
+    missing_tids = {t for t in tids if not meta_by_tid.get(t, {}).get("name")}
+    arc_parent_by_show: dict[str, str] = {}
+    if callable(scalars_fn) and (missing_tids or not settings.archive_root):
+        q_recs = scalars_fn(select(SeasonRecord).where(SeasonRecord.task_id == task_id))
+        if _inspect.isawaitable(q_recs):
+            for rec in (await q_recs).all():
+                rtid = str(rec.tmdb_id or "").strip()
+                if rtid in missing_tids and rec.evidence_json:
+                    try:
+                        ev = json.loads(rec.evidence_json or "{}")
+                    except Exception:
+                        ev = {}
+                    mw = (ev or {}).get("matched_work") or {}
+                    if isinstance(mw, dict) and mw.get("name"):
+                        meta_by_tid[rtid] = {
+                            "name": mw.get("name") or "",
+                            "original_name": mw.get("original_name") or "",
+                            "first_air_date": mw.get("first_air_date") or "",
+                        }
+                        missing_tids.discard(rtid)
+                if not settings.archive_root and rec.show_path and rec.archive_target_path:
+                    n_show = normalize_dir_path(rec.show_path)
+                    n_arc_t = normalize_dir_path(rec.archive_target_path)
+                    if normalize_dir_path(rec.season_path) != n_show:
+                        n_arc_show = posixpath.dirname(n_arc_t)
+                    else:
+                        n_arc_show = n_arc_t
+                    if n_arc_show and "/" in n_arc_show:
+                        arc_parent_by_show[n_show] = posixpath.dirname(n_arc_show)
+
+    enriched: list[dict[str, Any]] = []
+    for g in group_dicts:
+        tid = str(g.get("tmdb_id") or "").strip()
+        src_root = settings.source_root or ""
+        arc_root = settings.archive_root or ""
+        if not arc_root:
+            for ent in g.get("entries") or []:
+                if isinstance(ent, dict) and ent.get("side") == "source":
+                    n_show = normalize_dir_path(ent.get("norm_path") or "")
+                    if n_show in arc_parent_by_show:
+                        arc_root = arc_parent_by_show[n_show]
+                        src_root = posixpath.dirname(n_show)
+                        break
+        enriched.append(
+            enrich_directory_group_dict(
+                g,
+                tmdb_meta=meta_by_tid.get(tid),
+                source_root=src_root,
+                archive_root=arc_root,
+            )
+        )
+    return enriched
 
 
 async def sync_directory_groups_for_task(
@@ -303,6 +624,16 @@ async def sync_directory_groups_for_task(
             if e.get("side") == "archive"
         }
 
+        ev_payload = {
+            "source_count": g.get("source_count", 0),
+            "archive_count": g.get("archive_count", 0),
+            "canonical_tmdb_title": str(g.get("canonical_tmdb_title") or ""),
+            "canonical_tmdb_original_name": str(g.get("canonical_tmdb_original_name") or ""),
+            "canonical_tmdb_year": str(g.get("canonical_tmdb_year") or ""),
+            "candidate_targets": g.get("candidate_targets") if isinstance(g.get("candidate_targets"), list) else [],
+        }
+        encoded_ev = json.dumps(ev_payload, ensure_ascii=False)
+
         row = existing_by_key.get(key)
         if row is None:
             row = DirectoryGroup(
@@ -318,13 +649,7 @@ async def sync_directory_groups_for_task(
                 confirmation_mode="",
                 status="pending_confirm",
                 invalidated_reason="",
-                evidence_json=json.dumps(
-                    {
-                        "source_count": g.get("source_count", 0),
-                        "archive_count": g.get("archive_count", 0),
-                    },
-                    ensure_ascii=False,
-                ),
+                evidence_json=encoded_ev,
                 season_count=int(g.get("season_count") or 0),
             )
             db.add(row)
@@ -348,13 +673,7 @@ async def sync_directory_groups_for_task(
             row.paths_json = encoded_entries
             row.suggested_target_path = str(g.get("suggested_target_path") or "")
             row.season_count = int(g.get("season_count") or 0)
-            row.evidence_json = json.dumps(
-                {
-                    "source_count": g.get("source_count", 0),
-                    "archive_count": g.get("archive_count", 0),
-                },
-                ensure_ascii=False,
-            )
+            row.evidence_json = encoded_ev
             if invalidated_reason:
                 row.status = "pending_confirm"
                 row.confirmation_mode = ""

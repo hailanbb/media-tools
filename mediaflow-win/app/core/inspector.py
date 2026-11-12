@@ -773,6 +773,7 @@ async def run_inspection(
     db_lock = asyncio.Lock()
     sem = asyncio.Semaphore(max(1, concurrency))
     physical_dir_entries_by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    tmdb_meta_by_id: dict[str, dict[str, Any]] = {}
     confirmed_targets_by_key: dict[tuple[str, str], dict[str, Any]] = {}
     if db is not None:
         try:
@@ -1543,6 +1544,8 @@ async def run_inspection(
                         )
             async with lock:
                 physical_dir_entries_by_key.setdefault((show_cat_key, show_tid_str), []).extend(entries_to_add)
+                if isinstance(primary_work_info, dict) and primary_work_info.get("name"):
+                    tmdb_meta_by_id.setdefault(show_tid_str, dict(primary_work_info))
 
         return diagnosed_seasons
 
@@ -1593,8 +1596,13 @@ async def run_inspection(
 
         # 汇总同一分类、同一 TMDB ID 下的多目录 / 异名目录组级状态
         raw_groups: list[dict[str, Any]] = []
-        for (_, _), entries in sorted(physical_dir_entries_by_key.items()):
-            grp = classify_tmdb_directory_group(entries)
+        for (_, tid_k), entries in sorted(physical_dir_entries_by_key.items()):
+            grp = classify_tmdb_directory_group(
+                entries,
+                tmdb_meta=tmdb_meta_by_id.get(str(tid_k)),
+                source_root=global_source_root,
+                archive_root=archive_root,
+            )
             if grp:
                 raw_groups.append(grp)
 
@@ -1652,6 +1660,10 @@ async def run_inspection(
                 "confirmation_mode": ginfo.get("confirmation_mode") or "",
                 "confirmed_target_path": ginfo.get("confirmed_target_path") or "",
                 "suggested_target_path": ginfo.get("suggested_target_path") or "",
+                "canonical_tmdb_title": ginfo.get("canonical_tmdb_title") or "",
+                "canonical_tmdb_original_name": ginfo.get("canonical_tmdb_original_name") or "",
+                "canonical_tmdb_year": ginfo.get("canonical_tmdb_year") or "",
+                "candidate_targets": ginfo.get("candidate_targets") or [],
                 "invalidated_reason": ginfo.get("invalidated_reason") or "",
                 "entries": ginfo.get("entries") or [],
                 "is_primary_group_card": is_primary,

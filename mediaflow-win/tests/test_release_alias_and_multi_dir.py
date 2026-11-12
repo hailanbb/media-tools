@@ -538,7 +538,7 @@ class ReleaseAliasAndMultiDirTests(unittest.IsolatedAsyncioTestCase):
         details = {
             700001: {"id": 700001, "name": "单源预期归档", "status": "Ended", "seasons": [{"season_number": 1, "episode_count": 1, "air_date": "2024-01-01"}]},
             700002: {"id": 700002, "name": "Oh My Guard", "original_name": "Oh My Guard", "status": "Ended", "seasons": [{"season_number": 1, "episode_count": 1, "air_date": "2024-01-01"}]},
-            307478: {"id": 307478, "name": "完美的谎言", "status": "Ended", "seasons": [{"season_number": 1, "episode_count": 2, "air_date": "2024-01-01"}, {"season_number": 2, "episode_count": 1, "air_date": "2024-01-01"}]},
+            307478: {"id": 307478, "name": "谎言", "original_name": "라이어", "first_air_date": "2026-10-30", "status": "Ended", "seasons": [{"season_number": 1, "episode_count": 2, "air_date": "2026-10-30"}, {"season_number": 2, "episode_count": 1, "air_date": "2026-10-30"}]},
             700004: {"id": 700004, "name": "正名归档B", "original_name": "AliasShow", "status": "Ended", "seasons": [{"season_number": 1, "episode_count": 1, "air_date": "2024-01-01"}]},
             700005: {"id": 700005, "name": "重名作品A", "status": "Ended", "seasons": [{"season_number": 1, "episode_count": 1, "air_date": "2024-01-01"}]},
             700006: {"id": 700006, "name": "重名作品B", "status": "Ended", "seasons": [{"season_number": 1, "episode_count": 1, "air_date": "2024-01-01"}]},
@@ -598,6 +598,15 @@ class ReleaseAliasAndMultiDirTests(unittest.IsolatedAsyncioTestCase):
         # 同作品多季仅第一张标注 is_primary_group_card=True
         primary_cards_307478 = [s for s in res.seasons if str(s.tmdb_id) == "307478" and (s.evidence.get("directory_group") or {}).get("is_primary_group_card")]
         self.assertEqual(len(primary_cards_307478), 1)
+        g307478 = group_tids["307478"]
+        self.assertEqual(g307478["canonical_tmdb_title"], "谎言")
+        self.assertEqual(g307478["suggested_target_path"], f"{dst_cat}/谎言 (2026) [tmdbid=307478]")
+        cand_targets = {c["target_path"]: c for c in g307478["candidate_targets"]}
+        self.assertIn(f"{dst_cat}/完美的谎言 (2026) [tmdbid=307478]", cand_targets)
+        self.assertIn(f"{dst_cat}/谎言 (2026) [tmdbid=307478]", cand_targets)
+        self.assertTrue(cand_targets[f"{dst_cat}/谎言 (2026) [tmdbid=307478]"]["matches_tmdb_page"])
+        self.assertTrue(cand_targets[f"{dst_cat}/谎言 (2026) [tmdbid=307478]"]["is_recommended"])
+        self.assertFalse(cand_targets[f"{dst_cat}/完美的谎言 (2026) [tmdbid=307478]"]["is_recommended"])
 
         # 验证写入/删除/退订全部被组级未确认门禁安全拦截，且 CD2 未收到任何写操作
         async with async_session() as db:
@@ -611,6 +620,14 @@ class ReleaseAliasAndMultiDirTests(unittest.IsolatedAsyncioTestCase):
         headers = {"Authorization": "Bearer fixture"}
         with patch("app.api.archive.CloudDrive2Client", return_value=cd2), patch("app.clients.clouddrive2.CloudDrive2Client", return_value=cd2), patch("app.api.moviepilot.MoviePilotClient", return_value=mp):
             async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                # 验证 directory-groups 列表接口返回 TMDB 页面名与单选候选列表（含历史任务按 SeasonRecord 自动推导兜底）
+                r_list = await client.get("/api/tasks/t-mdir/directory-groups", headers=headers)
+                self.assertEqual(r_list.status_code, 200)
+                list_groups = {str(g["tmdb_id"]): g for g in r_list.json()["groups"]}
+                self.assertEqual(list_groups["307478"]["canonical_tmdb_title"], "谎言")
+                self.assertEqual(list_groups["307478"]["suggested_target_path"], f"{dst_cat}/谎言 (2026) [tmdbid=307478]")
+                self.assertGreaterEqual(len(list_groups["307478"]["candidate_targets"]), 2)
+
                 # 未确认前拦截归档、删除源端（本季）、删除源端整剧、退订联动清理
                 r_arc = await client.post("/api/archive/execute", json={"season_record_ids": [rec_307478_id]}, headers=headers)
                 self.assertEqual(r_arc.status_code, 200)

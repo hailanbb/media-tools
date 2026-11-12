@@ -150,7 +150,7 @@ console.log("===================================================================
   const source = name => htmlContent.match(new RegExp('(?:async )?function ' + name + '\\([^]*?\\n    \\}'))[0];
   const nodes = new Map();
   const getNode = id => {
-    if (!nodes.has(id)) nodes.set(id, {classList: {add() {}, remove() {}}, checked: false});
+    if (!nodes.has(id)) nodes.set(id, {classList: {add() {}, remove() {}}, checked: false, addEventListener() {}});
     return nodes.get(id);
   };
   const item = {id: 'record', show: '示例', season: 'S02', statusText: '1/2集',
@@ -171,5 +171,66 @@ console.log("===================================================================
   vm.runInContext(source('promptDeleteSourceShow') + ";promptDeleteSourceShow('record')", context);
   assert.strictEqual(getNode('deleteSourceShowPath').textContent, '源端目标路径: /src/Show');
   assert.strictEqual(context.openedModal, 'deleteSourceShowModal');
-  console.log('✓ 手动处理按钮、缺集删除按钮及整剧确认路径通过');
+
+  // 验证无冲突纯重复剧集（如心动制造所）不误报红色「识别证据与冲突拦截」
+  const dupOnlyItem = {
+    id: 'dup-only', show: '心动制造所 (2026)', season: 'S01', tmdbId: '311648',
+    statusText: '10/10集，第 4,5,6 集有多个版本',
+    raw: {
+      show_name: '心动制造所 (2026) [tmdbid=311648]', season_number: 1, tmdb_id: '311648',
+      status: 'review_needed', status_detail: '全 10 集已齐，但存在重复版本',
+      evidence: {
+        meta_status: 'ok',
+        matched_work: { en_name: 'Make Me Tingle', aliases: ['心动制造所'] },
+        release_evidence: { dominant_release_title: 'Make Me Tingle', platform_tags: ['HMAX', 'DSNP'] }
+      },
+      conflict: {}
+    }
+  };
+  const conflictItem = {
+    id: 'real-conf', show: '错配剧', season: 'S01', tmdbId: '999',
+    raw: {
+      show_name: '错配剧', season_number: 1, tmdb_id: '999',
+      status: 'identity_review', status_detail: '存在冲突',
+      evidence: { release_evidence: { dominant_release_title: 'Other Show' } },
+      conflict: { blocking: true, reason: '集标题明显不一致' }
+    }
+  };
+  context.findItemByRecordId = id => (id === 'dup-only' ? dupOnlyItem : conflictItem);
+  context.loadGapFillPreview = async () => ({});
+  context.gapFillPreviewState = { itemsByRecordId: {} };
+  context.getCategoryBadge = () => '';
+  getNode('gapFillDetailDialog').showModal = () => {};
+  vm.runInContext(source('openGapFillDetail') + ";openGapFillDetail('dup-only')", context);
+  const dupHtml = getNode('gapFillDetailBody').innerHTML;
+  assert(dupHtml.includes('作品识别与别名参考（无归属冲突）'), '无冲突项不应显示冲突拦截标题');
+  assert(!dupHtml.includes('识别证据与冲突拦截'), '无冲突项不得出现红色识别证据与冲突拦截');
+  vm.runInContext("openGapFillDetail('real-conf')", context);
+  assert(getNode('gapFillDetailBody').innerHTML.includes('识别证据与冲突拦截'), '真实冲突项必须保留识别证据与冲突拦截');
+
+  // 验证同 TMDB 多目录确认弹窗改为单选勾选，并按 TMDB 页面显示名默认勾选
+  context.taskList = [{
+    id: 'task',
+    directoryGroups: [{
+      id: 'grp-307478', tmdb_id: '307478', category_key: 'cat:电视剧/韩国剧集', title: '同一作品有多个目录',
+      canonical_tmdb_title: '谎言', canonical_tmdb_original_name: '라이어', canonical_tmdb_year: '2026',
+      suggested_target_path: '/dst/谎言 (2026) [tmdbid=307478]',
+      entries: [
+        { side: 'source', norm_path: '/src/完美的谎言 (2026) [tmdbid=307478]', seasons: [1], episodes_by_season: { '1': [1, 2] } },
+        { side: 'source', norm_path: '/src/谎言 (2026) [tmdbid=307478]', seasons: [1], episodes_by_season: { '1': [3, 4] } }
+      ],
+      candidate_targets: [
+        { target_path: '/dst/谎言 (2026) [tmdbid=307478]', raw_name: '谎言 (2026) [tmdbid=307478]', option_label: '按源端目录名归档', matches_tmdb_page: true, is_recommended: true, seasons: [1] },
+        { target_path: '/dst/完美的谎言 (2026) [tmdbid=307478]', raw_name: '完美的谎言 (2026) [tmdbid=307478]', option_label: '按源端目录名归档', matches_tmdb_page: false, is_recommended: false, seasons: [1] }
+      ]
+    }]
+  }];
+  context._activeDirectoryGroupId = null;
+  getNode('directoryGroupDialog').showModal = () => {};
+  vm.runInContext(source('openDirectoryGroupDialog') + ";openDirectoryGroupDialog('grp-307478')", context);
+  const dgHtml = getNode('directoryGroupDialogBody').innerHTML;
+  assert(dgHtml.includes('TMDB 官网页面 (tmdbid=307478) 当前显示名称：「谎言」'));
+  assert(dgHtml.includes('type="radio" name="dirGroupTargetRadio" value="/dst/谎言 (2026) [tmdbid=307478]" checked'));
+  assert(!dgHtml.includes('value="/dst/完美的谎言 (2026) [tmdbid=307478]" checked'));
+  console.log('✓ 手动处理按钮、缺集删除按钮、无冲突详情降噪与多目录单选勾选通过');
 }
