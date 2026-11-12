@@ -4,7 +4,7 @@
 
 > **面向家庭影院与云原生 NAS（115网盘 / CloudDrive2 / MoviePilot / Emby / Jellyfin）的新一代智能影视媒体整理、跨库无损归档与双轨运维治理系统。**
 
-[![Version](https://img.shields.io/badge/Release-v2.5.16-6366f1.svg?style=flat-square&logo=github)](https://github.com/hailanbb/media-tools/releases)
+[![Version](https://img.shields.io/badge/Release-v2.5.17-6366f1.svg?style=flat-square&logo=github)](https://github.com/hailanbb/media-tools/releases)
 [![Docker](https://img.shields.io/badge/Docker-Supported-2496ed.svg?style=flat-square&logo=docker)](mediaflow-docker/)
 [![Windows](https://img.shields.io/badge/Windows-Native-0078d4.svg?style=flat-square&logo=windows)](mediaflow-win/)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776ab.svg?style=flat-square&logo=python)](https://www.python.org/)
@@ -216,13 +216,23 @@ MediaFlow 的每一项核心机制均遵循严谨的第一性原理设计方案�
 * 📗 [《MediaFlow批量一键归档加速与安全并发方案》](MediaFlow批量一键归档加速与安全并发方案-2026-11-10.md) —— 归档完成判断修正、无损同名跳过、剧级互斥锁与快照复用规范；
 * 📙 [《MediaFlow批量冗余清理加速与受控并发方案》](MediaFlow批量冗余清理加速与受控并发方案-2026-11-10.md) —— 单次实物重读双向核验、主视频优先从属删除与受控工作池；
 * 📕 [《MediaFlow批量推送MoviePilot补缺加速与优雅中止方案》](MediaFlow批量推送MoviePilot补缺加速与优雅中止方案-2026-11-10.md) —— 瞬时 AbortController 熔断、批次隔离与短时 TTL 队列快照；
-* 📒 [《MediaFlow批量补缺选种、站点与整季回退优化方案》](MediaFlow批量补缺选种、站点与整季回退优化方案-2026-11-12.md) —— 做种同档内省容量优先、动态六站扩展（含天空/观众）、整季安全回退与已有集保护。
+* 📒 [《MediaFlow批量补缺选种、站点与整季回退优化方案》](MediaFlow批量补缺选种、站点与整季回退优化方案-2026-11-12.md) —— 做种同档内省容量优先、动态六站扩展（含天空/观众）、整季安全回退与已有集保护；
+* 🧩 [《MediaFlow季号错配与跨条目集数核对方案》](MediaFlow季号错配与跨条目集数核对方案-2026-11-12.md) —— 作品归属冲突隔离、短标题防误绑、单季可逆跨条目映射、元数据失败态分层与只读重算；
+* 🔄 [《MediaFlow批量补缺完成刷新与待补清单优化方案》](MediaFlow批量补缺完成刷新与待补清单优化方案-2026-11-12.md) —— 推种前落盘意图、脱敏回执逐集扣减、真缺集待补与已推送待入库同页切换及一键核对入库。
 
 ---
 
 ## 📜 版本演进历史 (Changelog)
 
-### 🚀 最新稳定版：v2.5.16 (2026-11-12)
+### 🚀 最新稳定版：v2.5.17 (2026-11-12)
+
+* **季号错配防线、单季跨条目映射与批量补缺持久化闭环**：
+  * **作品身份冲突与跨条目映射（`identity_resolver` + `season_mappings.json`）**：识别文件名发布组/英文别名线索触发 `identity_review` 并核对分集标题重合，脱壳文件统一标记 `not_listed`/`unknown`（拒绝错配豆瓣条目）；短标题重名（如《王国》）严格阻断并绝不自动改绑，提供前端可逆单季映射弹窗，保持其余季口径完全独立；支持跨条目拆条别名（如《极地恶灵 S03》`75191/S03 <-> douban:36768839 <-> tmdb:323903/S01`）双库取证与补缺过滤错剧；
+  * **元数据失败态精准分层与只读重算**：显式区分 `fetch_failed` / `no_candidate` / `episodes_tba` / `not_listed`，远端超时自动复用 `MetadataCache` 已核实快照；同目录混部多部作品阻断为 `mixed_works`；新增只读 `/recalculate` 重算且严格保留 `manually_handled` 与实文件；
+  * **批量补缺持久化、真缺集扣减与核对入库**：推种前落盘 `intent_submitting` 并立即持久化脱敏回执（绝不落盘站点凭据/私密链接），按集号部分扣减，支持默认“真缺集待补”与同页“已推送待入库”切换，覆盖 `submitted_unverified`、`aborted_unstarted`、`mp_cancelled_freed`，支持一键“核对入库”联合 MP 队列/历史与 CD2 双库实物收口或退回待补，“完成并刷新”直接读取后端状态而不重推；
+  * **历史数据库迁移修复**：修正 `database.py` `_migrate_legacy_columns` 同步签名，升级启动时自动无损补齐 `season_records` 新列。
+
+#### v2.5.16 (2026-11-12)
 
 * **批量补缺选种省容量、站点扩展与整季安全回退优化**：
   * **同做种档内省容量优先**：以本轮最高做种数 $H$ 划分同档边界 $H - \text{seeders} \le \max(1, \lfloor H \times 10\% \rfloor)$，同档内严格按实际需下载总字节升序选种；大小 `0` 或为空视作未知排在已知之后；支持跨站同种去重（保留多站来源）；多集拼包通过 Pareto 剪枝与有界搜索优先最大化覆盖并比总字节（连集包容量仅计一次），日志详列次选体积差；

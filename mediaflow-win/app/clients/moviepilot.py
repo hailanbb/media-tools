@@ -366,6 +366,22 @@ class MoviePilotClient:
     async def get_active_downloads(self) -> list[dict]:
         return await self._get("/api/v1/download/")
 
+    async def get_download_history(self, page: int = 1, count: int = 100) -> list[dict]:
+        """获取 MoviePilot 下载历史记录（兼容多种响应格式，不支持或失败时安全返回空列表）。"""
+        try:
+            res = await self._get("/api/v1/history/download", page=page, count=count)
+            if isinstance(res, dict):
+                data = res.get("data")
+                if isinstance(data, dict):
+                    return list(data.get("list") or data.get("items") or [])
+                if isinstance(data, list):
+                    return list(data)
+            if isinstance(res, list):
+                return list(res)
+        except Exception:
+            pass
+        return []
+
     # ── 站点 ──────────────────────────────────────────────
     async def get_sites(self) -> list[dict]:
         res = await self._get("/api/v1/site/")

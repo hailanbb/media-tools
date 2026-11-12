@@ -215,7 +215,15 @@ class GovernanceTests(ManualActionsTest):
                 self.assertTrue(result["skipped"], result)
                 self.assertIn("下载队列", result["message"])
                 mp.search_resources.assert_not_awaited()
+                # 用户在 MP 取消/清除了此前受理的任务且网盘仍无实文件，经“核对入库”退回待补后再重试检索
+                from app.services.gap_fill_tracker import reconcile_gap_fill_records
                 mp.get_active_downloads.return_value = []
+                mp.get_download_history.return_value = []
+                mp.get_transfer_history.return_value = []
+                await reconcile_gap_fill_records(
+                    db=db, task_id=rec.task_id, season_record_ids=["gap"],
+                    force_release_missing=True, mp_client=mp, cd2_client=disk,
+                )
                 mp.get_media_info.return_value = {"original_title":"Show"}
                 mp.search_resources.side_effect = [[], []]
                 result = await execute_gap_fill_download(["gap"], db)

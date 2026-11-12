@@ -13,10 +13,13 @@ from unittest.mock import AsyncMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("MF_DATA_DIR", tempfile.mkdtemp(prefix="gap-fill-opt-"))
 
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.clients.moviepilot import MoviePilotClient
 from app.database import Base
+from app.models.gap_fill import GapFillEpisode, GapFillSeasonRun
+from app.models.operation import OperationLog
 from app.models.season import SeasonRecord
 from app.models.task import Task
 from app.services import download_service
@@ -260,6 +263,10 @@ class GapFillOptimizationTests(unittest.IsolatedAsyncioTestCase):
 
             # 场景 6：首轮只有错季散集(S02) -> 自动用原名+季号补搜并带上同样六站，返回正确 S03 整季包
             download_service._recently_submitted_tasks.clear()
+            await db.execute(delete(GapFillEpisode).where(GapFillEpisode.task_id == "t1"))
+            await db.execute(delete(GapFillSeasonRun).where(GapFillSeasonRun.task_id == "t1"))
+            await db.execute(delete(OperationLog).where(OperationLog.task_id == "t1"))
+            await db.commit()
             wrong_s02 = _cand("Chef.S02E02.1080p", seeders=10, size=800 * 1024**2, eps=[2], season=2, site=4, site_name="彩虹岛")
             mp_real.search_resources = AsyncMock(side_effect=[[wrong_s02], [sp_sky]])
             mp_real.submit_download.reset_mock()
@@ -436,6 +443,10 @@ class GapFillOptimizationTests(unittest.IsolatedAsyncioTestCase):
             # B. 目标季已有活跃下载 E02，缺失 [2, 9]，仅剩 E09 但只有整季包 -> 存在文件重叠，暂缓整包不重复提交
             download_service._recently_submitted_tasks.clear()
             download_service._active_downloads_cache = None
+            await db.execute(delete(GapFillEpisode).where(GapFillEpisode.task_id == "t8"))
+            await db.execute(delete(GapFillSeasonRun).where(GapFillSeasonRun.task_id == "t8"))
+            await db.execute(delete(OperationLog).where(OperationLog.task_id == "t8"))
+            await db.commit()
             mp.get_active_downloads = AsyncMock(return_value=[{"tmdb_id": 42, "season": 3, "episode": "E02", "title": "Show8"}])
             sp_only = _cand(
                 "Show8.S03.Complete.1080p",

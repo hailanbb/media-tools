@@ -29,8 +29,31 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         yield session
 
 
+def _migrate_legacy_columns(sync_conn) -> None:
+    """为历史 SQLite 表按需幂等补齐新增列（防止升级后 no such column 报错）。"""
+    migrations: dict[str, list[tuple[str, str]]] = {
+        "season_records": [
+            ("evidence_json", "TEXT"),
+            ("conflict_json", "TEXT"),
+            ("mapping_json", "TEXT"),
+            ("last_checked_at", "DATETIME"),
+        ],
+    }
+    for table_name, columns in migrations.items():
+        rows = sync_conn.exec_driver_sql(f"PRAGMA table_info({table_name})").fetchall()
+        existing = {row[1] for row in rows}
+        for col_name, col_type in columns:
+            if col_name not in existing:
+                sync_conn.exec_driver_sql(
+                    f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_type}"
+                )
+
+
 async def init_db() -> None:
-    """根据 Base.metadata 创建所有尚不存在的表。"""
+    """根据 Base.metadata 创建所有尚不存在的表并补齐历史迁移列。"""
+    import app.models  # noqa: F401 - 确保所有 ORM 模型已注册到 Base.metadata
+
     Path(_settings.data_dir).mkdir(parents=True, exist_ok=True)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_migrate_legacy_columns)

@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "mappings": [
+    {
+      "mapping_id": "tmdb-75191-s03-devil-in-silver",
+      "source_tmdb_id": 75191,
+      "source_season": 3,
+      "source_title": "极地恶灵",
+      "target_tmdb_id": 323903,
+      "target_douban_id": "36768839",
+      "target_season": 1,
+      "target_title": "极地恶灵：银色恶魔",
+      "target_original_title": "The Terror: Devil in Silver",
+      "search_keywords": [
+        "极地恶灵",
+        "银色恶魔",
+        "Devil in Silver",
+        "The Terror Devil in Silver"
+      ],
+      "archive_aliases": [
+        "银色恶魔",
+        "极地恶灵：银色恶魔",
+        "极地恶灵 第三季",
+        "The Terror: Devil in Silver",
+        "Devil in Silver"
+      ],
+      "expected_total_episodes": 6,
+      "expected_status": "Ended",
+      "numbering_mode": "independent",
+      "episode_offset": 0,
+      "mapping_kind": "cross_entry_alias",
+      "evidence_note": "AMC 将《极地恶灵》第三季（Devil in Silver）在豆瓣收录为 36768839（共 6 集），TMDB 拆分为独立条目 323903 第 1 季（共 6 集，Ended，第 6 集 Starry Night）。"
+    }
+  ]
+}

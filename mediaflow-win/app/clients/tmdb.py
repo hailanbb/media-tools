@@ -28,13 +28,54 @@ class TMDBClient:
             params={"api_key": self.api_key, "language": "zh-CN"},
         )
 
-    async def _get(self, path: str, **extra_params: Any) -> Any:
+    async def _request(self, path: str, **extra_params: Any) -> tuple[Any, str, str | None]:
+        """请求 TMDB API 并明确区分成功、未收录 (404) 与网络/服务端故障。"""
         try:
             resp = await self._client.get(f"{self.BASE_URL}{path}", params=extra_params)
+            if resp.status_code == 404:
+                return None, "not_found", "TMDB 返回 404（条目或季不存在）"
             resp.raise_for_status()
-            return resp.json()
-        except Exception:
-            return None
+            return resp.json(), "ok", None
+        except httpx.TimeoutException as exc:
+            return None, "error", f"TMDB 请求超时: {exc}"
+        except httpx.HTTPStatusError as exc:
+            return None, "error", f"TMDB HTTP {exc.response.status_code}"
+        except Exception as exc:
+            return None, "error", f"TMDB 请求异常: {exc}"
+
+    async def _get(self, path: str, **extra_params: Any) -> Any:
+        data, _, _ = await self._request(path, **extra_params)
+        return data
+
+    async def fetch_tv_detail(
+        self, tv_id: int, language: str | None = None
+    ) -> tuple[dict, str, str | None]:
+        """获取电视剧详情并返回 `(data, status_kind, error_msg)`。"""
+        params = {"language": language} if language else {}
+        res, status_kind, err = await self._request(f"/tv/{tv_id}", **params)
+        return (res if isinstance(res, dict) else {}), status_kind, err
+
+    async def fetch_season_detail(
+        self, tv_id: int, season_number: int, language: str | None = None
+    ) -> tuple[dict, str, str | None]:
+        """获取单季详情并返回 `(data, status_kind, error_msg)`。"""
+        params = {"language": language} if language else {}
+        res, status_kind, err = await self._request(
+            f"/tv/{tv_id}/season/{season_number}", **params
+        )
+        return (res if isinstance(res, dict) else {}), status_kind, err
+
+    async def fetch_search_tv(
+        self, query: str, language: str | None = None
+    ) -> tuple[list[dict], str, str | None]:
+        """搜索电视剧并返回 `(results, status_kind, error_msg)`。"""
+        params: dict[str, Any] = {"query": query}
+        if language:
+            params["language"] = language
+        data, status_kind, err = await self._request("/search/tv", **params)
+        if isinstance(data, dict):
+            return data.get("results", []) or [], status_kind, err
+        return [], status_kind, err
 
     async def get_tv_detail(self, tv_id: int) -> dict:
         """获取电视剧详情（含季列表概要）。"""

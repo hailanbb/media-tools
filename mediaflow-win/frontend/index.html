@@ -67,6 +67,31 @@
         min-width: 44px;
       }
     }
+
+    /* Native accessible modal dialogs & tabs */
+    dialog:modal {
+      overscroll-behavior: contain;
+      max-height: 90dvh;
+    }
+    dialog::backdrop {
+      overflow: hidden;
+      overscroll-behavior: contain;
+      background: rgba(15, 23, 42, 0.55);
+      backdrop-filter: blur(4px);
+    }
+    [role="tab"] {
+      position: relative;
+    }
+    [role="tab"][aria-selected="true"]::after {
+      content: "";
+      position: absolute;
+      left: 10px;
+      right: 10px;
+      bottom: 2px;
+      height: 2px;
+      border-radius: 9999px;
+      background: currentColor;
+    }
   </style>
 </head>
 <body class="bg-slate-50 text-slate-800 dark:bg-[#0b0f19] dark:text-slate-100 min-h-screen flex flex-col antialiased selection:bg-indigo-500 selection:text-white">
@@ -84,7 +109,7 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.16</span>
+              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.17</span>
             </div>
             <!-- 完善后的命名 -->
             <p class="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">智能媒体库整理与归档工作台</p>
@@ -252,6 +277,10 @@
 
             <!-- 当前任务操作按钮 -->
             <div class="flex items-center space-x-2">
+              <button onclick="recalculateCurrentTask()" class="px-3 py-1.5 rounded-lg border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 text-xs font-medium hover:bg-indigo-100 dark:hover:bg-indigo-900/50 transition flex items-center gap-1.5" title="只读重算：不重扫网盘，利用已有缓存与映射重新核算本任务状态，保留已手动处理标记">
+                <i class="fa-solid fa-calculator text-xs"></i>
+                <span>重新核算</span>
+              </button>
               <button onclick="reInspectCurrentTask()" class="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-medium hover:bg-slate-100 dark:hover:bg-slate-700 transition flex items-center gap-1.5">
                 <i class="fa-solid fa-arrows-rotate text-xs"></i>
                 <span>重新初检</span>
@@ -928,6 +957,76 @@
     </div>
   </div>
 
+  <!-- 原生无障碍弹窗：补缺详情与证据审计 -->
+  <dialog id="gapFillDetailDialog" aria-labelledby="gapFillDetailTitle" class="w-[95vw] max-w-2xl m-auto p-0 rounded-2xl bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 border border-slate-200 dark:border-slate-700 shadow-2xl overflow-hidden">
+    <div class="flex flex-col max-h-[88dvh]">
+      <div class="flex items-center justify-between px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-900">
+        <div class="flex items-center gap-2 min-w-0">
+          <i class="fa-solid fa-clipboard-list text-indigo-600 dark:text-indigo-400"></i>
+          <h3 id="gapFillDetailTitle" class="text-sm font-bold truncate">剧季补缺与识别依据详情</h3>
+        </div>
+        <form method="dialog">
+          <button type="submit" aria-label="关闭弹窗" class="w-8 h-8 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-200/60 dark:hover:bg-slate-800 flex items-center justify-center transition">
+            <i class="fa-solid fa-xmark"></i>
+          </button>
+        </form>
+      </div>
+      <div id="gapFillDetailBody" class="p-5 overflow-y-auto space-y-4 text-xs"></div>
+      <div class="px-5 py-3 border-t border-slate-200 dark:border-slate-800 flex justify-end bg-slate-50/50 dark:bg-slate-900">
+        <form method="dialog">
+          <button type="submit" class="px-4 py-1.5 rounded-lg bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-semibold transition">关闭</button>
+        </form>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- 原生无障碍弹窗：单季跨条目/季号人工映射 -->
+  <dialog id="seasonMappingDialog" aria-labelledby="seasonMappingTitle" class="w-[95vw] max-w-lg m-auto p-0 rounded-2xl bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 border border-slate-200 dark:border-slate-700 shadow-2xl overflow-hidden">
+    <form id="seasonMappingForm" onsubmit="submitSeasonMapping(event)" class="flex flex-col max-h-[88dvh]">
+      <div class="flex items-center justify-between px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-900">
+        <div class="flex items-center gap-2 min-w-0">
+          <i class="fa-solid fa-link text-indigo-600 dark:text-indigo-400"></i>
+          <h3 id="seasonMappingTitle" class="text-sm font-bold truncate">单季跨条目 / 季号人工映射</h3>
+        </div>
+        <button type="button" onclick="closeSeasonMappingDialog()" aria-label="关闭弹窗" class="w-8 h-8 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-200/60 dark:hover:bg-slate-800 flex items-center justify-center transition">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+      <div class="p-5 overflow-y-auto space-y-3 text-xs">
+        <input type="hidden" id="seasonMappingRecordId" value="">
+        <div id="seasonMappingContext" class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700 space-y-1"></div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label for="mappingTargetTmdbId" class="block font-semibold text-slate-700 dark:text-slate-300 mb-1">目标 TMDB ID *</label>
+            <input id="mappingTargetTmdbId" type="text" required placeholder="例如: 323903" class="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-mono">
+          </div>
+          <div>
+            <label for="mappingTargetSeasonNumber" class="block font-semibold text-slate-700 dark:text-slate-300 mb-1">目标季号 *</label>
+            <input id="mappingTargetSeasonNumber" type="number" min="0" value="1" required class="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-mono">
+          </div>
+        </div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label for="mappingDoubanId" class="block font-semibold text-slate-700 dark:text-slate-300 mb-1">豆瓣条目 ID（可选）</label>
+            <input id="mappingDoubanId" type="text" placeholder="例如: 36768839" class="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-mono">
+          </div>
+          <div>
+            <label for="mappingTargetTitle" class="block font-semibold text-slate-700 dark:text-slate-300 mb-1">目标剧名 / 搜索标题（可选）</label>
+            <input id="mappingTargetTitle" type="text" placeholder="例如: 极地恶灵 第三季" class="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white">
+          </div>
+        </div>
+        <div>
+          <label for="mappingNote" class="block font-semibold text-slate-700 dark:text-slate-300 mb-1">备注说明（可选）</label>
+          <input id="mappingNote" type="text" placeholder="例如: 确认仅绑定 S03，不动 S01-S02" class="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white">
+        </div>
+      </div>
+      <div class="px-5 py-3 border-t border-slate-200 dark:border-slate-800 flex items-center justify-end gap-2 bg-slate-50/50 dark:bg-slate-900">
+        <button type="button" onclick="closeSeasonMappingDialog()" class="px-3.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-xs font-medium transition">取消</button>
+        <button type="submit" id="saveSeasonMappingBtn" class="px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-sm transition">保存单季映射并重核</button>
+      </div>
+    </form>
+  </dialog>
+
 
   <!-- ================= 交互逻辑脚本（真实 API 版） ================= -->
   <script>
@@ -987,6 +1086,8 @@
 
     let currentTaskId = null;
     let currentCategory = 'archive';
+    let currentGapView = 'todo';
+    let _lastGapTaskId = null;
     let configRoots = { source_root: '/115/Library_incs/nas', archive_root: '/115/Library_incs/nas.finish' };
 
     // ── 3. 顶部健康状态指示器 ────────────────────────────────
@@ -1063,6 +1164,7 @@
       if (s.archive_check) parts.push(`待核对异常 ${s.archive_check}`);
       if (s.review_needed) parts.push(`待复核 ${s.review_needed}`);
       if (s.download_needed) parts.push(`待补集 ${s.download_needed}`);
+      if (s.download_pushed) parts.push(`待入库 ${s.download_pushed}`);
       if (s.airing) parts.push(`连载中 ${s.airing}`);
       if (s.already_archived) parts.push(`归档库已有 ${s.already_archived}`);
       return parts.length > 0 ? parts.join(' · ') : '无剧季数据';
@@ -1093,10 +1195,11 @@
             archive: t.summary.archive_ready || 0,
             review: t.summary.review_needed || 0,
             download: t.summary.download_needed || 0,
+            download_pushed: t.summary.download_pushed || 0,
             airing: t.summary.airing || 0,
             archive_check: t.summary.archive_check || 0,
             already_archived: t.summary.already_archived || 0,
-          } : { archive: 0, review: 0, download: 0, airing: 0, archive_check: 0, already_archived: 0 },
+          } : { archive: 0, review: 0, download: 0, download_pushed: 0, airing: 0, archive_check: 0, already_archived: 0 },
           categories: { archive: [], review: [], download: [], airing: [], anomaly: [], archive_check: [] },
         }));
         renderTaskList();
@@ -1298,18 +1401,26 @@
       }
 
 
+      if (_lastGapTaskId !== taskId) {
+        currentGapView = 'todo';
+        _lastGapTaskId = taskId;
+      }
+
       document.getElementById('catCountArchive').innerHTML = `${task.counts.archive} <span class="text-xs font-normal">季已齐</span>`;
       document.getElementById('catCountReview').innerHTML = `${task.counts.review} <span class="text-xs font-normal">处需清理</span>`;
       const alreadyEl = document.getElementById('catCountAnomaly');
       if (alreadyEl) alreadyEl.innerHTML = `${task.counts.already_archived || 0} <span class="text-xs font-normal">季</span>`;
-      document.getElementById('catCountDownload').innerHTML = `${task.counts.download} <span class="text-xs font-normal">季需补</span>`;
+      const dlInitPushed = task.counts.download_pushed || 0;
+      document.getElementById('catCountDownload').innerHTML = dlInitPushed > 0
+        ? `${task.counts.download} <span class="text-xs font-normal">季待补 · ${dlInitPushed}已推</span>`
+        : `${task.counts.download} <span class="text-xs font-normal">季需补</span>`;
       document.getElementById('catCountAiring').innerHTML = `${task.counts.airing} <span class="text-xs font-normal">季连载</span>`;
 
       // 从后端加载季度明细数据
       if (task.status === 'completed' && !task._seasonsLoaded) {
         try {
           const seasons = await api(`/api/tasks/${taskId}/seasons`);
-          task.categories = { archive: [], review: [], download: [], airing: [], anomaly: [], archive_check: [] };
+          task.categories = { archive: [], review: [], download: [], download_pushed: [], airing: [], anomaly: [], archive_check: [] };
           for (const s of seasons) {
             const missing = s.missing_episodes || [];
             const dup = s.duplicate_episodes || [];
@@ -1317,6 +1428,10 @@
             let note = s.status_detail || '';
             const recEps = s.recognized_episodes || [];
             const maxRec = recEps.length > 0 ? Math.max(...recEps) : 0;
+            const gapState = s.gap_fill_state || null;
+            const evidence = s.evidence || {};
+            const conflict = s.conflict || {};
+            const mapping = s.mapping || {};
 
             // 按初检结论分流，并兼容旧版保存的核对提示。
             // 旧初检只保存视频数量，不能据此推断归档集数或残留文件类型。
@@ -1338,6 +1453,7 @@
             else if (catKey === 'airing') { actionType = 'skip'; actionText = '留源'; }
 
             const checkOnly = ['identity_review', 'period_review'].includes(s.status) ||
+              Boolean(conflict && conflict.blocking) ||
               (s.status === 'review_needed' && total && maxRec > total);
             if (checkOnly) { actionType = 'inspect_info'; actionText = '查看依据'; }
             if (s.status === 'period_ready') actionText = '保留全部版本归档';
@@ -1351,7 +1467,17 @@
               statusText += `，第 ${dup.join("、")} 集有多个版本`;
             }
 
-            task.categories[catKey].push({
+            let targetCatKey = catKey;
+            if (catKey === 'download' && gapState && gapState.view_bucket === 'pushed_pending') {
+              targetCatKey = 'download_pushed';
+              actionType = 'inspect_gap_detail';
+              actionText = '补缺详情';
+              statusText += `（已推 ${(gapState.pushed_episodes || []).length} 集待入库）`;
+            } else if (catKey === 'download' && gapState && Array.isArray(gapState.pushed_episodes) && gapState.pushed_episodes.length > 0) {
+              statusText += `（待补 ${(gapState.actionable_missing_episodes || []).length} · 已推 ${gapState.pushed_episodes.length}）`;
+            }
+
+            task.categories[targetCatKey].push({
               id: s.id,
               show: s.show_name,
               season: `S${String(s.season_number).padStart(2, '0')}`,
@@ -1369,10 +1495,20 @@
               totalEpisodes: total,
               isAnomaly: isAnomaly,
               anomalySubtype: anomalySubtype,
+              gapFillState: gapState,
+              evidence: evidence,
+              conflict: conflict,
+              mapping: mapping,
+              lastCheckedAt: s.last_checked_at || null,
               raw: s,
             });
           }
           task._seasonsLoaded = true;
+          const dlLoadedTodo = (task.categories.download || []).length;
+          const dlLoadedPushed = (task.categories.download_pushed || []).length;
+          document.getElementById('catCountDownload').innerHTML = dlLoadedPushed > 0
+            ? `${dlLoadedTodo} <span class="text-xs font-normal">季待补 · ${dlLoadedPushed}已推</span>`
+            : `${dlLoadedTodo} <span class="text-xs font-normal">季需补</span>`;
         } catch (e) {
           console.error('加载季度数据失败:', e);
         }
@@ -1820,6 +1956,10 @@
 
       if (selectAll) selectAll.disabled = false;
 
+      const activeGapTab = (typeof currentGapView !== 'undefined') ? currentGapView : 'todo';
+      const downloadTodoItems = (task && task.categories && Array.isArray(task.categories.download)) ? task.categories.download : [];
+      const downloadPushedItems = (task && task.categories && Array.isArray(task.categories.download_pushed)) ? task.categories.download_pushed : [];
+
       // 动态 banner 与 batch 按钮（按分类切换）
       if (currentCategory === 'archive') {
         if (selectAllLabel) selectAllLabel.textContent = "全选齐全剧集";
@@ -1860,18 +2000,41 @@
             <div class="text-slate-600 dark:text-slate-300">查看条目中的目录或资料问题。完成核对后可点击“已手动处理”。</div>
           </div>`;
       } else if (currentCategory === 'download') {
-        if (selectAllLabel) selectAllLabel.textContent = "全选待补缺项";
+        if (selectAll) selectAll.disabled = (activeGapTab === 'pushed_pending');
+        if (selectAllLabel) {
+          selectAllLabel.textContent = activeGapTab === 'pushed_pending' ? "已推送等待入库（防重复推送）" : "全选待补缺项";
+        }
         batchContainer.innerHTML = `
-          <button id="batchActionButton" onclick="executeBatchDownload()" disabled class="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold shadow-md shadow-blue-600/20 transition flex items-center space-x-1.5">
-            <i class="fa-solid fa-cloud-arrow-down text-xs"></i>
-            <span id="batchActionBtnText">批量一键推送 MP 补缺 (0)</span>
-          </button>`;
+          <div class="flex flex-wrap items-center gap-2">
+            <div role="tablist" aria-label="补缺状态清单" class="inline-flex items-center gap-1 rounded-xl bg-slate-100 dark:bg-slate-800/80 p-1" onkeydown="handleGapFillTabKeydown(event)">
+              <button type="button" role="tab" data-gap-tab="todo" aria-selected="${activeGapTab === 'todo' ? 'true' : 'false'}" tabindex="${activeGapTab === 'todo' ? '0' : '-1'}" onclick="switchGapFillTab('todo')" class="px-3 py-1 rounded-lg text-xs font-semibold transition ${activeGapTab === 'todo' ? 'bg-white dark:bg-slate-900 text-blue-600 dark:text-blue-400 shadow-sm' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'}">
+                真缺集待补 (${downloadTodoItems.length})
+              </button>
+              <button type="button" role="tab" data-gap-tab="pushed_pending" aria-selected="${activeGapTab === 'pushed_pending' ? 'true' : 'false'}" tabindex="${activeGapTab === 'pushed_pending' ? '0' : '-1'}" onclick="switchGapFillTab('pushed_pending')" class="px-3 py-1 rounded-lg text-xs font-semibold transition ${activeGapTab === 'pushed_pending' ? 'bg-white dark:bg-slate-900 text-indigo-600 dark:text-indigo-400 shadow-sm' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'}">
+                已推送待入库 (${downloadPushedItems.length})
+              </button>
+            </div>
+            <button type="button" onclick="reconcileCurrentTaskGapFill()" class="px-3 py-2 rounded-lg border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 text-xs font-semibold hover:bg-indigo-100 dark:hover:bg-indigo-900/50 transition flex items-center gap-1.5" title="向 MoviePilot 队列、历史与双库核对已推送分集状态">
+              <i class="fa-solid fa-arrows-to-dot text-xs"></i>
+              <span>核对入库</span>
+            </button>
+            ${activeGapTab === 'todo' ? `
+            <button id="batchActionButton" onclick="executeBatchDownload()" disabled class="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold shadow-md shadow-blue-600/20 transition flex items-center space-x-1.5">
+              <i class="fa-solid fa-cloud-arrow-down text-xs"></i>
+              <span id="batchActionBtnText">批量一键推送 MP 补缺 (0)</span>
+            </button>` : ''}
+          </div>`;
         banner.className = "p-3.5 rounded-xl bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800/60 flex items-start space-x-3 text-xs";
-        banner.innerHTML = `
+        banner.innerHTML = activeGapTab === 'pushed_pending' ? `
+          <i class="fa-solid fa-hourglass-half text-indigo-500 text-sm mt-0.5"></i>
+          <div class="flex-1 space-y-1">
+            <div class="font-bold text-indigo-900 dark:text-indigo-300">已推送待入库清单：本季剩余缺集均已提交 MoviePilot</div>
+            <div class="text-slate-600 dark:text-slate-300">已推送分集自动从默认待补中扣除；若下载失败或 MP 取消，点击上方<b>核对入库</b>可安全释放回待补清单。</div>
+          </div>` : `
           <i class="fa-solid fa-cloud-arrow-down text-blue-500 text-sm mt-0.5"></i>
           <div class="flex-1 space-y-1">
-            <div class="font-bold text-blue-900 dark:text-blue-300">真缺集补缺与整理修复：拒绝盲目重复下载</div>
-            <div class="text-slate-600 dark:text-slate-300">严格校验做种数≥2；对下载已完成但转移卡滞的项目，提供<b>定向整理修复</b>。</div>
+            <div class="font-bold text-blue-900 dark:text-blue-300">真缺集补缺与整理修复：仅显示尚未推送覆盖的真缺分集</div>
+            <div class="text-slate-600 dark:text-slate-300">严格校验做种数≥2；单季仅部分分集推送成功时，本季保留在待补中并自动扣减已推送集数。</div>
           </div>`;
       } else {
         if (selectAllLabel) selectAllLabel.textContent = "全选连载项";
@@ -1894,12 +2057,18 @@
       }
 
       // 获取当前分类下的项目
-      const items = (task && task.categories) ? (task.categories[currentCategory] || []) : [];
+      const items = (task && task.categories)
+        ? ((currentCategory === 'download' && activeGapTab === 'pushed_pending')
+            ? downloadPushedItems
+            : (task.categories[currentCategory] || []))
+        : [];
 
       if (items.length === 0) {
         const isNoTask = !task;
         const isPending = task && (task.status === 'pending' || task.status === 'running');
-        let emptyMsg = '该任务在此分类下暂无待处理项目';
+        let emptyMsg = currentCategory === 'download' && activeGapTab === 'pushed_pending'
+          ? '当前暂无已推送待入库的剧季'
+          : '该任务在此分类下暂无待处理项目';
         let emptyIcon = 'fa-circle-check text-emerald-500';
         if (isNoTask) {
           emptyMsg = '请在左侧选择一个任务';
@@ -1907,7 +2076,7 @@
         } else if (isPending) {
           emptyMsg = '初检引擎正在扫描分析中，请稍候...';
           emptyIcon = 'fa-spinner fa-spin text-blue-500';
-        } else if (task?.status === 'completed') {
+        } else if (task?.status === 'completed' && !(currentCategory === 'download' && activeGapTab === 'pushed_pending')) {
           emptyMsg = '当前分类没有待处理项目';
         }
         container.innerHTML = `
@@ -1923,27 +2092,73 @@
         let badgeColor = 'emerald', actionBtnClass = 'bg-emerald-600 hover:bg-emerald-700 text-white', actionIcon = 'fa-box-archive';
         if (currentCategory === 'review') { badgeColor = 'amber'; actionBtnClass = 'bg-amber-600 hover:bg-amber-700 text-white'; actionIcon = 'fa-broom'; }
         else if (currentCategory === 'anomaly' || currentCategory === 'already_archived') { badgeColor = 'rose'; actionBtnClass = 'bg-rose-600 hover:bg-rose-700 text-white'; actionIcon = 'fa-triangle-exclamation'; }
-        else if (currentCategory === 'download') { badgeColor = 'blue'; actionBtnClass = 'bg-blue-600 hover:bg-blue-700 text-white'; actionIcon = item.actionType === 'download_repair' ? 'fa-arrows-rotate' : 'fa-cloud-arrow-down'; }
+        else if (currentCategory === 'download') { badgeColor = 'blue'; actionBtnClass = 'bg-blue-600 hover:bg-blue-700 text-white'; actionIcon = item.actionType === 'download_repair' ? 'fa-arrows-rotate' : (item.actionType === 'inspect_gap_detail' ? 'fa-clipboard-list' : 'fa-cloud-arrow-down'); }
 
         if (item.actionType === 'calibrate') {
           actionBtnClass = 'bg-indigo-600 hover:bg-indigo-700 text-white';
           actionIcon = 'fa-sliders';
         }
 
+        const gapState = item.gapFillState || (item.raw && item.raw.gap_fill_state) || null;
+        const ev = item.evidence || (item.raw && item.raw.evidence) || {};
+        const conf = item.conflict || (item.raw && item.raw.conflict) || {};
+        const mp = item.mapping || (item.raw && item.raw.mapping) || {};
+        const rawStatus = (item.raw && item.raw.status) || '';
+
         // 标签附加
         let anomalyTagHtml = '';
+        const evMetaStatus = (ev && (ev.meta_status || ev.metadata_status)) || '';
         if (item.isAnomaly) {
           if (item.anomalySubtype === 'file_check') {
             anomalyTagHtml = '<span class="text-xs text-amber-700">目录或文件待核实</span>';
           } else if (item.anomalySubtype === 'unknown_meta') {
-            anomalyTagHtml = `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 font-semibold border border-slate-200">官方无集数信息</span>`;
+            const metaLabelMap = {
+              fetch_failed: '查询失败（TMDB/豆瓣超时或异常）',
+              not_listed: '主条目未收录本季',
+              no_candidate: '元数据未收录',
+              episodes_tba: '集数未公布',
+              query_failed: 'TMDB 查询失败',
+              not_found: '元数据未收录',
+              episodes_unannounced: '集数未公布'
+            };
+            const metaLabel = (evMetaStatus && metaLabelMap[evMetaStatus]) ? metaLabelMap[evMetaStatus] : '官方无集数信息';
+            anomalyTagHtml = `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 font-semibold border border-slate-200 dark:border-slate-700">${escapeHtml(metaLabel)}</span>`;
           }
         }
+        const mappedSeasonNum = (mp && (mp.target_season ?? mp.target_season_number)) ?? 1;
+        const mappingBadgeHtml = (mp && mp.target_tmdb_id)
+          ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 font-mono border border-indigo-200 dark:border-indigo-800">映射 → TMDB:${escapeHtml(mp.target_tmdb_id)} S${String(mappedSeasonNum).padStart(2, '0')}</span>`
+          : '';
+        const conflictBadgeLabel = (conf && conf.kind === 'ambiguous_title')
+          ? '重名待确认'
+          : ((conf && conf.kind === 'mixed_works') ? '混放作品拦截' : '归属冲突拦截');
+        const conflictBadgeHtml = (conf && conf.blocking)
+          ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-rose-50 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 font-semibold border border-rose-200 dark:border-rose-800">${escapeHtml(conflictBadgeLabel)}</span>`
+          : '';
+
+        let gapSummaryLineHtml = '';
+        if (gapState && ((gapState.pushed_episodes && gapState.pushed_episodes.length > 0) || (gapState.episodes && gapState.episodes.length > 0) || gapState.last_outcome || (gapState.unverified_count > 0))) {
+          const todoEps = (gapState.actionable_missing_episodes || []).map(e => `E${String(e).padStart(2, '0')}`);
+          const pushedEps = (gapState.pushed_episodes || []).map(e => `E${String(e).padStart(2, '0')}`);
+          const segs = [];
+          if (todoEps.length > 0) segs.push(`待补: ${todoEps.slice(0, 6).join(',')}${todoEps.length > 6 ? '...' : ''}`);
+          if (pushedEps.length > 0) segs.push(`已推: ${pushedEps.slice(0, 6).join(',')}${pushedEps.length > 6 ? '...' : ''}`);
+          if (gapState.unverified_count > 0) segs.push(`超时待确认 ${gapState.unverified_count} 项`);
+          else if (gapState.last_outcome && gapState.last_outcome !== 'accepted') segs.push(`回执: ${gapState.last_outcome}`);
+          if (segs.length > 0) {
+            gapSummaryLineHtml = `<div class="text-[11px] text-indigo-600 dark:text-indigo-300 bg-indigo-50/70 dark:bg-indigo-950/30 border border-indigo-100 dark:border-indigo-900/50 rounded-md px-2 py-0.5 inline-flex items-center gap-1.5 flex-wrap"><i class="fa-solid fa-receipt text-[10px]"></i><span>${escapeHtml(segs.join(' · '))}</span></div>`;
+          }
+        }
+
+        const hasEvDetails = Boolean(ev && (ev.meta_status || ev.meta_error || (ev.release_evidence && ev.release_evidence.dominant_release_title)));
+        const showDetailBtn = currentCategory === 'download' || Boolean(conf && conf.blocking) || Boolean(gapState && gapState.episodes && gapState.episodes.length > 0) || hasEvDetails;
+        const showMappingBtn = ['identity_review', 'unknown', 'review_needed', 'period_review', 'download_needed', 'period_missing'].includes(rawStatus) || Boolean(conf && conf.blocking) || Boolean(mp && mp.target_tmdb_id);
+        const disableCheck = currentCategory === 'airing' || currentCategory === 'anomaly' || ['inspect_info', 'inspect_gap_detail', 'clean_redundant'].includes(item.actionType) || (currentCategory === 'download' && activeGapTab === 'pushed_pending');
 
         return `
           <div class="app-card rounded-xl p-4 transition flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-l-4 border-l-${badgeColor}-500">
             <div class="flex items-start space-x-3.5 flex-1 min-w-0">
-              <input type="checkbox" name="itemCheck" ${currentCategory === 'airing' || currentCategory === 'anomaly' || ['inspect_info', 'clean_redundant'].includes(item.actionType) ? 'disabled hidden' : ''} value="${item.id}" onchange="updateSelection()" class="mt-1 w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer accent-indigo-600">
+              <input type="checkbox" name="itemCheck" ${disableCheck ? 'disabled hidden' : ''} value="${item.id}" onchange="updateSelection()" class="mt-1 w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer accent-indigo-600">
               <div class="w-10 h-14 rounded bg-slate-100 dark:bg-slate-800 flex-shrink-0 flex items-center justify-center text-slate-400 border border-slate-200 dark:border-slate-700">
                 <i class="fa-solid fa-film text-lg"></i>
               </div>
@@ -1951,23 +2166,44 @@
                 <div class="flex items-center gap-2 flex-wrap">
                   <span class="text-sm font-bold text-slate-900 dark:text-white">${escapeHtml(item.show)}</span>
                   <span class="text-xs px-2 py-0.5 rounded-full bg-${badgeColor}-100 dark:bg-${badgeColor}-950/70 text-${badgeColor}-700 dark:text-${badgeColor}-400 font-semibold border border-${badgeColor}-300 dark:border-${badgeColor}-800">
-                    ${item.season} (${item.statusText})
+                    ${escapeHtml(item.season)} (${escapeHtml(item.statusText)})
                   </span>
                   ${anomalyTagHtml}
-                  ${item.tmdbId ? `<span class="text-xs px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 font-mono">TMDB: ${item.tmdbId}</span>` : ''}
+                  ${conflictBadgeHtml}
+                  ${mappingBadgeHtml}
+                  ${item.tmdbId ? `<span class="text-xs px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 font-mono">TMDB: ${escapeHtml(item.tmdbId)}</span>` : ''}
                 </div>
                 <div class="text-xs text-slate-500 dark:text-slate-400 font-mono flex flex-wrap gap-x-3">
                   <span>${escapeHtml(item.pathA || '')}</span>
                   ${item.pathB ? `<span>${escapeHtml(item.pathB)}</span>` : ''}
                 </div>
-                <div class="text-[11px] text-slate-600 dark:text-slate-400 flex items-center gap-2">
+                <div class="text-[11px] text-slate-600 dark:text-slate-400 flex items-center gap-2 flex-wrap">
                   <span class="text-${badgeColor}-600 dark:text-${badgeColor}-400 font-medium">👉 ${escapeHtml(item.note || '')}</span>
                   ${item.dest ? `<span>• ${escapeHtml(item.dest)}</span>` : ''}
                 </div>
+                ${gapSummaryLineHtml}
               </div>
             </div>
             <div class="flex items-center space-x-2 flex-shrink-0 self-end sm:self-center flex-wrap gap-y-1">
-              ${currentCategory === 'anomaly' || item.actionType === 'inspect_info' ? `
+              ${showDetailBtn ? `
+                <button type="button" onclick="openGapFillDetail('${item.id}')" class="px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-semibold hover:bg-slate-50 dark:hover:bg-slate-700 transition flex items-center gap-1 shadow-sm">
+                  <i class="fa-solid fa-circle-info text-xs text-indigo-500"></i>
+                  <span>详情</span>
+                </button>
+              ` : ''}
+              ${showMappingBtn ? `
+                <button type="button" onclick="openSeasonMappingModal('${item.id}')" class="px-2.5 py-1.5 rounded-lg border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 text-xs font-semibold hover:bg-indigo-100 dark:hover:bg-indigo-900/40 transition flex items-center gap-1 shadow-sm">
+                  <i class="fa-solid fa-link text-xs"></i>
+                  <span>${mp && mp.target_tmdb_id ? '改绑映射' : '人工映射'}</span>
+                </button>
+              ` : ''}
+              ${(mp && mp.target_tmdb_id) ? `
+                <button type="button" onclick="revokeSeasonMapping('${item.id}')" class="px-2.5 py-1.5 rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 text-xs font-semibold hover:bg-amber-100 dark:hover:bg-amber-900/40 transition flex items-center gap-1 shadow-sm">
+                  <i class="fa-solid fa-link-slash text-xs"></i>
+                  <span>撤销映射</span>
+                </button>
+              ` : ''}
+              ${currentCategory === 'anomaly' || item.actionType === 'inspect_info' || (conf && conf.blocking) ? `
                 <button onclick="markSeasonHandled('${item.id}', this)" class="px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 text-slate-600 dark:text-slate-300 text-xs font-semibold disabled:opacity-50">
                   <i class="fa-solid fa-check mr-1"></i>已手动处理
                 </button>
@@ -1978,7 +2214,7 @@
                   <span>删除源端</span>
                 </button>
               ` : ''}
-              ${(!['inspect_info', 'clean_redundant'].includes(item.actionType) && item.duplicates && item.duplicates.length > 0) ? `
+              ${(!['inspect_info', 'inspect_gap_detail', 'clean_redundant'].includes(item.actionType) && item.duplicates && item.duplicates.length > 0) ? `
                 <button onclick="openCleanPreview('${item.id}')" class="px-2.5 py-1.5 rounded-lg border border-amber-200 dark:border-amber-700 bg-white dark:bg-slate-800 text-amber-600 dark:text-amber-400 text-xs font-semibold hover:bg-amber-50 dark:hover:bg-amber-950/30 transition flex items-center gap-1.5 shadow-sm" title="查看保留版本与拟删除文件">
                   <i class="fa-solid fa-file-magnifying-glass text-xs"></i>
                   <span>清理预览</span>
@@ -1989,10 +2225,15 @@
                   <i class="fa-solid fa-trash-can text-xs"></i>
                   <span>删除源端（本季）</span>
                 </button>
+              ` : (item.actionType === 'inspect_gap_detail') ? `
+                <button type="button" onclick="openGapFillDetail('${item.id}')" class="px-3 py-1.5 rounded-lg ${actionBtnClass} text-xs font-semibold shadow-sm transition flex items-center gap-1.5">
+                  <i class="fa-solid ${actionIcon} text-xs"></i>
+                  <span>${escapeHtml(item.actionText)}</span>
+                </button>
               ` : `
                 <button onclick="handleSingleAction('${item.actionType}', '${item.id}')" class="px-3 py-1.5 rounded-lg ${actionBtnClass} text-xs font-semibold shadow-sm transition flex items-center gap-1.5">
                   <i class="fa-solid ${actionIcon} text-xs"></i>
-                  <span>${item.actionText}</span>
+                  <span>${escapeHtml(item.actionText)}</span>
                 </button>
               `}
             </div>
@@ -2358,16 +2599,303 @@
     function openModal(id) { document.getElementById(id).classList.remove('hidden'); }
     function closeModal(id) { document.getElementById(id).classList.add('hidden'); }
 
+    // ── 9.5 补缺待入库双视图切换、入库核对、只读重算与跨条目映射 ────
+    function switchGapFillTab(tab) {
+      currentGapView = (tab === 'pushed_pending') ? 'pushed_pending' : 'todo';
+      renderEpisodesList();
+    }
+
+    function handleGapFillTabKeydown(event) {
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+      event.preventDefault();
+      const nextTab = (event.key === 'ArrowRight' || event.key === 'End') ? 'pushed_pending' : 'todo';
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+        const order = ['todo', 'pushed_pending'];
+        const curIdx = order.indexOf(currentGapView === 'pushed_pending' ? 'pushed_pending' : 'todo');
+        const delta = event.key === 'ArrowRight' ? 1 : -1;
+        switchGapFillTab(order[(curIdx + delta + order.length) % order.length]);
+      } else {
+        switchGapFillTab(nextTab);
+      }
+      const activeBtn = document.querySelector(`#batchActionContainer [role="tab"][data-gap-tab="${currentGapView}"]`);
+      if (activeBtn) activeBtn.focus();
+    }
+
+    async function recalculateCurrentTask() {
+      if (!currentTaskId) { alert('请先选择一个初检任务'); return; }
+      const targetId = currentTaskId;
+      try {
+        const res = await api(`/api/tasks/${targetId}/recalculate`, { method: 'POST' });
+        const task = taskList.find(t => t.id === targetId);
+        if (task) task._seasonsLoaded = false;
+        await loadTasks();
+        if (currentTaskId === targetId) await selectTask(targetId);
+        alert(res.message || '只读重新核算完成');
+      } catch (e) {
+        alert(`重新核算失败: ${e.message}`);
+      }
+    }
+
+    async function reconcileCurrentTaskGapFill() {
+      if (!currentTaskId) { alert('请先选择一个初检任务'); return; }
+      const targetId = currentTaskId;
+      try {
+        const res = await api(`/api/tasks/${targetId}/reconcile-gap-fill`, {
+          method: 'POST',
+          body: JSON.stringify({})
+        });
+        const task = taskList.find(t => t.id === targetId);
+        if (task) task._seasonsLoaded = false;
+        await loadTasks();
+        if (currentTaskId === targetId) await selectTask(targetId);
+        alert(res.message || '补缺入库状态核对完成');
+      } catch (e) {
+        alert(`核对入库失败: ${e.message}`);
+      }
+    }
+
+    function openGapFillDetail(recordId) {
+      const item = findItemByRecordId(recordId);
+      if (!item) { alert('未找到该剧季详情'); return; }
+      const dlg = document.getElementById('gapFillDetailDialog');
+      const titleEl = document.getElementById('gapFillDetailTitle');
+      const bodyEl = document.getElementById('gapFillDetailBody');
+      if (!dlg || !bodyEl) return;
+      if (!dlg._hasCloseReset) {
+        dlg.addEventListener('close', () => { dlg.returnValue = ''; });
+        dlg._hasCloseReset = true;
+      }
+
+      const gap = item.gapFillState || (item.raw && item.raw.gap_fill_state) || {};
+      const ev = item.evidence || (item.raw && item.raw.evidence) || {};
+      const conf = item.conflict || (item.raw && item.raw.conflict) || {};
+      const mp = item.mapping || (item.raw && item.raw.mapping) || {};
+      if (titleEl) titleEl.textContent = `${item.show} ${item.season} — 补缺与识别详情`;
+
+      const parts = [];
+      parts.push(`
+        <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 space-y-1">
+          <div class="font-bold text-slate-900 dark:text-white flex flex-wrap items-center gap-2">
+            <span>${escapeHtml(item.show)} ${escapeHtml(item.season)}</span>
+            <span class="px-2 py-0.5 rounded bg-slate-200/70 dark:bg-slate-700 text-[11px] font-mono">${escapeHtml(item.raw?.status || '-')}</span>
+            ${item.tmdbId ? `<span class="px-2 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 text-[11px] font-mono">TMDB: ${escapeHtml(item.tmdbId)}</span>` : ''}
+          </div>
+          <div class="text-slate-500 dark:text-slate-400 font-mono break-all">${escapeHtml(item.pathA || '')}</div>
+          ${item.pathB ? `<div class="text-slate-500 dark:text-slate-400 font-mono break-all">归档目录: ${escapeHtml(item.pathB)}</div>` : ''}
+          <div class="text-slate-700 dark:text-slate-300">说明: ${escapeHtml(item.note || '-')}</div>
+        </div>
+      `);
+
+      if (mp && mp.target_tmdb_id) {
+        const mSeason = (mp.target_season ?? mp.target_season_number ?? 1);
+        const mDouban = mp.target_douban_id || mp.douban_id || '';
+        const mTitle = mp.target_title || mp.target_show_title || '';
+        const mNote = mp.evidence_note || mp.note || '';
+        parts.push(`
+          <div class="p-3 rounded-xl bg-indigo-50/70 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-800 space-y-1">
+            <div class="font-bold text-indigo-900 dark:text-indigo-200">跨条目/季号有效映射</div>
+            <div class="font-mono text-indigo-800 dark:text-indigo-300">
+              目标 TMDB: ${escapeHtml(mp.target_tmdb_id)} · 目标季: S${String(mSeason).padStart(2, '0')}
+              ${mDouban ? ` · 豆瓣: ${escapeHtml(mDouban)}` : ''}
+              ${mTitle ? ` · 标题: ${escapeHtml(mTitle)}` : ''}
+            </div>
+            ${mNote ? `<div class="text-slate-600 dark:text-slate-400">备注: ${escapeHtml(mNote)}</div>` : ''}
+          </div>
+        `);
+      }
+
+      const relEv = (ev && ev.release_evidence) || {};
+      const epMatches = (conf && conf.episode_title_matches) || ev.overlap_titles || [];
+      const confMsg = (conf && (conf.message || conf.reason)) || ev.conflict_reason || '';
+      const metaStatusVal = ev.meta_status || ev.metadata_status || '';
+      const metaErrVal = ev.meta_error || ev.metadata_error || '';
+      if ((conf && conf.blocking) || confMsg || epMatches.length > 0 || (ev.candidates && ev.candidates.length > 0) || relEv.dominant_release_title || metaStatusVal) {
+        const overlaps = epMatches.map(x => {
+          if (typeof x === 'string') return `<li>${escapeHtml(x)}</li>`;
+          const epNo = x.episode_number ? `E${String(x.episode_number).padStart(2, '0')} ` : '';
+          const epName = x.matched_title || x.title || x.name || JSON.stringify(x);
+          return `<li>${escapeHtml(epNo + epName)}</li>`;
+        }).join('');
+        const cands = (ev.candidates || []).slice(0, 6).map(c =>
+          `<li>TMDB:${escapeHtml(c.tmdb_id || c.id || '-')} ${escapeHtml(c.name || c.title || '')} ${c.year ? `(${escapeHtml(c.year)})` : ''}</li>`
+        ).join('');
+        parts.push(`
+          <div class="p-3 rounded-xl bg-rose-50/70 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-800 space-y-1.5">
+            <div class="font-bold text-rose-800 dark:text-rose-200">识别证据与冲突拦截</div>
+            ${confMsg ? `<div class="text-rose-700 dark:text-rose-300">${escapeHtml(confMsg)}</div>` : ''}
+            ${metaStatusVal ? `<div class="text-slate-600 dark:text-slate-300">元数据状态: <span class="font-mono">${escapeHtml(metaStatusVal)}</span>${metaErrVal ? ` (${escapeHtml(metaErrVal)})` : ''}</div>` : ''}
+            ${relEv.dominant_release_title ? `<div class="text-slate-600 dark:text-slate-300">文件发行主名: <span class="font-mono">${escapeHtml(relEv.dominant_release_title)}</span>${(relEv.platform_tags && relEv.platform_tags.length) ? ` · 平台: ${escapeHtml(relEv.platform_tags.join(','))}` : ''}${(relEv.release_years && relEv.release_years.length) ? ` · 年份: ${escapeHtml(relEv.release_years.join(','))}` : ''}</div>` : ''}
+            ${overlaps ? `<div class="text-slate-700 dark:text-slate-300 font-semibold mt-1">集标题/发布线索证据:</div><ul class="list-disc pl-4 space-y-0.5 text-slate-600 dark:text-slate-300">${overlaps}</ul>` : ''}
+            ${cands ? `<div class="text-slate-700 dark:text-slate-300 font-semibold mt-1">候选条目:</div><ul class="list-disc pl-4 space-y-0.5 text-slate-600 dark:text-slate-300">${cands}</ul>` : ''}
+          </div>
+        `);
+      }
+
+      const eps = Array.isArray(gap.episodes) ? gap.episodes : [];
+      if (eps.length > 0 || (gap.actionable_missing_episodes && gap.actionable_missing_episodes.length > 0) || (gap.pushed_episodes && gap.pushed_episodes.length > 0)) {
+        const todoStr = (gap.actionable_missing_episodes || []).map(e => `E${String(e).padStart(2, '0')}`).join(', ') || '无';
+        const pushedStr = (gap.pushed_episodes || []).map(e => `E${String(e).padStart(2, '0')}`).join(', ') || '无';
+        const rows = eps.map(ep => `
+          <tr class="border-t border-slate-200 dark:border-slate-700">
+            <td class="py-1.5 px-2 font-mono font-semibold">E${String(ep.episode_number || 0).padStart(2, '0')}</td>
+            <td class="py-1.5 px-2 font-mono">${escapeHtml(ep.outcome || '-')}</td>
+            <td class="py-1.5 px-2">${escapeHtml(ep.site || '-')}</td>
+            <td class="py-1.5 px-2 max-w-[200px] truncate" title="${escapeHtml(ep.torrent_title || '')}">${escapeHtml(ep.torrent_title || '-')}</td>
+            <td class="py-1.5 px-2 text-slate-600 dark:text-slate-300">${escapeHtml(ep.sanitized_reason || '-')}</td>
+          </tr>
+        `).join('');
+        parts.push(`
+          <div class="space-y-2">
+            <div class="flex flex-wrap gap-3 text-xs">
+              <span><b>仍待补:</b> <span class="font-mono text-blue-600 dark:text-blue-400">${escapeHtml(todoStr)}</span></span>
+              <span><b>已推送待入库:</b> <span class="font-mono text-indigo-600 dark:text-indigo-400">${escapeHtml(pushedStr)}</span></span>
+              <span><b>最近结果:</b> <span class="font-mono">${escapeHtml(gap.last_outcome || '-')}</span></span>
+            </div>
+            ${rows ? `
+              <div class="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-700">
+                <table class="w-full text-left border-collapse text-[11px]">
+                  <thead class="bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
+                    <tr>
+                      <th class="py-1.5 px-2">集数</th>
+                      <th class="py-1.5 px-2">状态</th>
+                      <th class="py-1.5 px-2">站点</th>
+                      <th class="py-1.5 px-2">种子标题（脱敏）</th>
+                      <th class="py-1.5 px-2">回执/原因</th>
+                    </tr>
+                  </thead>
+                  <tbody>${rows}</tbody>
+                </table>
+              </div>` : ''}
+          </div>
+        `);
+      }
+
+      bodyEl.innerHTML = parts.join('');
+      dlg.showModal();
+    }
+
+    function openSeasonMappingModal(recordId) {
+      const item = findItemByRecordId(recordId);
+      if (!item) { alert('未找到该剧季记录'); return; }
+      const dlg = document.getElementById('seasonMappingDialog');
+      if (!dlg) return;
+      if (!dlg._hasCloseReset) {
+        dlg.addEventListener('close', () => { dlg.returnValue = ''; });
+        dlg._hasCloseReset = true;
+      }
+
+      const mp = item.mapping || (item.raw && item.raw.mapping) || {};
+      const conf = item.conflict || (item.raw && item.raw.conflict) || {};
+      const detected = (conf && conf.detected_work) || {};
+      document.getElementById('seasonMappingRecordId').value = recordId;
+      document.getElementById('mappingTargetTmdbId').value = mp.target_tmdb_id || detected.tmdb_id || item.tmdbId || '';
+      document.getElementById('mappingTargetSeasonNumber').value = (mp.target_season ?? mp.target_season_number ?? item.raw?.season_number ?? 1);
+      document.getElementById('mappingDoubanId').value = mp.target_douban_id || mp.douban_id || '';
+      document.getElementById('mappingTargetTitle').value = mp.target_title || mp.target_show_title || detected.name || '';
+      document.getElementById('mappingNote').value = mp.evidence_note || mp.note || '';
+
+      const ctxEl = document.getElementById('seasonMappingContext');
+      if (ctxEl) {
+        const confText = conf.message || conf.reason || '';
+        ctxEl.innerHTML = `
+          <div class="font-bold text-slate-900 dark:text-white">${escapeHtml(item.show)} ${escapeHtml(item.season)}</div>
+          <div class="font-mono text-[11px] text-slate-500 dark:text-slate-400 break-all">${escapeHtml(item.pathA || '')}</div>
+          <div class="text-slate-600 dark:text-slate-300">当前状态: <span class="font-mono">${escapeHtml(item.raw?.status || '-')}</span>${confText ? ` · 冲突: ${escapeHtml(confText)}` : ''}</div>
+          <div class="text-[11px] text-amber-600 dark:text-amber-400">仅对当前单季生效，不会改绑同剧其余剧季。</div>
+        `;
+      }
+      dlg.showModal();
+    }
+
+    function closeSeasonMappingDialog() {
+      const dlg = document.getElementById('seasonMappingDialog');
+      if (dlg && typeof dlg.close === 'function') dlg.close();
+    }
+
+    async function submitSeasonMapping(event) {
+      event.preventDefault();
+      if (!currentTaskId) return;
+      const targetId = currentTaskId;
+      const recordId = document.getElementById('seasonMappingRecordId').value;
+      const tmdbVal = document.getElementById('mappingTargetTmdbId').value.trim();
+      const tmdbNum = parseInt(tmdbVal, 10);
+      const seasonNum = parseInt(document.getElementById('mappingTargetSeasonNumber').value, 10);
+      const doubanId = document.getElementById('mappingDoubanId').value.trim();
+      const targetTitle = document.getElementById('mappingTargetTitle').value.trim();
+      const note = document.getElementById('mappingNote').value.trim();
+      if (!tmdbVal || Number.isNaN(tmdbNum) || tmdbNum <= 0 || Number.isNaN(seasonNum)) {
+        alert('请填写有效的数字格式目标 TMDB ID 与目标季号');
+        return;
+      }
+
+      const btn = document.getElementById('saveSeasonMappingBtn');
+      if (btn) btn.disabled = true;
+      try {
+        const res = await api(`/api/tasks/${targetId}/seasons/${recordId}/season-mapping`, {
+          method: 'POST',
+          body: JSON.stringify({
+            target_tmdb_id: tmdbNum,
+            target_season: seasonNum,
+            target_douban_id: doubanId || '',
+            target_title: targetTitle || '',
+            evidence_note: note || ''
+          })
+        });
+        closeSeasonMappingDialog();
+        const task = taskList.find(t => t.id === targetId);
+        if (task) task._seasonsLoaded = false;
+        await loadTasks();
+        if (currentTaskId === targetId) await selectTask(targetId);
+        alert(res.message || '单季映射已保存并重新核算');
+      } catch (e) {
+        alert(`保存映射失败: ${e.message}`);
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    }
+
+    async function revokeSeasonMapping(recordId) {
+      if (!currentTaskId) return;
+      if (!confirm('确认撤销本季人工映射并恢复默认识别结果？不会影响同剧其他季。')) return;
+      const targetId = currentTaskId;
+      try {
+        const res = await api(`/api/tasks/${targetId}/seasons/${recordId}/season-mapping`, { method: 'DELETE' });
+        const task = taskList.find(t => t.id === targetId);
+        if (task) task._seasonsLoaded = false;
+        await loadTasks();
+        if (currentTaskId === targetId) await selectTask(targetId);
+        alert(res.message || '已撤销单季映射');
+      } catch (e) {
+        alert(`撤销映射失败: ${e.message}`);
+      }
+    }
+
     // ── 10. 通用批量操作流水线引擎 (Universal Batch Pipeline) ────────
     let activeBatchSession = null;
 
     function cancelBatchPipeline() {
       if (!activeBatchSession) return;
-      activeBatchSession.isCancelled = true;
+      const session = activeBatchSession;
+      session.isCancelled = true;
       try {
-        activeBatchSession.abortController.abort();
+        session.abortController.abort();
       } catch (e) {
         console.warn('AbortController abort error:', e);
+      }
+      if (session.batchKind === 'gap_fill' && session.taskId && Array.isArray(session.items)) {
+        const unstartedIds = session.items
+          .filter(it => !session.startedIds || !session.startedIds.has(it.id))
+          .map(it => it.id);
+        if (unstartedIds.length > 0) {
+          session.abortMarkPromise = api('/api/moviepilot/gap-fill/mark-aborted', {
+            method: 'POST',
+            body: JSON.stringify({
+              task_id: session.taskId,
+              season_record_ids: unstartedIds,
+              batch_run_id: session.id
+            })
+          }).catch(err => console.warn('mark-aborted failed:', err));
+        }
       }
       const dlCancelBtn = document.getElementById('dlCancelBtn');
       const dlCloseBtn = document.getElementById('dlCloseBtn');
@@ -2389,9 +2917,13 @@
 
     async function finishBatchPipeline() {
       closeModal('downloadProgressModal');
-      if (activeBatchSession && typeof activeBatchSession.onFinish === 'function') {
-        const fn = activeBatchSession.onFinish;
-        activeBatchSession.onFinish = null;
+      const session = activeBatchSession;
+      if (session && session.abortMarkPromise) {
+        try { await session.abortMarkPromise; } catch (_) {}
+      }
+      if (session && typeof session.onFinish === 'function') {
+        const fn = session.onFinish;
+        session.onFinish = null;
         await fn();
       }
     }
@@ -2418,7 +2950,9 @@
       items,
       processItem,
       onFinish,
-      concurrency = 1
+      concurrency = 1,
+      batchKind = 'generic',
+      taskId = null
     }) {
       if (!items || items.length === 0) return;
 
@@ -2431,7 +2965,11 @@
         isCancelled: false,
         onFinish,
         items,
-        total: items.length
+        total: items.length,
+        startedIds: new Set(),
+        batchKind,
+        taskId: taskId || currentTaskId,
+        abortMarkPromise: null
       };
       activeBatchSession = session;
 
@@ -2522,12 +3060,13 @@
           }
           const i = cursor++;
           const item = items[i];
+          session.startedIds.add(item.id);
           const itemDisplayName = item.name || `项目 #${i + 1}`;
           activeTitles.add(itemDisplayName);
           updateUIProgress();
 
           try {
-            const res = await processItem(item, i, items.length, appendLog, session.abortController.signal);
+            const res = await processItem(item, i, items.length, appendLog, session.abortController.signal, session.id);
             if (!isCurrentBatch()) return;
 
             if (res && res.success) {
@@ -2718,6 +3257,7 @@
       const ids = currentActionRecordId ? [currentActionRecordId] : [...document.querySelectorAll('input[name="itemCheck"]:checked')].map(cb => cb.value);
       if (ids.length === 0) { alert('未选择任何需要补缺的剧集'); return; }
 
+      const targetTaskId = currentTaskId;
       const items = ids.map(id => ({ id, name: findShowDisplayName(id) }));
 
       await runBatchPipeline({
@@ -2727,13 +3267,19 @@
         iconWrapClass: 'bg-blue-100 dark:bg-blue-900/40 text-blue-600 dark:text-blue-400',
         barGradientClass: 'from-blue-500 to-indigo-600',
         concurrency: 3,
+        batchKind: 'gap_fill',
+        taskId: targetTaskId,
         items,
-        processItem: async (item, i, total, appendLog, abortSignal) => {
-          appendLog(`<span class="text-slate-400">[${getNowTimestamp()}] 🔍 正在检索 MP 补缺做种: <b>【${item.name}】</b>...</span>`);
+        processItem: async (item, i, total, appendLog, abortSignal, batchId) => {
+          appendLog(`<span class="text-slate-400">[${getNowTimestamp()}] 🔍 正在检索 MP 补缺做种: <b>【${escapeHtml(item.name)}】</b>...</span>`);
           try {
             const res = await api('/api/moviepilot/download-gap-fill', {
               method: 'POST',
-              body: JSON.stringify({ season_record_ids: [item.id], record_ids: [item.id] }),
+              body: JSON.stringify({
+                season_record_ids: [item.id],
+                record_ids: [item.id],
+                batch_run_id: batchId
+              }),
               signal: abortSignal
             });
 
@@ -2751,8 +3297,9 @@
               appendLog(`<span class="text-amber-400">[${getNowTimestamp()}] ℹ️ 站点提示: ${escapeHtml(res.search_sites.diagnostics.join('；'))}</span>`);
             }
             if (details && details.length > 0) {
-              const successes = details.filter(d => d.success || d.status === 'success');
-              const failures = details.filter(d => !d.success && d.status !== 'success');
+              const unverified = details.filter(d => d.status === 'submitted_unverified' || d.outcome === 'submitted_unverified');
+              const successes = details.filter(d => d.success || d.status === 'success' || d.status === 'submitted_unverified' || d.outcome === 'submitted_unverified');
+              const failures = details.filter(d => !d.success && d.status !== 'success' && d.status !== 'submitted_unverified' && d.outcome !== 'submitted_unverified');
 
               if (successes.length > 0) {
                 let extra = '';
@@ -2768,8 +3315,10 @@
                 const cleanedTotal = successes.reduce((acc, d) => acc + (d.cleaned_transfers_count || d.cleared_transfer_records_count || 0), 0);
                 if (cleanedTotal > 0) extra += ` | 仅清理 ${cleanedTotal} 条冲突缺号整理记录`;
 
-                if (failures.length > 0) {
-                  appendLog(`<span class="text-amber-400 font-bold">[${getNowTimestamp()}] ⚠️ 部分推送成功: 【${escapeHtml(item.name)}】成功 ${successes.length} 项，失败 ${failures.length} 项${escapeHtml(extra)}</span>`);
+                if (unverified.length > 0 && failures.length === 0) {
+                  appendLog(`<span class="text-amber-400 font-bold">[${getNowTimestamp()}] ⚠️ 已提交待确认（回执超时）: 【${escapeHtml(item.name)}】${unverified.length} 项待核对入库${escapeHtml(extra)}</span>`);
+                } else if (failures.length > 0 || unverified.length > 0) {
+                  appendLog(`<span class="text-amber-400 font-bold">[${getNowTimestamp()}] ⚠️ 部分推送成功: 【${escapeHtml(item.name)}】已提交 ${successes.length} 项（待确认 ${unverified.length} 项），失败 ${failures.length} 项${escapeHtml(extra)}</span>`);
                 } else {
                   appendLog(`<span class="text-emerald-400 font-bold">[${getNowTimestamp()}] ✓ 推送成功: 【${escapeHtml(item.name)}】共提交 ${successes.length} 个下载任务${escapeHtml(extra)}</span>`);
                 }
@@ -2787,15 +3336,21 @@
               return { success: res.ok === true };
             }
           } catch (err) {
-            appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] ✗ 推送异常: 【${item.name}】${err.message}</span>`);
+            if (err && err.name === 'AbortError') {
+              appendLog(`<span class="text-slate-400">[${getNowTimestamp()}] ⏹️ 已中止请求: 【${escapeHtml(item.name)}】</span>`);
+              return { cancelled: true };
+            }
+            appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] ✗ 推送异常: 【${escapeHtml(item.name)}】${escapeHtml(err && err.message ? err.message : String(err))}</span>`);
             return { success: false };
           }
         },
         onFinish: async () => {
-          const task = taskList.find(t => t.id === currentTaskId);
+          const task = taskList.find(t => t.id === targetTaskId);
           if (task) task._seasonsLoaded = false;
           await loadTasks();
-          if (currentTaskId) selectTask(currentTaskId);
+          if (targetTaskId && currentTaskId === targetTaskId) {
+            await selectTask(targetTaskId);
+          }
         }
       });
     }

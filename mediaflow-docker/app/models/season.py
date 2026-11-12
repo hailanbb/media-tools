@@ -49,6 +49,18 @@ class SeasonRecord(Base):
     season_finished: Mapped[bool] = mapped_column(
         Boolean, default=False, comment="该季是否已完结（全部播出）"
     )
+    evidence_json: Mapped[str | None] = mapped_column(
+        Text, nullable=True, comment="元数据与文件命名核对证据 JSON"
+    )
+    conflict_json: Mapped[str | None] = mapped_column(
+        Text, nullable=True, comment="作品归属冲突或同名待确认状态 JSON"
+    )
+    mapping_json: Mapped[str | None] = mapped_column(
+        Text, nullable=True, comment="跨条目季映射与编号口径 JSON"
+    )
+    last_checked_at: Mapped[datetime | None] = mapped_column(
+        nullable=True, comment="最近一次元数据或对账核对时间"
+    )
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         server_default=func.now(), onupdate=func.now()

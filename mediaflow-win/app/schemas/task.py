@@ -1,6 +1,7 @@
 """任务与剧季相关 Schema."""
 
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
@@ -11,6 +12,7 @@ class TaskSummary(BaseModel):
     archive_ready: int = 0
     review_needed: int = 0
     download_needed: int = 0
+    download_pushed: int = 0
     airing: int = 0
     archive_check: int = 0
     already_archived: int = 0
@@ -60,3 +62,8 @@ class SeasonOut(BaseModel):
     status_detail: str | None
     archive_target_path: str | None
     season_finished: bool
+    evidence: dict[str, Any] | None = None
+    conflict: dict[str, Any] | None = None
+    mapping: dict[str, Any] | None = None
+    gap_fill_state: dict[str, Any] | None = None
+    last_checked_at: datetime | None = None

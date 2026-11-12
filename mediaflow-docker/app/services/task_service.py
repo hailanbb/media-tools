@@ -19,6 +19,11 @@ from app.models.operation import OperationLog
 from app.models.task import Task
 from app.models.season import SeasonRecord
 from app.core.inspector import InspectionResult, SeasonDiagnosis, run_inspection
+from app.services.gap_fill_tracker import (
+    build_identity_key,
+    refresh_task_summary,
+    supersede_changed_identity_records,
+)
 
 import asyncio
 
@@ -178,6 +183,7 @@ async def execute_inspection(task_id: str, db: AsyncSession) -> InspectionResult
                 control_event=control_event,
                 cancelled_tasks=TASK_CANCELLED,
                 concurrency=3,
+                db=db,
             )
         finally:
             await cd2.close()
@@ -193,13 +199,15 @@ async def execute_inspection(task_id: str, db: AsyncSession) -> InspectionResult
                 diag.status = "manually_handled"
         result.compute_summary()
 
-        # 4. 清除旧记录，写入新结果
+        # 4. 清除旧记录，写入新结果，并继承/隔离在途补缺状态
         old_records = await db.execute(
             select(SeasonRecord).where(SeasonRecord.task_id == task_id)
         )
         for old in old_records.scalars().all():
             await db.delete(old)
+        await db.flush()
 
+        now_checked = datetime.now(timezone.utc)
         for diag in result.seasons:
             record = SeasonRecord(
                 task_id=task_id,
@@ -217,23 +225,33 @@ async def execute_inspection(task_id: str, db: AsyncSession) -> InspectionResult
                 status_detail=diag.status_detail,
                 archive_target_path=diag.archive_target_path,
                 season_finished=diag.season_finished,
+                evidence_json=json.dumps(diag.evidence or {}, ensure_ascii=False),
+                conflict_json=json.dumps(diag.conflict or {}, ensure_ascii=False),
+                mapping_json=json.dumps(diag.mapping or {}, ensure_ascii=False),
+                last_checked_at=now_checked,
             )
             db.add(record)
+            await db.flush()
+            active_id_key = build_identity_key(
+                diag.show_name,
+                diag.tmdb_id,
+                diag.season_number,
+                diag.mapping or None,
+            )
+            await supersede_changed_identity_records(
+                db=db,
+                task_id=task_id,
+                season_path=diag.season_path,
+                active_identity_key=active_id_key,
+                new_season_record_id=record.id,
+            )
 
-        # 5. 更新任务汇总
+        # 5. 更新任务汇总（扣除已推送全涵盖，保留真实待补清单）
         is_stopped = task_id in TASK_CANCELLED
         final_status = "stopped" if is_stopped else "completed"
-        
+
         task.status = final_status  # type: ignore[assignment]
-        task.summary_json = json.dumps({  # type: ignore[assignment]
-            "archive_ready": result.archive_ready_count,
-            "review_needed": result.review_needed_count,
-            "download_needed": result.download_needed_count,
-            "airing": result.airing_count,
-            "archive_check": result.archive_check_count,
-            "already_archived": result.already_archived_count,
-            "total_seasons": sum(s.status not in ("manually_handled", "verified_complete") for s in result.seasons),
-        })
+        await refresh_task_summary(task_id, db)
         await db.commit()
 
         TASK_PROGRESS[task_id] = {

@@ -151,30 +151,10 @@ async def _safe_cleanup_source_show_dir(
 
 
 async def _refresh_task_summary(task_id: str, db: AsyncSession) -> None:
-    """级联刷新关联 Task 的汇总统计 summary_json。"""
-    task = await db.get(Task, task_id)
-    if not task:
-        return
+    """级联刷新关联 Task 的汇总统计 summary_json（含真缺集待补与已推送待入库）。"""
+    from app.services.gap_fill_tracker import refresh_task_summary
 
-    stmt = select(SeasonRecord).where(SeasonRecord.task_id == task_id)
-    res = await db.execute(stmt)
-    all_seasons = [s for s in res.scalars().all() if s.status not in ("manually_handled", "verified_complete", "cleaned_redundant", "source_absent")]
-
-    archive_ready_count = sum(1 for s in all_seasons if s.status in ("archive_ready", "period_ready"))
-    review_needed_count = sum(1 for s in all_seasons if s.status in ("review_needed", "period_review", "identity_review"))
-    download_needed_count = sum(1 for s in all_seasons if s.status in ("download_needed", "period_missing"))
-    airing_count = sum(1 for s in all_seasons if s.status == "airing")
-    already_archived_count = sum(1 for s in all_seasons if s.status == "already_archived")
-
-    task.summary_json = json.dumps({
-        "archive_ready": archive_ready_count,
-        "review_needed": review_needed_count,
-        "download_needed": download_needed_count,
-        "airing": airing_count,
-        "archive_check": sum(s.status == "archive_check" for s in all_seasons),
-        "already_archived": already_archived_count,
-        "total_seasons": len(all_seasons),
-    })
+    await refresh_task_summary(task_id, db)
 
 
 @router.post("/execute", response_model=StatusResponse)
@@ -208,6 +188,13 @@ async def execute_archive(
     # 按 (norm_src_show, norm_target_parent) 分组，落实同剧串行、跨剧受控并发
     show_groups: dict[tuple[str, str], list[SeasonRecord]] = {}
     for rec in records:
+        conflict_info = json.loads(rec.conflict_json or "{}") if getattr(rec, "conflict_json", None) else {}
+        if isinstance(conflict_info, dict) and conflict_info.get("blocking"):
+            errors.append(
+                f"{rec.show_name} S{rec.season_number:02d}: 存在身份/归属冲突 ({conflict_info.get('reason') or conflict_info.get('type')})，安全拦截归档"
+            )
+            continue
+
         if rec.status not in ("archive_ready", "period_ready"):
             errors.append(f"{rec.show_name} S{rec.season_number:02d}: 当前状态为 {rec.status}，跳过")
             continue
@@ -576,6 +563,10 @@ async def clean_duplicates(
 
             if rec.status in ("archive_check", "period_review", "period_ready", "period_missing", "identity_review", "already_archived", "manually_handled", "verified_complete"):
                 errors.append(f"{rec.show_name}：当前处理方式不适用重复版本清理")
+                continue
+            c_info = json.loads(rec.conflict_json or "{}") if getattr(rec, "conflict_json", None) else {}
+            if isinstance(c_info, dict) and c_info.get("blocking"):
+                errors.append(f"{rec.show_name}：存在未解除的身份冲突，安全拦截清理")
                 continue
 
             # 获取该季目录在 CD2 上的实时最新文件（强制刷新缓存）
@@ -1093,6 +1084,9 @@ async def calibrate_episodes(
 
     if rec.status in ("archive_check", "period_review", "period_ready", "period_missing", "identity_review", "already_archived", "manually_handled", "verified_complete"):
         return StatusResponse(ok=False, message="归档核对记录需通过重新初检更新")
+    c_info = json.loads(rec.conflict_json or "{}") if getattr(rec, "conflict_json", None) else {}
+    if isinstance(c_info, dict) and c_info.get("blocking"):
+        return StatusResponse(ok=False, message="存在作品身份冲突，请先在身份确认面板核对或撤销后再校准")
 
     old_total = rec.total_episodes
     rec.total_episodes = body.total_episodes
@@ -1140,6 +1134,9 @@ async def delete_source_show(
 
     if rec.status in ("archive_check", "period_review", "period_ready", "identity_review", "already_archived", "manually_handled", "verified_complete", "source_absent", "cleaned_redundant"):
         return StatusResponse(ok=False, message="归档核对记录仅供查看，保留源端")
+    c_info = json.loads(rec.conflict_json or "{}") if getattr(rec, "conflict_json", None) else {}
+    if isinstance(c_info, dict) and c_info.get("blocking"):
+        return StatusResponse(ok=False, message="存在作品身份冲突，安全拦截删除源端目录")
 
     show_path = rec.show_path
     if not show_path or len(show_path.strip("/").split("/")) < 2:

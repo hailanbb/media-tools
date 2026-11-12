@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clients.moviepilot import MoviePilotClient
@@ -599,6 +600,7 @@ async def list_active_downloads() -> list[dict]:
 class _GapFillRequest(BaseModel):
     season_record_ids: list[str] = []
     record_ids: list[str] = []
+    batch_run_id: str | None = None
 
     def get_target_ids(self) -> list[str]:
         return self.season_record_ids or self.record_ids
@@ -617,6 +619,87 @@ async def download_gap_fill(
 
     from app.services.download_service import execute_gap_fill_download
     try:
-        return await execute_gap_fill_download(target_ids, db)
+        return await execute_gap_fill_download(target_ids, db, batch_run_id=body.batch_run_id)
     except Exception as e:
         return {"ok": False, "message": f"补缺推送异常: {str(e)[:200]}", "errors": [str(e)]}
+
+
+class _GapFillAbortRequest(BaseModel):
+    task_id: str
+    season_record_ids: list[str] = []
+    batch_run_id: str = ""
+
+
+@router.post("/gap-fill/mark-aborted")
+async def mark_gap_fill_aborted(
+    body: _GapFillAbortRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """记录用户在批处理中途点击“中止后续任务”时尚未启动的剧季，确保“本次未执行”独立审计且绝不污染已在途集。"""
+    if not body.season_record_ids:
+        return {"ok": True, "marked_count": 0, "message": "无尚未开始的剩余剧季"}
+
+    from app.models.season import SeasonRecord
+    from app.services.gap_fill_tracker import (
+        build_identity_key,
+        compute_season_gap_fill_view,
+        record_season_run_snapshot,
+        record_unsubmitted_episode_outcomes,
+        refresh_task_summary,
+    )
+
+    recs = list(
+        (
+            await db.execute(
+                select(SeasonRecord).where(
+                    SeasonRecord.task_id == body.task_id,
+                    SeasonRecord.id.in_(body.season_record_ids),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    marked = 0
+    for rec in recs:
+        if rec.status not in ("download_needed", "period_missing"):
+            continue
+        mapping = json.loads(rec.mapping_json or "{}") if getattr(rec, "mapping_json", None) else None
+        if isinstance(mapping, dict) and not mapping.get("target_tmdb_id"):
+            mapping = None
+        id_key = build_identity_key(rec.show_name, rec.tmdb_id, rec.season_number, mapping)
+        view = await compute_season_gap_fill_view(db, rec)
+        actionable = view.get("actionable_missing_episodes") or []
+        if not actionable:
+            continue
+        await record_unsubmitted_episode_outcomes(
+            db,
+            rec,
+            id_key,
+            actionable,
+            batch_run_id=body.batch_run_id or "",
+            outcome_state="aborted_unstarted",
+            outcome_code="aborted_unstarted",
+            reason="用户主动中止后续批量任务，本季尚未启动（本次未执行）",
+            search_tmdb_id=int(mapping["target_tmdb_id"]) if mapping and mapping.get("target_tmdb_id") else (int(rec.tmdb_id) if rec.tmdb_id and str(rec.tmdb_id).isdigit() else None),
+            search_season_number=int(mapping.get("target_season") or 1) if mapping and mapping.get("target_tmdb_id") else rec.season_number,
+            numbering_mode=str(mapping.get("numbering_mode") or "standard") if mapping else "standard",
+        )
+        await record_season_run_snapshot(
+            db,
+            rec,
+            id_key,
+            batch_run_id=body.batch_run_id or "",
+            outcome_status="aborted_unstarted",
+            summary_text="用户中止后续任务，本季本次未执行",
+            target_episodes=actionable,
+            accepted_episodes=view.get("pushed_episodes") or [],
+            unverified_episodes=view.get("unverified_episodes") or [],
+            failed_episodes={str(ep): {"code": "aborted_unstarted", "reason": "本次未执行（用户中止）"} for ep in actionable},
+        )
+        marked += 1
+
+    await refresh_task_summary(body.task_id, db)
+    await db.commit()
+    return {"ok": True, "marked_count": marked, "message": f"已记录 {marked} 季尚未启动（本次未执行）"}
