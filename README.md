@@ -4,7 +4,7 @@
 
 > **面向家庭影院与云原生 NAS（115网盘 / CloudDrive2 / MoviePilot / Emby / Jellyfin）的新一代智能影视媒体整理、跨库无损归档与双轨运维治理系统。**
 
-[![Version](https://img.shields.io/badge/Release-v2.5.19-6366f1.svg?style=flat-square&logo=github)](https://github.com/hailanbb/media-tools/releases)
+[![Version](https://img.shields.io/badge/Release-v2.5.20-6366f1.svg?style=flat-square&logo=github)](https://github.com/hailanbb/media-tools/releases)
 [![Docker](https://img.shields.io/badge/Docker-Supported-2496ed.svg?style=flat-square&logo=docker)](mediaflow-docker/)
 [![Windows](https://img.shields.io/badge/Windows-Native-0078d4.svg?style=flat-square&logo=windows)](mediaflow-win/)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776ab.svg?style=flat-square&logo=python)](https://www.python.org/)
@@ -225,7 +225,13 @@ MediaFlow 的每一项核心机制均遵循严谨的第一性原理设计方案�
 
 ## 📜 版本演进历史 (Changelog)
 
-### 🚀 最新稳定版：v2.5.19 (2026-11-12)
+### 🚀 最新稳定版：v2.5.20 (2026-11-13)
+
+* **0 视频 `[tmdbid=...]` 空壳目录 Emby 联动核查与直转「真缺集待补」**：
+  * **MoviePilot × Emby 实时探测联动（`moviepilot` + `inspector`）**：源季目录为 0 视频空壳（如仅剩 `.nfo` 等附件且无未查子目录）、带明确 `[tmdbid=...]` 且归档库未命中任何正片时，自动调用 `POST /api/v1/mediaserver/exists_remote` 核对 Emby 入库集数；若 Emby 同样 0 集且本季已完结，直接进入「真缺集待补 (`download_needed`)」，若 Emby 已有剧集或服务未连接则安全保留 `archive_check` 防止盲重下；
+  * **异常卡一键「查 Emby 转待补」**：兼容历史已扫任务上的 0 视频 `[tmdbid=...]` 异常条目，支持单季点按实时校验 Emby 并转入「真缺集待补」，详情弹窗同步展示媒体服务器核查回执。
+
+#### v2.5.19 (2026-11-12)
 
 * **多目录单选确认与 TMDB 正名默认推荐、详情页无冲突降噪**：
   * **同 TMDB 多目录归档目标改用单选勾选 + TMDB 官网显示名默认推荐（`directory_governance` + `tasks` + `index.html`）**：弹出确认窗口不再要求手工填写目标路径，自动生成各源端/归档库对应的候选目标单选列表（另附可选自定义路径开关），并在弹窗顶部提示「TMDB 官网页面 (tmdbid=...) 当前显示名称」，自动默认勾选与 TMDB 当前页面名称一致的那一项；同时兼容全新初检任务与历史持久化任务；

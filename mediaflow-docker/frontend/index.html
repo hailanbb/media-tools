@@ -109,7 +109,7 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.19</span>
+              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.20</span>
             </div>
             <!-- 完善后的命名 -->
             <p class="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">智能媒体库整理与归档工作台</p>
@@ -2273,7 +2273,14 @@
           }
         }
 
-        const hasEvDetails = Boolean(ev && (ev.meta_status || ev.meta_error || (ev.release_evidence && ev.release_evidence.dominant_release_title)));
+        const hasEvDetails = Boolean(ev && (ev.meta_status || ev.meta_error || (ev.release_evidence && ev.release_evidence.dominant_release_title) || (ev.mediaserver_check && (ev.mediaserver_check.checked || ev.mediaserver_check.error))));
+        const rawObj = item.raw || {};
+        const showEmbyPromoteBtn = currentCategory === 'anomaly'
+          && item.anomalySubtype === 'file_check'
+          && Boolean(item.tmdbId)
+          && Number(rawObj.total_episodes || 0) > 0
+          && (!Array.isArray(rawObj.recognized_episodes) || rawObj.recognized_episodes.length === 0)
+          && (Array.isArray(rawObj.missing_episodes) && rawObj.missing_episodes.length > 0);
         const showDetailBtn = currentCategory === 'download' || Boolean(conf && conf.blocking) || Boolean(gapState && gapState.episodes && gapState.episodes.length > 0) || hasEvDetails;
         const showMappingBtn = ['identity_review', 'unknown', 'review_needed', 'period_review', 'download_needed', 'period_missing'].includes(rawStatus) || Boolean(conf && conf.blocking) || Boolean(mp && mp.target_tmdb_id);
         const disableCheck = currentCategory === 'airing' || currentCategory === 'anomaly' || ['inspect_info', 'inspect_gap_detail', 'clean_redundant'].includes(item.actionType) || (currentCategory === 'download' && activeGapTab === 'pushed_pending');
@@ -2330,6 +2337,12 @@
               ${currentCategory === 'anomaly' || item.actionType === 'inspect_info' || (conf && conf.blocking) ? `
                 <button onclick="markSeasonHandled('${item.id}', this)" class="px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 text-slate-600 dark:text-slate-300 text-xs font-semibold disabled:opacity-50">
                   <i class="fa-solid fa-check mr-1"></i>已手动处理
+                </button>
+              ` : ''}
+              ${showEmbyPromoteBtn ? `
+                <button type="button" onclick="recheckEmbyForSeason('${item.id}', this)" class="px-2.5 py-1.5 rounded-lg border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 text-xs font-semibold hover:bg-indigo-100 dark:hover:bg-indigo-900/40 transition flex items-center gap-1 shadow-sm disabled:opacity-50" title="实时核查归档与 Emby 媒体服务器；若均确认 0 集且本季已完结，直接转入真缺集待补">
+                  <i class="fa-solid fa-magnifying-glass-arrow-right text-xs"></i>
+                  <span>查 Emby 转待补</span>
                 </button>
               ` : ''}
               ${((item.isAnomaly && item.anomalySubtype === 'unknown_meta') || currentCategory === 'download') ? `
@@ -2745,6 +2758,39 @@
       if (activeBtn) activeBtn.focus();
     }
 
+    async function recheckEmbyForSeason(recordId, btn) {
+      if (!currentTaskId || !recordId) return;
+      const origHtml = btn ? btn.innerHTML : '';
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin text-xs"></i><span>核查 Emby...</span>';
+      }
+      try {
+        const res = await api(`/api/tasks/${currentTaskId}/recalculate`, {
+          method: 'POST',
+          body: JSON.stringify({ record_ids: [recordId], fetch_remote: true })
+        });
+        const task = taskList.find(t => t.id === currentTaskId);
+        if (task) task._seasonsLoaded = false;
+        await loadTasks();
+        if (task) await selectTask(task.id);
+        const ch = (res && Array.isArray(res.changes)) ? res.changes.find(c => c.id === recordId) : null;
+        if (ch && ch.after_status === 'download_needed') {
+          alert(`归档库与 Emby 均确认本季 0 集入库，已转入「真缺集待补」。\n\n${ch.detail || ''}`);
+        } else {
+          const item = findItemByRecordId(recordId);
+          alert((ch && ch.detail) || (item && item.note) || '已完成 Emby 实盘核查，请查看当前分类与说明。');
+        }
+      } catch (e) {
+        alert(`Emby 核查重算失败: ${e.message}`);
+      } finally {
+        if (btn && btn.isConnected) {
+          btn.disabled = false;
+          btn.innerHTML = origHtml;
+        }
+      }
+    }
+
     let _activeDirectoryGroupId = '';
 
     function onDirGroupRadioChange() {
@@ -3061,8 +3107,9 @@
       const confMsg = (conf && (conf.message || conf.reason)) || ev.conflict_reason || '';
       const metaStatusVal = ev.meta_status || ev.metadata_status || '';
       const metaErrVal = ev.meta_error || ev.metadata_error || '';
+      const msCheck = (ev && ev.mediaserver_check && (ev.mediaserver_check.checked || ev.mediaserver_check.error)) ? ev.mediaserver_check : null;
       const hasRealConflict = Boolean((conf && conf.blocking) || confMsg || epMatches.length > 0);
-      if (hasRealConflict || (ev.candidates && ev.candidates.length > 0) || relEv.dominant_release_title || metaStatusVal || uniqueAliases.length > 0) {
+      if (hasRealConflict || (ev.candidates && ev.candidates.length > 0) || relEv.dominant_release_title || metaStatusVal || uniqueAliases.length > 0 || msCheck) {
         const overlaps = epMatches.map(x => {
           if (typeof x === 'string') return `<li>${escapeHtml(x)}</li>`;
           const epNo = x.episode_number ? `E${String(x.episode_number).padStart(2, '0')} ` : '';
@@ -3087,6 +3134,7 @@
             ${confMsg ? `<div class="text-rose-700 dark:text-rose-300">${escapeHtml(confMsg)}</div>` : ''}
             ${uniqueAliases.length ? `<div class="text-slate-600 dark:text-slate-300">作品外文译名/别名: <span class="font-mono">${escapeHtml(uniqueAliases.join(' / '))}</span></div>` : ''}
             ${metaStatusVal ? `<div class="text-slate-600 dark:text-slate-300">元数据状态: <span class="font-mono">${escapeHtml(metaStatusVal)}</span>${metaErrVal ? ` (${escapeHtml(metaErrVal)})` : ''}</div>` : ''}
+            ${msCheck ? `<div class="text-slate-600 dark:text-slate-300">媒体服务器 (Emby) 核查: <span class="font-mono">${msCheck.checked ? (Array.isArray(msCheck.season_episodes) && msCheck.season_episodes.length > 0 ? `已有 ${msCheck.season_episodes.length} 集 (${escapeHtml(msCheck.season_episodes.slice(0, 8).map(e => 'E' + String(e).padStart(2, '0')).join(', '))}${msCheck.season_episodes.length > 8 ? '...' : ''})` : '0 集入库（确认缺失）') : `未完成 (${escapeHtml(msCheck.error || '未知原因')})`}</span></div>` : ''}
             ${relEv.dominant_release_title ? `<div class="text-slate-600 dark:text-slate-300">文件发行主名: <span class="font-mono">${escapeHtml(relEv.dominant_release_title)}</span>${(relEv.platform_tags && relEv.platform_tags.length) ? ` · 平台: ${escapeHtml(relEv.platform_tags.join(','))}` : ''}${(relEv.release_years && relEv.release_years.length) ? ` · 年份: ${escapeHtml(relEv.release_years.join(','))}` : ''}</div>` : ''}
             ${overlaps ? `<div class="text-slate-700 dark:text-slate-300 font-semibold mt-1">集标题/发布线索证据:</div><ul class="list-disc pl-4 space-y-0.5 text-slate-600 dark:text-slate-300">${overlaps}</ul>` : ''}
             ${cands ? `<div class="text-slate-700 dark:text-slate-300 font-semibold mt-1">候选条目:</div><ul class="list-disc pl-4 space-y-0.5 text-slate-600 dark:text-slate-300">${cands}</ul>` : ''}

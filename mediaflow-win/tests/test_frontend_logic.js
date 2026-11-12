@@ -232,5 +232,35 @@ console.log("===================================================================
   assert(dgHtml.includes('TMDB 官网页面 (tmdbid=307478) 当前显示名称：「谎言」'));
   assert(dgHtml.includes('type="radio" name="dirGroupTargetRadio" value="/dst/谎言 (2026) [tmdbid=307478]" checked'));
   assert(!dgHtml.includes('value="/dst/完美的谎言 (2026) [tmdbid=307478]" checked'));
-  console.log('✓ 手动处理按钮、缺集删除按钮、无冲突详情降噪与多目录单选勾选通过');
+
+  // 验证 0 视频带 [tmdbid=...] 异常卡片展示「查 Emby 转待补」按钮，含视频项则不展示
+  context.currentCategory = 'anomaly';
+  context.taskList = [{
+    id: 'task',
+    categories: {
+      anomaly: [
+        {
+          id: 'nfo-shell', show: '抗战 (2025)', season: 'S01', tmdbId: '303491',
+          statusText: '0/5集', isAnomaly: true, anomalySubtype: 'file_check',
+          actionType: 'inspect_info', actionText: '处理说明',
+          pathA: '/src/抗战 (2025) [tmdbid=303491]/Season 1',
+          raw: { total_episodes: 5, recognized_episodes: [], missing_episodes: [1, 2, 3, 4, 5], evidence: {} }
+        },
+        {
+          id: 'has-video', show: '有片待查 (2025)', season: 'S01', tmdbId: '100',
+          statusText: '1/5集', isAnomaly: true, anomalySubtype: 'file_check',
+          actionType: 'inspect_info', actionText: '处理说明',
+          pathA: '/src/有片待查/Season 1',
+          raw: { total_episodes: 5, recognized_episodes: [1], missing_episodes: [2, 3, 4, 5], evidence: {} }
+        }
+      ]
+    },
+    counts: {}
+  }];
+  context.findItemByRecordId = id => context.taskList[0].categories.anomaly.find(x => x.id === id);
+  vm.runInContext("renderEpisodesList()", context);
+  const anomHtml = getNode('episodeItemContainer').innerHTML;
+  assert(anomHtml.includes("recheckEmbyForSeason('nfo-shell', this)"), '0视频空壳异常卡应显示查Emby转待补按钮');
+  assert(!anomHtml.includes("recheckEmbyForSeason('has-video', this)"), '含已识别视频的异常卡不应误显示查Emby转待补按钮');
+  console.log('✓ 手动处理按钮、缺集删除按钮、无冲突详情降噪、多目录单选与0视频Emby转待补通过');
 }

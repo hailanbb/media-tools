@@ -952,6 +952,7 @@ async def run_inspection(
 
         show_src_ep_map: dict[str, list[int]] = {}
         show_src_seasons: list[int] = []
+        show_ms_cache: dict[int, dict[str, Any]] = {}
 
         for season_num, season_item in sorted(season_dirs, key=lambda x: x[0]):
             season_path = season_item["path"]
@@ -1187,6 +1188,7 @@ async def run_inspection(
                 missing = [ep for ep in range(1, total_eps + 1) if ep not in recognized]
 
             dual_archive_info: dict[str, Any] = {}
+            mediaserver_check: dict[str, Any] = {}
             if archive_target and not identity_conflict:
                 mapped_targets_arg = None
                 if active_mapping:
@@ -1348,9 +1350,71 @@ async def run_inspection(
                                 status = "download_needed" if (missing and season_finished) else "archive_check"
                                 detail = f"跨条目归档已识别 {sorted(archived_eps)}；结合源端仍缺 {missing}" if missing else detail
                     elif not recognized and not multi_archive_dirs:
-                        status = "archive_check"
-                        detail = (f"资料总集数 {total_eps or '未知'}；未找到对应归档季。"
-                                  + _source_inventory(season_files, parsed_episodes, season_num) + "。")
+                        inv_desc = _source_inventory(season_files, parsed_episodes, season_num)
+                        has_subdirs = any(i["isDirectory"] for i in season_files)
+                        can_check_emby = (
+                            bool(tmdb_match)
+                            and bool(tmdb_id_num)
+                            and not parsed_episodes
+                            and not has_subdirs
+                            and bool(archive_root)
+                            and not extra_archive_targets
+                            and not identity_conflict
+                            and not season_unlisted_on_valid_primary
+                            and bool(total_eps and total_eps > 0)
+                            and mp_client is not None
+                            and callable(getattr(mp_client, "check_mediaserver_exists_remote", None))
+                        )
+                        if can_check_emby:
+                            tid_key = int(tmdb_id_num)
+                            if tid_key not in show_ms_cache:
+                                show_ms_cache[tid_key] = await mp_client.check_mediaserver_exists_remote(
+                                    tid_key,
+                                    title=str(primary_work_info.get("name") or ""),
+                                    year=str(primary_work_info.get("first_air_date") or "")[:4],
+                                    media_type="电视剧",
+                                )
+                            ms_res = show_ms_cache[tid_key]
+                            emby_eps = list((ms_res.get("season_episodes") or {}).get(season_num, []))
+                            mediaserver_check = {
+                                "checked": bool(ms_res.get("checked")),
+                                "server_type": "emby",
+                                "season_episodes": emby_eps,
+                                "error": str(ms_res.get("error") or ""),
+                            }
+                            if ms_res.get("checked"):
+                                if emby_eps:
+                                    status = "archive_check"
+                                    sample = ", ".join(f"E{e:02d}" for e in emby_eps[:6])
+                                    suffix = "..." if len(emby_eps) > 6 else ""
+                                    detail = (
+                                        f"资料总集数 {total_eps}；未找到对应归档季。{inv_desc}。"
+                                        f"媒体服务器 (Emby) 已有第 S{season_num:02d} 季共 {len(emby_eps)} 集"
+                                        f"（{sample}{suffix}），疑似正片存放在 Emby 关联的其他归档目录，暂不转入补缺。"
+                                    )
+                                elif season_finished:
+                                    status = "download_needed"
+                                    missing = list(range(1, total_eps + 1))
+                                    detail = (
+                                        f"归档库与媒体服务器 (Emby) 均确认第 S{season_num:02d} 季 0 集入库"
+                                        f"（{inv_desc}），缺失全部 {total_eps} 集：{missing}，已直接转入「真缺集待补」。"
+                                    )
+                                else:
+                                    status = "archive_check"
+                                    detail = (
+                                        f"资料总集数 {total_eps}；未找到对应归档季。{inv_desc}。"
+                                        f"媒体服务器 (Emby) 当前同样 0 集，且官方尚未确认本季完结，暂不触发整季待补。"
+                                    )
+                            else:
+                                status = "archive_check"
+                                err_hint = mediaserver_check["error"] or "未连接"
+                                detail = (
+                                    f"资料总集数 {total_eps or '未知'}；未找到对应归档季。{inv_desc}。"
+                                    f"（媒体服务器 Emby 核查未完成: {err_hint}）"
+                                )
+                        else:
+                            status = "archive_check"
+                            detail = f"资料总集数 {total_eps or '未知'}；未找到对应归档季。{inv_desc}。"
                     elif alias and status == "archive_ready" and not multi_archive_dirs:
                         status = "archive_check"
                         detail = "归档分类中存在同 TMDB ID 的别名目录，但未找到对应季，需核对归档位置。"
@@ -1484,6 +1548,7 @@ async def run_inspection(
                     "sample_files": release_signals.get("sample_files") or [],
                 },
                 "dual_archive_info": dual_archive_info,
+                "mediaserver_check": mediaserver_check,
             }
 
             show_src_seasons.append(season_num)

@@ -444,6 +444,52 @@ class MoviePilotClient:
         except Exception as exc:
             return {"ok": False, "tv_modes": [], "protects_existing": None, "summary": f"读取覆盖策略失败({type(exc).__name__})"}
 
+    # ── 媒体服务器 (Emby/Jellyfin/Plex) ──────────────────
+    async def check_mediaserver_exists_remote(
+        self,
+        tmdb_id: int,
+        title: str = "",
+        year: str = "",
+        media_type: str = "电视剧",
+    ) -> dict[str, Any]:
+        """通过 MoviePilot /api/v1/mediaserver/exists_remote 实时核查媒体服务器内已入库集号。"""
+        if not self.origin:
+            return {"checked": False, "season_episodes": {}, "error": "MoviePilot 未配置"}
+        tid = int(tmdb_id)
+        if not title:
+            try:
+                info = await self.get_media_info(tid)
+                if isinstance(info, dict):
+                    title = str(info.get("title") or info.get("en_title") or "")
+                    if not year:
+                        year = str(info.get("year") or "")[:4]
+            except Exception:
+                pass
+        payload: dict[str, Any] = {
+            "tmdb_id": tid,
+            "title": str(title or ""),
+            "type": media_type or "电视剧",
+        }
+        if year and str(year)[:4].isdigit():
+            payload["year"] = str(year)[:4]
+        try:
+            res = await self._post("/api/v1/mediaserver/exists_remote", json=payload)
+            if not isinstance(res, dict):
+                return {"checked": False, "season_episodes": {}, "error": "响应格式异常"}
+            if res.get("success") is False and "data" not in res:
+                return {"checked": False, "season_episodes": {}, "error": str(res.get("message") or "查询失败")}
+            season_episodes: dict[int, list[int]] = {}
+            for k, vals in res.items():
+                if not str(k).lstrip("-").isdigit() or not isinstance(vals, list):
+                    continue
+                sn = int(k)
+                eps = sorted({int(x) for x in vals if str(x).isdigit()})
+                if eps:
+                    season_episodes[sn] = eps
+            return {"checked": True, "season_episodes": season_episodes, "error": ""}
+        except Exception as exc:
+            return {"checked": False, "season_episodes": {}, "error": type(exc).__name__}
+
     # ── 系统 ──────────────────────────────────────────────
     async def get_system_info(self) -> dict:
         try:

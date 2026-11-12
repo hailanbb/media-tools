@@ -83,11 +83,19 @@ class MockCD2:
 
 
 class MockMP:
-    def __init__(self, seasons_by_tid=None, eps_by_key=None, subs=None):
+    def __init__(self, seasons_by_tid=None, eps_by_key=None, subs=None, ms_remote_by_tid=None):
         self.seasons_by_tid = seasons_by_tid or {}
         self.eps_by_key = eps_by_key or {}
         self.subs = subs or []
+        self.ms_remote_by_tid = ms_remote_by_tid
         self.deleted_subs: list[int] = []
+        self.ms_calls: list[int] = []
+
+    async def check_mediaserver_exists_remote(self, tmdb_id: int, title: str = "", year: str = "", media_type: str = "电视剧"):
+        self.ms_calls.append(int(tmdb_id))
+        if self.ms_remote_by_tid is None:
+            return {"checked": False, "season_episodes": {}, "error": "mock_unconfigured"}
+        return self.ms_remote_by_tid.get(int(tmdb_id), {"checked": True, "season_episodes": {}, "error": ""})
 
     async def get_tmdb_seasons(self, tmdb_id: int):
         return self.seasons_by_tid.get(int(tmdb_id))
@@ -676,6 +684,93 @@ class ReleaseAliasAndMultiDirTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(r_red3.status_code, 200)
                 self.assertTrue(r_red3.json()["ok"], r_red3.json())
                 self.assertEqual(len(cd2.delete_calls), 1)
+
+    async def test_zero_video_shell_checks_emby_and_promotes_to_download_needed(self):
+        """0 视频仅剩 NFO 且归档无片时：Emby 无集直接进 download_needed；Emby 已有或查询失败则留 archive_check。"""
+        src_cat = "/qa/src/香港剧集"
+        show_path = f"{src_cat}/抗战 (2025) [tmdbid=303491]"
+        s1_path = f"{show_path}/Season 1"
+        tree = {
+            src_cat: [_dir("抗战 (2025) [tmdbid=303491]", src_cat)],
+            show_path: [_dir("Season 1", show_path)],
+            s1_path: [
+                _file("season.nfo", s1_path, size=1412),
+                _file("抗战 - S01E01.nfo", s1_path, size=1127),
+                _file("抗战 - S01E02.nfo", s1_path, size=1079),
+            ],
+            "/qa/dst/香港剧集": [],
+        }
+        cd2 = MockCD2(tree)
+        details = {
+            303491: {
+                "id": 303491,
+                "name": "抗战",
+                "original_name": "抗戰",
+                "first_air_date": "2025-10-17",
+                "status": "Ended",
+                "seasons": [{"season_number": 1, "episode_count": 5, "air_date": "2025-10-17"}],
+            }
+        }
+        tmdb = MockTMDB(details=details)
+
+        # 1) Emby 实时确认 0 集 -> 直接进入 download_needed (缺失 1..5 集)
+        mp_empty = MockMP(
+            seasons_by_tid={303491: details[303491]["seasons"]},
+            ms_remote_by_tid={303491: {"checked": True, "season_episodes": {}, "error": ""}},
+        )
+        res_empty = await run_inspection(
+            task_id="t-nfo-empty",
+            source_path=src_cat,
+            cd2_client=cd2,
+            mp_client=mp_empty,
+            tmdb_client=tmdb,
+            archive_root="/qa/dst",
+            global_source_root="/qa/src",
+        )
+        self.assertEqual(len(res_empty.seasons), 1)
+        s_empty = res_empty.seasons[0]
+        self.assertEqual(s_empty.status, "download_needed")
+        self.assertEqual(s_empty.missing_episodes, [1, 2, 3, 4, 5])
+        self.assertEqual(mp_empty.ms_calls, [303491])
+        self.assertTrue(s_empty.evidence["mediaserver_check"]["checked"])
+        self.assertEqual(s_empty.evidence["mediaserver_check"]["season_episodes"], [])
+
+        # 2) Emby 实时查到已有 S01E01..E05 -> 安全保留在 archive_check，严禁转补缺
+        mp_present = MockMP(
+            seasons_by_tid={303491: details[303491]["seasons"]},
+            ms_remote_by_tid={303491: {"checked": True, "season_episodes": {1: [1, 2, 3, 4, 5]}, "error": ""}},
+        )
+        res_present = await run_inspection(
+            task_id="t-nfo-present",
+            source_path=src_cat,
+            cd2_client=cd2,
+            mp_client=mp_present,
+            tmdb_client=tmdb,
+            archive_root="/qa/dst",
+            global_source_root="/qa/src",
+        )
+        s_present = res_present.seasons[0]
+        self.assertEqual(s_present.status, "archive_check")
+        self.assertIn("Emby", s_present.status_detail)
+        self.assertEqual(s_present.evidence["mediaserver_check"]["season_episodes"], [1, 2, 3, 4, 5])
+
+        # 3) Emby 接口查询失败/超时 -> 安全保留在 archive_check，不盲推补缺
+        mp_err = MockMP(
+            seasons_by_tid={303491: details[303491]["seasons"]},
+            ms_remote_by_tid={303491: {"checked": False, "season_episodes": {}, "error": "ConnectTimeout"}},
+        )
+        res_err = await run_inspection(
+            task_id="t-nfo-err",
+            source_path=src_cat,
+            cd2_client=cd2,
+            mp_client=mp_err,
+            tmdb_client=tmdb,
+            archive_root="/qa/dst",
+            global_source_root="/qa/src",
+        )
+        s_err = res_err.seasons[0]
+        self.assertEqual(s_err.status, "archive_check")
+        self.assertFalse(s_err.evidence["mediaserver_check"]["checked"])
 
 
 if __name__ == "__main__":
