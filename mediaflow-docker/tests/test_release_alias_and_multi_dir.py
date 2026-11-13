@@ -772,6 +772,199 @@ class ReleaseAliasAndMultiDirTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(s_err.status, "archive_check")
         self.assertFalse(s_err.evidence["mediaserver_check"]["checked"])
 
+    async def test_emby_partial_coverage_only_promotes_missing_diff(self):
+        """Emby 分集部分覆盖时：仅将实际缺号列入待补（如全 12 集已有 1-8 则仅补 9-12）；并集齐全则留存移出待补。"""
+        src_cat = "/qa/src/国产剧"
+        show_path = f"{src_cat}/长风渡 (2025) [tmdbid=123456]"
+        s1_path = f"{show_path}/Season 1"
+        tree = {
+            src_cat: [_dir("长风渡 (2025) [tmdbid=123456]", src_cat)],
+            show_path: [_dir("Season 1", show_path)],
+            s1_path: [
+                _file("season.nfo", s1_path, size=1412),
+            ],
+            "/qa/dst/国产剧": [],
+        }
+        cd2 = MockCD2(tree)
+        details = {
+            123456: {
+                "id": 123456,
+                "name": "长风渡",
+                "original_name": "长风渡",
+                "first_air_date": "2025-06-18",
+                "status": "Ended",
+                "seasons": [{"season_number": 1, "episode_count": 12, "air_date": "2025-06-18"}],
+            }
+        }
+        tmdb = MockTMDB(details=details)
+
+        # 1) Emby 拥有 1..8 集 -> 进 download_needed，但 missing_episodes 仅为 9..12
+        mp_partial = MockMP(
+            seasons_by_tid={123456: details[123456]["seasons"]},
+            ms_remote_by_tid={123456: {"checked": True, "season_episodes": {1: list(range(1, 9))}, "error": ""}},
+        )
+        res_partial = await run_inspection(
+            task_id="t-emby-partial",
+            source_path=src_cat,
+            cd2_client=cd2,
+            mp_client=mp_partial,
+            tmdb_client=tmdb,
+            archive_root="/qa/dst",
+            global_source_root="/qa/src",
+        )
+        self.assertEqual(len(res_partial.seasons), 1)
+        s_partial = res_partial.seasons[0]
+        self.assertEqual(s_partial.status, "download_needed")
+        self.assertEqual(s_partial.missing_episodes, [9, 10, 11, 12])
+        self.assertIn("E09–E12", s_partial.status_detail)
+
+        # 2) Emby 拥有全 1..12 集 -> 并集齐全，留存并移出待补
+        mp_full = MockMP(
+            seasons_by_tid={123456: details[123456]["seasons"]},
+            ms_remote_by_tid={123456: {"checked": True, "season_episodes": {1: list(range(1, 13))}, "error": ""}},
+        )
+        res_full = await run_inspection(
+            task_id="t-emby-full",
+            source_path=src_cat,
+            cd2_client=cd2,
+            mp_client=mp_full,
+            tmdb_client=tmdb,
+            archive_root="/qa/dst",
+            global_source_root="/qa/src",
+        )
+        self.assertEqual(len(res_full.seasons), 1)
+        s_full = res_full.seasons[0]
+        self.assertEqual(s_full.status, "archive_check")
+        self.assertIn("已移出补缺待办", s_full.status_detail)
+
+    async def test_clean_directory_group_source_season_safety_gates_and_execution(self):
+        """测试目录组针对指定源端单季的覆盖核验与安全删除门禁及执行。"""
+        src_cat = "/qa/src/测试区"
+        dst_cat = "/qa/dst/测试区"
+        show_src1 = f"{src_cat}/双目录剧集 (2025) [tmdbid=800001]"
+        s1_src1 = f"{show_src1}/Season 1"
+        show_src2 = f"{src_cat}/双目录剧集 别名目录 [tmdbid=800001]"
+        s1_src2 = f"{show_src2}/Season 1"
+        show_dst = f"{dst_cat}/双目录剧集 (2025) [tmdbid=800001]"
+        s1_dst = f"{show_dst}/Season 1"
+
+        tree = {
+            src_cat: [
+                _dir("双目录剧集 (2025) [tmdbid=800001]", src_cat),
+                _dir("双目录剧集 别名目录 [tmdbid=800001]", src_cat),
+            ],
+            show_src1: [_dir("Season 1", show_src1)],
+            s1_src1: [
+                _file("双目录剧集 - S01E01.mp4", s1_src1, size=500_000_000),
+                _file("双目录剧集 - S01E01.zh.srt", s1_src1, size=20_000),
+            ],
+            show_src2: [_dir("Season 1", show_src2)],
+            s1_src2: [
+                _file("双目录剧集 - S01E01.mp4", s1_src2, size=500_000_000),
+            ],
+            dst_cat: [_dir("双目录剧集 (2025) [tmdbid=800001]", dst_cat)],
+            show_dst: [_dir("Season 1", show_dst)],
+            s1_dst: [
+                _file("双目录剧集 - S01E01.mkv", s1_dst, size=600_000_000),
+                _file("双目录剧集 - S01E02.mkv", s1_dst, size=600_000_000),
+            ],
+        }
+        cd2 = MockCD2(tree)
+        details = {
+            800001: {
+                "id": 800001,
+                "name": "双目录剧集",
+                "original_name": "双目录剧集",
+                "first_air_date": "2025-01-01",
+                "status": "Ended",
+                "seasons": [{"season_number": 1, "episode_count": 2, "air_date": "2025-01-01"}],
+            }
+        }
+        tmdb = MockTMDB(details=details)
+        mp = MockMP(seasons_by_tid={800001: details[800001]["seasons"]})
+
+        async with async_session() as db:
+            db.add(Task(id="t-clean-season", name="双目录单季清理测试", source_path=src_cat, media_type="tv", status="completed"))
+            res = await run_inspection(
+                task_id="t-clean-season",
+                source_path=src_cat,
+                cd2_client=cd2,
+                mp_client=mp,
+                tmdb_client=tmdb,
+                archive_root="/qa/dst",
+                global_source_root="/qa/src",
+                db=db,
+            )
+            for d in res.seasons:
+                db.add(
+                    SeasonRecord(
+                        task_id="t-clean-season",
+                        show_name=d.show_name,
+                        show_path=d.show_path,
+                        tmdb_id=str(d.tmdb_id or ""),
+                        season_number=d.season_number,
+                        season_path=d.season_path,
+                        total_episodes=d.total_episodes,
+                        local_episode_count=d.local_episode_count,
+                        recognized_episodes_json=json.dumps(d.recognized_episodes),
+                        missing_episodes_json=json.dumps(d.missing_episodes),
+                        duplicate_episodes_json=json.dumps(d.duplicate_episodes),
+                        status=d.status,
+                        status_detail=d.status_detail,
+                        archive_target_path=d.archive_target_path,
+                        season_finished=d.season_finished,
+                        evidence_json=json.dumps(d.evidence, ensure_ascii=False),
+                        conflict_json=json.dumps(d.conflict, ensure_ascii=False),
+                        mapping_json=json.dumps(d.mapping, ensure_ascii=False),
+                    )
+                )
+            await db.commit()
+
+        self.assertEqual(len(res.seasons), 2)
+
+        async with async_session() as db:
+            rec = (await db.scalars(select(SeasonRecord).where(SeasonRecord.task_id == "t-clean-season", SeasonRecord.show_path == show_src1))).first()
+            self.assertIsNotNone(rec)
+            rec_id = rec.id
+            groups = list((await db.scalars(select(DirectoryGroup).where(DirectoryGroup.task_id == "t-clean-season"))).all())
+            self.assertEqual(len(groups), 1)
+            grp = groups[0]
+            grp_id = grp.id
+
+        transport = httpx.ASGITransport(app=app)
+        headers = {"Authorization": "Bearer fixture"}
+        with patch("app.clients.clouddrive2.CloudDrive2Client", return_value=cd2):
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                # 1) 未确认目标 -> 400
+                r1 = await client.post(f"/api/tasks/t-clean-season/directory-groups/{grp_id}/clean-source-season", json={"season_record_id": rec_id}, headers=headers)
+                self.assertEqual(r1.status_code, 400)
+                self.assertIn("尚未确认", r1.text)
+
+                # 用户确认归档目标为 show_dst
+                r_conf = await client.post(
+                    f"/api/tasks/t-clean-season/directory-groups/{grp_id}/confirm",
+                    json={"mode": "use_archive_target", "target_path": show_dst},
+                    headers=headers,
+                )
+                self.assertEqual(r_conf.status_code, 200)
+
+                # 2) 归档目标单独全季齐全 (E01, E02 共 2 集 == total 2 集) 且完全覆盖源端 (E01 in target) -> 成功执行清理与字幕迁移
+                r2 = await client.post(f"/api/tasks/t-clean-season/directory-groups/{grp_id}/clean-source-season", json={"season_record_id": rec_id}, headers=headers)
+                self.assertEqual(r2.status_code, 200, r2.text)
+                self.assertTrue(r2.json()["success"])
+                # 独有字幕应被迁移至目标目录
+                self.assertEqual(len(cd2.move_calls), 1)
+                self.assertEqual(cd2.move_calls[0][1], s1_dst)
+                # 源端单季目录被安全删除
+                self.assertEqual(len(cd2.delete_calls), 1)
+                self.assertEqual(cd2.delete_calls[0], s1_src1)
+
+                # 验证记录状态变为 cleaned_redundant
+                async with async_session() as db:
+                    rec_after = await db.get(SeasonRecord, rec_id)
+                    self.assertEqual(rec_after.status, "cleaned_redundant")
+                    self.assertIn("已通过多目录归档覆盖核验清理源端残留", rec_after.status_detail)
+
 
 if __name__ == "__main__":
     unittest.main()

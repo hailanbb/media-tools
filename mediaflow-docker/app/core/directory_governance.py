@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect as _inspect
 import json
 import posixpath
 import re
@@ -399,6 +400,219 @@ def _group_kind_label(kind: str) -> str:
     }.get(kind, "多目录组")
 
 
+def _safe_dt_iso(obj: Any, field_name: str) -> str | None:
+    if hasattr(obj, "__dict__"):
+        val = obj.__dict__.get(field_name)
+    else:
+        val = getattr(obj, field_name, None)
+    if val is not None and hasattr(val, "isoformat"):
+        return val.isoformat()
+    return None
+
+
+def format_episodes_range(episodes: list[int] | set[int]) -> str:
+    """压缩展示连续集号（如 E01–E08，E10）。"""
+    if not episodes:
+        return "无"
+    sorted_eps = sorted({int(x) for x in episodes if str(x).isdigit()})
+    if not sorted_eps:
+        return "无"
+    ranges: list[str] = []
+    start = sorted_eps[0]
+    prev = sorted_eps[0]
+    for ep in sorted_eps[1:]:
+        if ep == prev + 1:
+            prev = ep
+        else:
+            if start == prev:
+                ranges.append(f"E{start:02d}")
+            elif prev == start + 1:
+                ranges.append(f"E{start:02d}, E{prev:02d}")
+            else:
+                ranges.append(f"E{start:02d}–E{prev:02d}")
+            start = ep
+            prev = ep
+    if start == prev:
+        ranges.append(f"E{start:02d}")
+    elif prev == start + 1:
+        ranges.append(f"E{start:02d}, E{prev:02d}")
+    else:
+        ranges.append(f"E{start:02d}–E{prev:02d}")
+    return ", ".join(ranges)
+
+
+def build_group_coverage_matrix(
+    group_dict: dict[str, Any],
+    season_records: list[Any],
+) -> list[dict[str, Any]]:
+    """为目录组生成按季度展开的逐路径、逐季覆盖与缺号对照矩阵。"""
+    entries = group_dict.get("entries") if isinstance(group_dict.get("entries"), list) else []
+    if not entries:
+        return []
+
+    status = str(group_dict.get("status") or "")
+    confirmed_target = normalize_dir_path(group_dict.get("confirmed_target_path") or "")
+    confirmation_mode = str(group_dict.get("confirmation_mode") or "")
+
+    # 汇总所有涉及到的季度
+    seasons_set: set[int] = set()
+    for ent in entries:
+        for s in ent.get("seasons") or []:
+            if str(s).isdigit():
+                seasons_set.add(int(s))
+    for rec in season_records:
+        if getattr(rec, "season_number", None) is not None:
+            seasons_set.add(int(rec.season_number))
+
+    if not seasons_set:
+        seasons_set.add(1)
+
+    rec_by_show_and_sn: dict[tuple[str, int], Any] = {}
+    total_by_sn: dict[int, int] = {}
+    for rec in season_records:
+        sp = normalize_dir_path(getattr(rec, "show_path", "") or "")
+        sn = int(getattr(rec, "season_number", 1))
+        rec_by_show_and_sn[(sp, sn)] = rec
+        tot = int(getattr(rec, "total_episodes", 0) or 0)
+        if tot > 0:
+            total_by_sn[sn] = tot
+
+    matrix: list[dict[str, Any]] = []
+    for sn in sorted(seasons_set):
+        tot_eps = total_by_sn.get(sn, 0)
+        rows: list[dict[str, Any]] = []
+
+        confirmed_arc_eps: set[int] = set()
+        confirmed_target_found = False
+        if status == "confirmed" and confirmed_target:
+            for ent in entries:
+                if ent.get("side") == "archive" and normalize_dir_path(ent.get("norm_path") or "") == confirmed_target:
+                    confirmed_target_found = True
+                    ep_map = ent.get("episodes_by_season") or {}
+                    eps = ep_map.get(str(sn)) or ep_map.get(sn) or []
+                    confirmed_arc_eps = {int(x) for x in eps if str(x).isdigit()}
+
+        is_confirmed_target_full = bool(
+            confirmed_target_found
+            and tot_eps > 0
+            and len(confirmed_arc_eps) >= tot_eps
+            and set(range(1, tot_eps + 1)) <= confirmed_arc_eps
+        )
+
+        # 1. 源端行
+        for ent in entries:
+            if ent.get("side") != "source":
+                continue
+            src_path = normalize_dir_path(ent.get("norm_path") or "")
+            rec = rec_by_show_and_sn.get((src_path, sn))
+            ep_map = ent.get("episodes_by_season") or {}
+            ent_eps = set(int(x) for x in (ep_map.get(str(sn)) or ep_map.get(sn) or []) if str(x).isdigit())
+            if rec and not ent_eps:
+                try:
+                    re_json = json.loads(getattr(rec, "recognized_episodes_json", "[]") or "[]")
+                    ent_eps = {int(x) for x in re_json if str(x).isdigit()}
+                except Exception:
+                    pass
+
+            can_delete = False
+            delete_reason = ""
+            if status != "confirmed":
+                delete_reason = "请先在上方确认归档目标"
+            elif confirmation_mode == "intentional_coexist":
+                delete_reason = "已标记有意共存，保留源端"
+            elif not confirmed_target_found:
+                delete_reason = "已确认的归档目标在归档库中尚未实际创建"
+            elif not is_confirmed_target_full:
+                delete_reason = f"已确认归档目标未全季齐全（现有 {len(confirmed_arc_eps)}/{tot_eps or '?'} 集）"
+            elif ent_eps and not (ent_eps <= confirmed_arc_eps):
+                diff = sorted(ent_eps - confirmed_arc_eps)
+                delete_reason = f"源端含归档库未收录集数 {format_episodes_range(diff)}"
+            else:
+                can_delete = True
+                delete_reason = "归档目标已单独全季齐全且覆盖本源季内容，可安全清理"
+
+            cov_count = len(ent_eps)
+            cov_str = f"{cov_count}/{tot_eps or '?'}集"
+            if ent_eps:
+                cov_str += f"，{format_episodes_range(list(ent_eps))}"
+
+            missing_eps = [ep for ep in range(1, tot_eps + 1) if ep not in ent_eps] if tot_eps > 0 else []
+            rows.append({
+                "side": "source",
+                "label": "源端",
+                "path": src_path,
+                "season_number": sn,
+                "season_label": f"S{sn:02d}",
+                "covered_count": cov_count,
+                "total_episodes": tot_eps,
+                "coverage_text": cov_str,
+                "missing_text": format_episodes_range(missing_eps) if tot_eps > 0 else "未知",
+                "can_delete": can_delete,
+                "delete_block_reason": delete_reason,
+                "season_record_id": getattr(rec, "id", "") if rec else "",
+                "season_path": getattr(rec, "season_path", f"{src_path}/Season {sn}") if rec else f"{src_path}/Season {sn}",
+            })
+
+        # 2. 归档端行
+        for ent in entries:
+            if ent.get("side") != "archive":
+                continue
+            arc_path = normalize_dir_path(ent.get("norm_path") or "")
+            is_confirmed = bool(confirmed_target and arc_path == confirmed_target)
+            ep_map = ent.get("episodes_by_season") or {}
+            arc_eps = set(int(x) for x in (ep_map.get(str(sn)) or ep_map.get(sn) or []) if str(x).isdigit())
+
+            cov_count = len(arc_eps)
+            cov_str = f"{cov_count}/{tot_eps or '?'}集"
+            if arc_eps:
+                cov_str += f"，{format_episodes_range(list(arc_eps))}"
+
+            missing_eps = [ep for ep in range(1, tot_eps + 1) if ep not in arc_eps] if tot_eps > 0 else []
+            rows.append({
+                "side": "archive",
+                "label": "已确认归档目标" if is_confirmed else "归档库实存目录",
+                "path": arc_path,
+                "season_number": sn,
+                "season_label": f"S{sn:02d}",
+                "covered_count": cov_count,
+                "total_episodes": tot_eps,
+                "coverage_text": cov_str,
+                "missing_text": format_episodes_range(missing_eps) if tot_eps > 0 else "未知",
+                "is_confirmed_target": is_confirmed,
+                "can_delete": False,
+                "delete_block_reason": "已确认归档库实存目标" if is_confirmed else "归档库候补目录",
+                "season_record_id": "",
+                "season_path": "",
+            })
+
+        if status == "confirmed" and confirmed_target and not confirmed_target_found:
+            rows.append({
+                "side": "archive",
+                "label": "已确认归档目标（尚未实存）",
+                "path": confirmed_target,
+                "season_number": sn,
+                "season_label": f"S{sn:02d}",
+                "covered_count": 0,
+                "total_episodes": tot_eps,
+                "coverage_text": "尚未创建",
+                "missing_text": "未核实",
+                "is_confirmed_target": True,
+                "can_delete": False,
+                "delete_block_reason": "归档目标尚未在网盘物理创建，不提供删除依据",
+                "season_record_id": "",
+                "season_path": "",
+            })
+
+        matrix.append({
+            "season_number": sn,
+            "season_label": f"S{sn:02d}",
+            "total_episodes": tot_eps,
+            "rows": rows,
+        })
+
+    return matrix
+
+
 def serialize_directory_group(group: DirectoryGroup) -> dict[str, Any]:
     """序列化 DirectoryGroup ORM 对象供 API 与前端渲染使用。"""
     try:
@@ -434,8 +648,8 @@ def serialize_directory_group(group: DirectoryGroup) -> dict[str, Any]:
         "canonical_tmdb_year": str(ev.get("canonical_tmdb_year") or ""),
         "candidate_targets": candidates,
         "season_count": group.season_count or 0,
-        "confirmed_at": group.confirmed_at.isoformat() if group.confirmed_at else None,
-        "updated_at": group.updated_at.isoformat() if group.updated_at else None,
+        "confirmed_at": _safe_dt_iso(group, "confirmed_at"),
+        "updated_at": _safe_dt_iso(group, "updated_at"),
     }
 
 
@@ -531,11 +745,12 @@ async def enrich_directory_groups_from_db(
                     meta_by_tid[tid_str] = payload
 
     missing_tids = {t for t in tids if not meta_by_tid.get(t, {}).get("name")}
-    arc_parent_by_show: dict[str, str] = {}
-    if callable(scalars_fn) and (missing_tids or not settings.archive_root):
-        q_recs = scalars_fn(select(SeasonRecord).where(SeasonRecord.task_id == task_id))
-        if _inspect.isawaitable(q_recs):
-            for rec in (await q_recs).all():
+    task_season_records: list[Any] = []
+    if callable(scalars_fn):
+        q_all_recs = scalars_fn(select(SeasonRecord).where(SeasonRecord.task_id == task_id))
+        if _inspect.isawaitable(q_all_recs):
+            task_season_records = list((await q_all_recs).all())
+            for rec in task_season_records:
                 rtid = str(rec.tmdb_id or "").strip()
                 if rtid in missing_tids and rec.evidence_json:
                     try:
@@ -573,14 +788,14 @@ async def enrich_directory_groups_from_db(
                         arc_root = arc_parent_by_show[n_show]
                         src_root = posixpath.dirname(n_show)
                         break
-        enriched.append(
-            enrich_directory_group_dict(
-                g,
-                tmdb_meta=meta_by_tid.get(tid),
-                source_root=src_root,
-                archive_root=arc_root,
-            )
+        eg = enrich_directory_group_dict(
+            g,
+            tmdb_meta=meta_by_tid.get(tid),
+            source_root=src_root,
+            archive_root=arc_root,
         )
+        eg["coverage_matrix"] = build_group_coverage_matrix(eg, task_season_records)
+        enriched.append(eg)
     return enriched
 
 
@@ -691,6 +906,18 @@ async def sync_directory_groups_for_task(
             await db.delete(old)
 
     await db.flush()
+    # 显式重查当前任务下全部 DirectoryGroup，使所有 server_default 字段就绪并消除 MissingGreenlet
+    scalars_fn = getattr(db, "scalars", None)
+    if callable(scalars_fn):
+        q = scalars_fn(
+            select(DirectoryGroup)
+            .where(DirectoryGroup.task_id == task_id)
+            .execution_options(populate_existing=True)
+        )
+        if _inspect.isawaitable(q):
+            reloaded = list((await q).all())
+            if reloaded:
+                return reloaded
     return active_groups
 
 

@@ -4,7 +4,7 @@
 
 > **面向家庭影院与云原生 NAS（115网盘 / CloudDrive2 / MoviePilot / Emby / Jellyfin）的新一代智能影视媒体整理、跨库无损归档与双轨运维治理系统。**
 
-[![Version](https://img.shields.io/badge/Release-v2.5.21-6366f1.svg?style=flat-square&logo=github)](https://github.com/hailanbb/media-tools/releases)
+[![Version](https://img.shields.io/badge/Release-v2.5.22-6366f1.svg?style=flat-square&logo=github)](https://github.com/hailanbb/media-tools/releases)
 [![Docker](https://img.shields.io/badge/Docker-Supported-2496ed.svg?style=flat-square&logo=docker)](mediaflow-docker/)
 [![Windows](https://img.shields.io/badge/Windows-Native-0078d4.svg?style=flat-square&logo=windows)](mediaflow-win/)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776ab.svg?style=flat-square&logo=python)](https://www.python.org/)
@@ -219,13 +219,23 @@ MediaFlow 的每一项核心机制均遵循严谨的第一性原理设计方案�
 * 📒 [《MediaFlow批量补缺选种、站点与整季回退优化方案》](MediaFlow批量补缺选种、站点与整季回退优化方案-2026-11-12.md) —— 做种同档内省容量优先、动态六站扩展（含天空/观众）、整季安全回退与已有集保护；
 * 🧩 [《MediaFlow季号错配与跨条目集数核对方案》](MediaFlow季号错配与跨条目集数核对方案-2026-11-12.md) —— 作品归属冲突隔离、短标题防误绑、单季可逆跨条目映射、元数据失败态分层与只读重算；
 * 🔄 [《MediaFlow批量补缺完成刷新与待补清单优化方案》](MediaFlow批量补缺完成刷新与待补清单优化方案-2026-11-12.md) —— 推种前落盘意图、脱敏回执逐集扣减、真缺集待补与已推送待入库同页切换及一键核对入库；
-* 🧭 [《MediaFlow外文发行名误报与同一TMDB多目录复核方案》](MediaFlow外文发行名误报与同一TMDB多目录复核方案-2026-11-12.md) —— 显式 TMDB ID 外文发行名去误报、英文/多语言别名缓存、只读重评估，以及同 ID 多目录合并确认门禁与漂移自动失效。
+* 🧭 [《MediaFlow外文发行名误报与同一TMDB多目录复核方案》](MediaFlow外文发行名误报与同一TMDB多目录复核方案-2026-11-12.md) —— 显式 TMDB ID 外文发行名去误报、英文/多语言别名缓存、只读重评估，以及同 ID 多目录合并确认门禁与漂移自动失效；
+* 🛡️ [《MediaFlow异常剧集自动核查与多目录逐季覆盖清理方案》](MediaFlow异常剧集自动核查与多目录逐季覆盖清理方案-2026-11-13.md) —— 初检自动核查 Emby 分集覆盖、0 视频直转待补、多目录逐季覆盖矩阵与单季物理安全清理门禁。
 
 ---
 
 ## 📜 版本演进历史 (Changelog)
 
-### 🚀 最新稳定版：v2.5.21 (2026-11-13)
+### 🚀 最新稳定版：v2.5.22 (2026-11-13)
+
+* **异常剧集自动核查 Emby 分集覆盖与多目录逐季覆盖安全清理**：
+  * **初检主链路自动打通 Emby 分集覆盖核查（`moviepilot` + `inspector`）**：彻底取代卡面手动点击。对带 TMDB ID 且正片为 0（如仅剩 NFO 的空壳目录）或正片有缺失的目录，初检时自动远程核查 Emby；若 Emby 全无直接转入「真缺集待补」；若 Emby 部分收录则精准扣减已收录集仅补差集（如 1–8 集已在 Emby 中则仅补 9–12 集）；若各端并集已齐全则从待补清单移出并明确标注文案，无需人工反复探测；
+  * **多目录组展开渲染逐季覆盖对照表与安全门禁矩阵（`directory_governance` + `tasks` + `frontend`）**：在展开已确认目录组时，按季度直观展示源端物理路径、归档目标路径、正片覆盖范围、缺号情况及可清理判定（如 `可删除（已完全覆盖）` / `不可删除（归档目标自身缺失）`）；
+  * **单季安全覆盖清理严密门禁（`tasks.py`）**：提供 `POST /api/tasks/{task_id}/directory-groups/{group_id}/clean-source-season` 接口，执行严格物理安全校验：必须已指定归档目标、选定归档目标自身必须单独全季齐全（1..total）、归档目标必须完全覆盖源端现有集数，且源端独有的外挂字幕自动安全迁移至归档目标后，才允许物理删除源端单季目录，防止任何误删；
+  * **前端交互降噪与去伪存真（`frontend/index.html`）**：清洗历史数据中无意义的引导文案（如“想保留这些内容可直接标记已手动处理”）；移除异常卡片上的冗余主按钮（“查 Emby 转待补”与“处理说明”）；将卡面外层“人工映射”收纳进“详情”弹窗，界面保持极简紧凑；
+  * **修复目录组重算 500 与异步 Session 属性懒加载隐患（`directory_governance.py`）**：解决 SQLAlchemy 异步刷新下读取 ORM 属性可能抛出的 `MissingGreenlet` 异常，保证批量重算与目录组序列化高可靠性。
+
+#### v2.5.21 (2026-11-13)
 
 * **多目录确认入口唯一收口于「待复核清理」与季卡跨页精准定位**：
   * **唯一处理位置收口于「待复核清理」（`frontend/index.html`）**：彻底解决跨分类切换时共用面板全量平铺霸屏问题；在「待复核清理」内提供可折叠的「待确认归档目标」独立专区，与逐季重复清理彻底分开计数（如 `0 处需清理 · 33组待确认`），且目录组卡片不参与“全选清理冗余”批量勾选；

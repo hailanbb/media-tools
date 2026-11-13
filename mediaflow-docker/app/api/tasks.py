@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import posixpath
 import uuid
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
@@ -235,6 +236,7 @@ async def _apply_in_place_recalculate(
     )
 
     diag = None
+    remote_error = ""
     if fetch_remote:
         try:
             from app.clients.clouddrive2 import CloudDrive2Client
@@ -264,7 +266,9 @@ async def _apply_in_place_recalculate(
                 await cd2.close()
                 await mp.close()
                 await tmdb.close()
-        except Exception:
+        except Exception as exc:
+            remote_error = f"{type(exc).__name__}: {exc}"
+            log.warning("远程实时核查重算未完成 [任务 %s 季记录 %s (%s)]: %s", rec.task_id, rec.id, rec.show_name, exc, exc_info=True)
             diag = None
 
     now_dt = datetime.now(timezone.utc)
@@ -564,7 +568,13 @@ async def _run_task_reevaluate_impl(
                     }
                 )
 
-    dir_groups = await _rebuild_offline_directory_groups(db, task_id, all_rows)
+    if target_set is not None and len(target_set) == 1:
+        groups = list((await db.scalars(select(DirectoryGroup).where(DirectoryGroup.task_id == task_id))).all())
+        dir_groups = await enrich_directory_groups_from_db(
+            db, task_id, [serialize_directory_group(g) for g in groups]
+        )
+    else:
+        dir_groups = await _rebuild_offline_directory_groups(db, task_id, all_rows)
     active_after = [r for r in all_rows if r.status not in preserved_statuses]
     after_counts = dict(Counter(r.status for r in active_after))
     task_summary = await refresh_task_summary(task_id, db)
@@ -678,6 +688,178 @@ async def confirm_task_directory_group(
             else f"已将 TMDB {updated.tmdb_id} 的目录组标记为“有意共存”（仍保留覆盖与清理保护）"
         ),
     }
+
+
+class DirectoryGroupCleanSeasonRequest(BaseModel):
+    season_record_id: str
+
+
+@router.post("/{task_id}/directory-groups/{group_id}/clean-source-season")
+async def clean_directory_group_source_season(
+    task_id: str,
+    group_id: str,
+    body: DirectoryGroupCleanSeasonRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """通过已确认的多目录归档目标，对指定源端单季执行严格覆盖核验与安全清理。"""
+    task = await db.get(Task, task_id)
+    group = await db.get(DirectoryGroup, group_id)
+    if not task or not group or group.task_id != task_id:
+        raise HTTPException(status_code=404, detail="多目录确认组不存在")
+
+    if group.status != "confirmed" or group.confirmation_mode != "use_archive_target" or not group.confirmed_target_path:
+        raise HTTPException(status_code=400, detail="该目录组尚未确认唯一的有效归档目标目录，禁止删除源端")
+
+    if group.invalidated_reason:
+        raise HTTPException(status_code=400, detail=f"该目录组确认已失效：{group.invalidated_reason}，请先重新确认")
+
+    rec = await db.get(SeasonRecord, body.season_record_id)
+    if not rec or rec.task_id != task_id:
+        raise HTTPException(status_code=404, detail="源季记录不存在")
+
+    try:
+        entries = json.loads(group.paths_json or "[]")
+    except Exception:
+        entries = []
+    source_paths = {
+        normalize_dir_path(e.get("norm_path") or "")
+        for e in entries
+        if isinstance(e, dict) and e.get("side") == "source"
+    }
+    if normalize_dir_path(rec.show_path) not in source_paths:
+        raise HTTPException(status_code=400, detail="该源季不属于当前目录组的源端路径")
+
+    settings = get_settings()
+    norm_source_root = posixpath.normpath(settings.source_root.rstrip("/")) if settings.source_root else ""
+    norm_archive_root = posixpath.normpath(settings.archive_root.rstrip("/")) if settings.archive_root else ""
+    norm_src = posixpath.normpath(rec.season_path)
+    norm_confirmed_target = posixpath.normpath(group.confirmed_target_path)
+
+    # 门禁 1: 路径隔离与根目录范围检查
+    if not norm_source_root or not (norm_src.startswith(norm_source_root + "/") and norm_src != norm_source_root):
+        raise HTTPException(status_code=400, detail="源季路径非受控源根严格子目录，安全拦截")
+
+    if not norm_archive_root or not (norm_confirmed_target.startswith(norm_archive_root + "/") and norm_confirmed_target != norm_archive_root):
+        raise HTTPException(status_code=400, detail="已确认归档目标非受控归档根严格子目录，安全拦截")
+
+    if norm_src == norm_confirmed_target or norm_src.startswith(norm_confirmed_target + "/") or norm_confirmed_target.startswith(norm_src + "/"):
+        raise HTTPException(status_code=400, detail="严重危险拦截：源路径与归档目标路径重叠，拒绝删除")
+
+    # 门禁 2: 实盘文件核验
+    from app.clients.clouddrive2 import CloudDrive2Client
+    from app.core.episode_parser import is_video_file, is_subtitle_file, parse_episode
+    from app.core.inspector import _parse_season_number, _verified_video
+    from app.core.segments import segment_number
+
+    cd2 = CloudDrive2Client()
+    try:
+        target_seasons = await cd2.list_files(norm_confirmed_target, force_refresh=True)
+        target_season_dirs = [
+            it for it in target_seasons
+            if it.get("isDirectory") and _parse_season_number(it.get("name") or "") == rec.season_number
+        ]
+        if not target_season_dirs:
+            raise HTTPException(status_code=400, detail=f"已确认归档目标中未找到第 S{rec.season_number:02d} 季目录，无法核实全季覆盖")
+        archive_season_path = target_season_dirs[0]["path"]
+
+        src_files = await cd2.list_files(rec.season_path, force_refresh=True)
+        target_files = await cd2.list_files(archive_season_path, force_refresh=True)
+
+        if any(f.get("isDirectory") for f in src_files):
+            sub_names = [f["name"] for f in src_files if f.get("isDirectory")]
+            raise HTTPException(status_code=400, detail=f"源季内存在子目录 ({sub_names})，需要先人工核实，安全拦截")
+
+        src_video_eps: set[int] = set()
+        src_subs: list[dict] = []
+        for sf in src_files:
+            sf_name = sf.get("name", "")
+            if is_video_file(sf_name):
+                p_sf = parse_episode(sf_name, sf.get("path", ""), sf.get("size", 0))
+                if _verified_video(p_sf, rec.season_number) and not segment_number(sf_name):
+                    src_video_eps.update(p_sf.episode_numbers)
+                else:
+                    raise HTTPException(status_code=400, detail=f"源端含无法确认或分段的正片视频 ({sf_name})，安全拦截")
+            elif is_subtitle_file(sf_name):
+                src_subs.append(sf)
+
+        target_video_eps: set[int] = set()
+        target_sub_sizes = {}
+        for tf in target_files:
+            if tf.get("isDirectory"):
+                continue
+            tf_name = tf.get("name", "")
+            if is_video_file(tf_name):
+                p_tf = parse_episode(tf_name, tf.get("path", ""), tf.get("size", 0))
+                if _verified_video(p_tf, rec.season_number) and not segment_number(tf_name):
+                    target_video_eps.update(p_tf.episode_numbers)
+            elif is_subtitle_file(tf_name):
+                target_sub_sizes[tf_name.casefold()] = tf.get("size")
+
+        tot = int(rec.total_episodes or 0)
+        if tot <= 0:
+            raise HTTPException(status_code=400, detail="该季官方总集数未知，无法断定归档端单独齐全")
+        expected_all = set(range(1, tot + 1))
+        if not (expected_all <= target_video_eps):
+            missing_in_target = sorted(expected_all - target_video_eps)
+            raise HTTPException(status_code=400, detail=f"已确认归档目标未全季齐全（缺少集数: {missing_in_target}），不满足删除条件")
+
+        if src_video_eps and not (src_video_eps <= target_video_eps):
+            uncovered = sorted(src_video_eps - target_video_eps)
+            raise HTTPException(status_code=400, detail=f"源端含有归档目标未包含的集数 {uncovered}，拒绝删除")
+
+        for sub in src_subs:
+            s_name = sub.get("name", "")
+            if s_name.casefold() not in target_sub_sizes:
+                try:
+                    await cd2.move_file(sub.get("path"), archive_season_path, skip_existing=True)
+                except Exception:
+                    pass
+
+        try:
+            del_res = await cd2.delete_file(rec.season_path)
+            if isinstance(del_res, dict) and not del_res.get("success", True):
+                raise HTTPException(status_code=500, detail=f"网盘删除源季目录失败: {del_res.get('message') or '未知错误'}")
+            elif del_res is False:
+                raise HTTPException(status_code=500, detail="网盘删除源季目录失败")
+        except HTTPException:
+            raise
+        except Exception as del_err:
+            raise HTTPException(status_code=500, detail=f"网盘删除源季目录失败: {del_err}")
+
+        op = OperationLog(
+            task_id=task_id,
+            season_record_id=rec.id,
+            action="clean_source_redundant",
+            status="completed",
+            detail_json=json.dumps({
+                "mode": "directory_group_verified_clean",
+                "show": rec.show_name,
+                "season": rec.season_number,
+                "source_path": rec.season_path,
+                "archive_target_path": archive_season_path,
+                "deleted_video_count": len(src_video_eps),
+                "target_video_count": len(target_video_eps),
+            }, ensure_ascii=False),
+        )
+        db.add(op)
+        rec.status = "cleaned_redundant"
+        rec.status_detail = f"已通过多目录归档覆盖核验清理源端残留（已确认归档目标 {len(target_video_eps)}/{tot} 全季齐全）"
+        summary = await refresh_task_summary(task_id, db)
+        await db.commit()
+
+        reloaded_group = await db.get(DirectoryGroup, group_id)
+        enriched = await enrich_directory_groups_from_db(
+            db, task_id, [serialize_directory_group(reloaded_group)] if reloaded_group else []
+        )
+        return {
+            "ok": True,
+            "success": True,
+            "message": f"已成功安全清理源端 {rec.show_name} S{rec.season_number:02d} 季目录",
+            "group": enriched[0] if enriched else None,
+            "summary": summary,
+        }
+    finally:
+        await cd2.close()
 
 
 class SeasonMappingUpsertRequest(BaseModel):

@@ -1383,27 +1383,45 @@ async def run_inspection(
                                 "error": str(ms_res.get("error") or ""),
                             }
                             if ms_res.get("checked"):
-                                if emby_eps:
+                                all_covered = sorted(set(recognized) | set(emby_eps))
+                                expected_set = set(range(1, total_eps + 1))
+                                actual_missing = sorted(expected_set - set(all_covered))
+                                if not all_covered:
+                                    if season_finished:
+                                        status = "download_needed"
+                                        missing = list(range(1, total_eps + 1))
+                                        detail = (
+                                            f"归档库与媒体服务器 (Emby) 均确认第 S{season_num:02d} 季 0 集入库"
+                                            f"（{inv_desc}），缺失全部 {total_eps} 集，已自动转入「真缺集待补」。"
+                                        )
+                                    else:
+                                        status = "archive_check"
+                                        detail = (
+                                            f"资料总集数 {total_eps}；未找到对应归档季。{inv_desc}。"
+                                            f"媒体服务器 (Emby) 当前同样 0 集，且官方尚未确认本季完结，按播出规则留源跟踪。"
+                                        )
+                                elif not actual_missing:
                                     status = "archive_check"
-                                    sample = ", ".join(f"E{e:02d}" for e in emby_eps[:6])
-                                    suffix = "..." if len(emby_eps) > 6 else ""
+                                    missing = []
                                     detail = (
-                                        f"资料总集数 {total_eps}；未找到对应归档季。{inv_desc}。"
-                                        f"媒体服务器 (Emby) 已有第 S{season_num:02d} 季共 {len(emby_eps)} 集"
-                                        f"（{sample}{suffix}），疑似正片存放在 Emby 关联的其他归档目录，暂不转入补缺。"
+                                        f"资料总集数 {total_eps}；Emby 已收录全部 {len(emby_eps)} 集（无需补缺），"
+                                        f"但归档库物理正片尚未直接定位，已移出补缺待办。"
                                     )
                                 elif season_finished:
                                     status = "download_needed"
-                                    missing = list(range(1, total_eps + 1))
+                                    missing = actual_missing
+                                    sample_missing = f"E{actual_missing[0]:02d}–E{actual_missing[-1]:02d}" if len(actual_missing) > 1 and actual_missing == list(range(actual_missing[0], actual_missing[-1] + 1)) else ", ".join(f"E{e:02d}" for e in actual_missing[:4])
                                     detail = (
-                                        f"归档库与媒体服务器 (Emby) 均确认第 S{season_num:02d} 季 0 集入库"
-                                        f"（{inv_desc}），缺失全部 {total_eps} 集：{missing}，已直接转入「真缺集待补」。"
+                                        f"全 {total_eps} 集已播毕；各端已覆盖 {len(all_covered)} 集"
+                                        f"（源端 {len(recognized)}、Emby {len(emby_eps)}），实缺 {len(actual_missing)} 集"
+                                        f"（{sample_missing}），已转入「真缺集待补」。"
                                     )
                                 else:
-                                    status = "archive_check"
+                                    status = "airing"
+                                    missing = actual_missing
                                     detail = (
-                                        f"资料总集数 {total_eps}；未找到对应归档季。{inv_desc}。"
-                                        f"媒体服务器 (Emby) 当前同样 0 集，且官方尚未确认本季完结，暂不触发整季待补。"
+                                        f"连载中：各端已覆盖 {len(all_covered)}/{total_eps} 集，"
+                                        f"尚缺 {len(actual_missing)} 集，留源跟踪。"
                                     )
                             else:
                                 status = "archive_check"
@@ -1456,11 +1474,11 @@ async def run_inspection(
                 detail = "归档正片已齐，源端只留元数据附件，已完成"
             if status == "archive_check":
                 if not parsed_episodes and not any(i["isDirectory"] for i in season_files):
-                    detail += " 如打算收藏本季，请查找正片所在目录；仅保留附件时可标记已手动处理。"
+                    detail += " 源端仅见附件，未找到正片文件。"
                 elif parsed_episodes and all(ep.is_special or ep.is_extra for ep in parsed_episodes):
-                    detail += " 源端只找到特别篇或花絮。想保留这些内容可直接标记已手动处理。"
+                    detail += " 源端仅含花絮或特别篇，尚未定位正片。"
                 elif archive_verified:
-                    detail += " 归档已有对应集号，源端仍有未核实内容。请先检查分段、子目录或异常大小的文件。"
+                    detail += " 归档已有对应集号，源端仍有未核实内容（如分段、子目录或异常文件）。"
 
             # 明确区分“查询失败”“季未收录”“季存在集数未公布”的元数据状态
             meta_status = "ok"

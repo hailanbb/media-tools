@@ -476,11 +476,14 @@ class MoviePilotClient:
             res = await self._post("/api/v1/mediaserver/exists_remote", json=payload)
             if not isinstance(res, dict):
                 return {"checked": False, "season_episodes": {}, "error": "响应格式异常"}
-            if res.get("success") is False and "data" not in res:
-                return {"checked": False, "season_episodes": {}, "error": str(res.get("message") or "查询失败")}
+            if res.get("success") is False:
+                return {"checked": False, "season_episodes": {}, "error": str(res.get("message") or "MoviePilot 查询失败")}
+            raw_dict = res.get("data") if (isinstance(res.get("data"), dict)) else res
+            if not isinstance(raw_dict, dict):
+                return {"checked": False, "season_episodes": {}, "error": "数据体格式异常"}
             season_episodes: dict[int, list[int]] = {}
-            for k, vals in res.items():
-                if not str(k).lstrip("-").isdigit() or not isinstance(vals, list):
+            for k, vals in raw_dict.items():
+                if not str(k).lstrip("-").isdigit() or not isinstance(vals, (list, tuple, set)):
                     continue
                 sn = int(k)
                 eps = sorted({int(x) for x in vals if str(x).isdigit()})
@@ -488,7 +491,7 @@ class MoviePilotClient:
                     season_episodes[sn] = eps
             return {"checked": True, "season_episodes": season_episodes, "error": ""}
         except Exception as exc:
-            return {"checked": False, "season_episodes": {}, "error": type(exc).__name__}
+            return {"checked": False, "season_episodes": {}, "error": f"{type(exc).__name__}: {exc}"}
 
     # ── 系统 ──────────────────────────────────────────────
     async def get_system_info(self) -> dict:

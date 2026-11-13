@@ -161,7 +161,7 @@ console.log("===================================================================
     escapeHtml: String, updateSelection() {}, findItemByRecordId: () => item,
     openModal: id => {context.openedModal = id;}};
   vm.createContext(context);
-  vm.runInContext(source('renderEpisodesList') + ';renderEpisodesList()', context);
+  vm.runInContext(source('cleanSeasonStatusNote') + ';' + source('renderEpisodesList') + ';renderEpisodesList()', context);
   assert(getNode('episodeItemContainer').innerHTML.includes("markSeasonHandled('record', this)"));
   context.currentCategory = 'download';
   vm.runInContext('renderEpisodesList()', context);
@@ -233,7 +233,7 @@ console.log("===================================================================
   assert(dgHtml.includes('type="radio" name="dirGroupTargetRadio" value="/dst/谎言 (2026) [tmdbid=307478]" checked'));
   assert(!dgHtml.includes('value="/dst/完美的谎言 (2026) [tmdbid=307478]" checked'));
 
-  // 验证 0 视频带 [tmdbid=...] 异常卡片展示「查 Emby 转待补」按钮，含视频项则不展示
+  // 验证 v2.5.22 阶段三要求：初检已全自动打通核查链条并自动归入真缺集，卡片表面彻底移除「查 Emby 转待补」与多余「处理说明」
   context.currentCategory = 'anomaly';
   context.taskList = [{
     id: 'task',
@@ -242,15 +242,17 @@ console.log("===================================================================
         {
           id: 'nfo-shell', show: '抗战 (2025)', season: 'S01', tmdbId: '303491',
           statusText: '0/5集', isAnomaly: true, anomalySubtype: 'file_check',
-          actionType: 'inspect_info', actionText: '处理说明',
+          actionType: 'inspect_info', actionText: '详情',
           pathA: '/src/抗战 (2025) [tmdbid=303491]/Season 1',
+          note: '源端仅见附件，未找到正片文件；想保留这些内容可直接标记已手动处理。',
           raw: { total_episodes: 5, recognized_episodes: [], missing_episodes: [1, 2, 3, 4, 5], evidence: {} }
         },
         {
           id: 'has-video', show: '有片待查 (2025)', season: 'S01', tmdbId: '100',
           statusText: '1/5集', isAnomaly: true, anomalySubtype: 'file_check',
-          actionType: 'inspect_info', actionText: '处理说明',
+          actionType: 'inspect_info', actionText: '详情',
           pathA: '/src/有片待查/Season 1',
+          note: '第 1 集有多个版本',
           raw: { total_episodes: 5, recognized_episodes: [1], missing_episodes: [2, 3, 4, 5], evidence: {} }
         }
       ]
@@ -260,9 +262,10 @@ console.log("===================================================================
   context.findItemByRecordId = id => context.taskList[0].categories.anomaly.find(x => x.id === id);
   vm.runInContext("renderEpisodesList()", context);
   const anomHtml = getNode('episodeItemContainer').innerHTML;
-  assert(anomHtml.includes("recheckEmbyForSeason('nfo-shell', this)"), '0视频空壳异常卡应显示查Emby转待补按钮');
-  assert(!anomHtml.includes("recheckEmbyForSeason('has-video', this)"), '含已识别视频的异常卡不应误显示查Emby转待补按钮');
-  console.log('✓ 手动处理按钮、缺集删除按钮、无冲突详情降噪、多目录单选与0视频Emby转待补通过');
+  assert(!anomHtml.includes("recheckEmbyForSeason('nfo-shell', this)"), 'v2.5.22 异常卡片表面应移除查Emby转待补按钮');
+  assert(!anomHtml.includes("recheckEmbyForSeason('has-video', this)"), '含已识别视频的异常卡不应显示查Emby转待补按钮');
+  assert(!anomHtml.includes("可直接标记已手动处理"), '异常卡片应通过 cleanSeasonStatusNote 过滤诱导手动处理的同义文案');
+  console.log('✓ 手动处理按钮、缺集删除按钮、无冲突详情降噪、多目录单选与0视频Emby核查自动化降噪通过');
 
   // ======================================================================
   // 验证 v2.5.21 目录组唯一收口待复核清理、真缺集待补隐藏与跨页跳转定位
@@ -335,7 +338,41 @@ console.log("===================================================================
           title: '已确认综艺',
           status: 'confirmed',
           confirmed_target_path: '/dst/已确认综艺',
-          entries: [{ side: 'archive', norm_path: '/dst/已确认综艺', seasons: [1] }]
+          entries: [
+            { side: 'source', norm_path: '/src/已确认综艺/Season 1', seasons: [1], episodes_by_season: { '1': [1,2,3] } },
+            { side: 'archive', norm_path: '/dst/已确认综艺', seasons: [1], episodes_by_season: { '1': [1,2,3] } }
+          ],
+          coverage_matrix: [
+            {
+              side: 'source',
+              label: '源端',
+              path: '/src/已确认综艺/Season 1',
+              season_number: 1,
+              season_label: 'S01',
+              covered_count: 3,
+              total_episodes: 3,
+              coverage_text: '3/3集，E01–E03',
+              missing_text: '无',
+              can_delete: true,
+              delete_block_reason: '归档目标已单独全季齐全且覆盖本源季内容，可安全清理',
+              season_record_id: 'rec-done-s01',
+              season_path: '/src/已确认综艺/Season 1'
+            },
+            {
+              side: 'archive',
+              label: '已确认归档目标',
+              path: '/dst/已确认综艺',
+              season_number: 1,
+              season_label: 'S01',
+              covered_count: 3,
+              total_episodes: 3,
+              coverage_text: '3/3集，E01–E03',
+              missing_text: '无',
+              is_confirmed_target: true,
+              can_delete: false,
+              delete_block_reason: '已确认归档库实存目标'
+            }
+          ]
         }
       ]
     };
@@ -346,6 +383,7 @@ console.log("===================================================================
       currentTaskId: 'task-variety',
       taskList: [sampleTask],
       escapeHtml: String,
+      cleanSeasonStatusNote: str => str,
       updateSelection() {},
       findItemByRecordId: id => sampleTask.categories.download.find(x => x.id === id),
       setTimeout: (fn) => fn(),
@@ -356,6 +394,7 @@ console.log("===================================================================
     };
 
     const funcs = [
+      'cleanSeasonStatusNote', 'confirmCleanDirectoryGroupSourceSeason',
       'getCategoryName', 'toggleDirectoryGroupsSection', 'setDirectoryGroupViewTab',
       'toggleDirectoryGroupItemDetail', 'locateDirectoryGroupInReview',
       'returnFromDirectoryGroupSection', 'filterResultCategory',
@@ -403,6 +442,19 @@ console.log("===================================================================
     assert.strictEqual(dgContext._dirGroupReturnCategory, null, '返回后来源分类必须被清空');
     assert(getDgNode('directoryGroupsContainer').classList.contains('hidden'), '返回 download 后目录组面板必须重新隐藏');
 
-    console.log('✓ 目录组唯一收口待复核清理、缺集页隐藏、跨页定位跳转与返回原分类契约测试全部通过');
+    // 6. 验证已确认目录组展开时渲染逐路径逐季对照表格与单季清理按钮
+    dgContext.currentCategory = 'review';
+    dgContext._directoryGroupActiveTab = 'resolved';
+    dgContext._expandedGroupIds.add('grp-already-done');
+    vm.runInContext('renderEpisodesList()', dgContext);
+    const resolvedPanelHtml = getDgNode('directoryGroupsContainer').innerHTML;
+    assert(resolvedPanelHtml.includes('位置 / 物理路径'), '目录组详情展开必须包含对照表格表头「位置 / 物理路径」');
+    assert(resolvedPanelHtml.includes('正片覆盖'), '目录组详情展开必须包含表头「正片覆盖」');
+    assert(resolvedPanelHtml.includes('核验状态 / 操作'), '目录组详情展开必须包含表头「核验状态 / 操作」');
+    assert(resolvedPanelHtml.includes('confirmCleanDirectoryGroupSourceSeason'), '符合单独全季齐全且覆盖的源端必须挂载 confirmCleanDirectoryGroupSourceSeason');
+    assert(resolvedPanelHtml.includes('删除源端（本季）'), '可清理源端行必须展示「删除源端（本季）」操作按钮');
+    assert(resolvedPanelHtml.includes('✓ 选定目标'), '已确认归档目标必须标明「✓ 选定目标」');
+
+    console.log('✓ 目录组唯一收口待复核清理、缺集页隐藏、跨页定位跳转、逐季覆盖矩阵与单季删除源端契约测试全部通过');
   }
 }

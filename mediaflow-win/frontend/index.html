@@ -109,7 +109,7 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.21</span>
+              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.22</span>
             </div>
             <!-- 完善后的命名 -->
             <p class="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">智能媒体库整理与归档工作台</p>
@@ -1139,6 +1139,16 @@
         .replace(/'/g, '&#39;');
     }
 
+    function cleanSeasonStatusNote(str) {
+      if (!str || typeof str !== 'string') return '';
+      return str
+        .replace(/[；;，, ]*想保留这些内容可直接标记已手动处理[。.]*/g, '')
+        .replace(/[；;，, ]*可直接标记已手动处理[。.]*/g, '')
+        .replace(/[；;，, ]*仅保留附件时可标记已手动处理[。.]*/g, '')
+        .replace(/[；;，, ]*可保留源端附件[。.]*/g, '')
+        .trim();
+    }
+
     let currentTaskId = null;
     let currentCategory = 'archive';
     let currentGapView = 'todo';
@@ -1484,7 +1494,7 @@
             const missing = s.missing_episodes || [];
             const dup = s.duplicate_episodes || [];
             const total = s.total_episodes || null;
-            let note = s.status_detail || '';
+            let note = cleanSeasonStatusNote(s.status_detail || '');
             const recEps = s.recognized_episodes || [];
             const maxRec = recEps.length > 0 ? Math.max(...recEps) : 0;
             const gapState = s.gap_fill_state || null;
@@ -1496,7 +1506,7 @@
             // 旧初检只保存视频数量，不能据此推断归档集数或残留文件类型。
             const legacyCheck = s.status === 'review_needed' && note.endsWith('但源端未识别到正片集号，需人工复核');
             if (legacyCheck && s.local_episode_count === 0) {
-              note = '上次初检在源季本层找到 0 个视频。请重新初检核对归档情况；可保留源端附件。';
+              note = '上次初检在源季本层找到 0 个视频。请重新初检核对归档情况。';
             }
             const catKey = seasonCategory(s.status, legacyCheck);
             if (!catKey) continue;
@@ -1505,7 +1515,7 @@
 
             let actionType = 'archive', actionText = '一键归档';
             if (catKey === 'anomaly') {
-              if (anomalySubtype === 'file_check') { actionType = 'inspect_info'; actionText = '处理说明'; }
+              if (anomalySubtype === 'file_check') { actionType = 'inspect_info'; actionText = '详情'; }
               else { actionType = 'calibrate'; actionText = '校准集数'; }
             } else if (catKey === 'review') { actionType = 'clean'; actionText = '清理冗余'; }
             else if (catKey === 'download') { actionType = 'download'; actionText = '推送补缺'; }
@@ -2157,6 +2167,68 @@
             </div>`;
         }).join('');
 
+        let detailsContentHtml = '';
+        if (Array.isArray(g.coverage_matrix) && g.coverage_matrix.length > 0) {
+          const matrixRows = g.coverage_matrix.map(row => {
+            const isSource = row.side === 'source';
+            const badgeCls = isSource
+              ? 'bg-sky-100 dark:bg-sky-900/50 text-sky-700 dark:text-sky-300'
+              : (row.is_confirmed_target
+                  ? 'bg-emerald-100 dark:bg-emerald-900/50 text-emerald-700 dark:text-emerald-300'
+                  : 'bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-300');
+            const sideLabel = isSource
+              ? '源端'
+              : (row.is_confirmed_target ? '已确认归档目标' : '归档库候补');
+
+            let opCellHtml = '';
+            if (isSource) {
+              if (row.can_delete) {
+                opCellHtml = `
+                  <button type="button" onclick="confirmCleanDirectoryGroupSourceSeason('${escapeHtml(g.id)}', '${escapeHtml(row.season_record_id || '')}', '${escapeHtml(row.path || '')}', '${escapeHtml(row.season_label || '')}', '${escapeHtml(g.confirmed_target_path || '')}')" class="px-2.5 py-1 rounded-lg bg-purple-600 hover:bg-purple-700 text-white font-semibold text-xs shadow-xs transition flex items-center gap-1 ml-auto">
+                    <i class="fa-solid fa-trash-can text-[10px]"></i>
+                    <span>删除源端（本季）</span>
+                  </button>`;
+              } else {
+                opCellHtml = `<span class="text-slate-400 dark:text-slate-500 text-[11px] block text-right" title="${escapeHtml(row.delete_block_reason || '')}">${escapeHtml(row.delete_block_reason || '保留源端')}</span>`;
+              }
+            } else {
+              opCellHtml = row.is_confirmed_target
+                ? `<span class="text-emerald-600 dark:text-emerald-400 font-semibold text-[11px] block text-right">✓ 选定目标</span>`
+                : `<span class="text-slate-400 dark:text-slate-500 text-[11px] block text-right">候补目录</span>`;
+            }
+
+            return `
+              <tr class="hover:bg-slate-50/50 dark:hover:bg-slate-800/40 transition">
+                <td class="py-2 px-2.5 space-y-0.5">
+                  <div class="inline-block px-1.5 py-0.5 rounded text-[10px] font-sans font-semibold ${badgeCls}">${sideLabel}</div>
+                  <div class="font-mono text-slate-700 dark:text-slate-200 text-[11px] break-all">${escapeHtml(row.path || '')}</div>
+                </td>
+                <td class="py-2 px-2 font-mono font-semibold text-slate-900 dark:text-white">${escapeHtml(row.season_label || 'S01')}</td>
+                <td class="py-2 px-2.5 font-mono text-slate-700 dark:text-slate-300">${escapeHtml(row.coverage_text || '-')}</td>
+                <td class="py-2 px-2.5 font-mono ${row.missing_text === '无' ? 'text-emerald-600 dark:text-emerald-400 font-semibold' : 'text-slate-500 dark:text-slate-400'}">${escapeHtml(row.missing_text || '-')}</td>
+                <td class="py-2 px-2.5 text-right">${opCellHtml}</td>
+              </tr>`;
+          }).join('');
+
+          detailsContentHtml = `
+            <div class="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800">
+              <table class="w-full text-left border-collapse text-[11px]">
+                <thead class="bg-slate-100/80 dark:bg-slate-800/80 text-slate-600 dark:text-slate-300 font-semibold">
+                  <tr>
+                    <th class="py-2 px-2.5">位置 / 物理路径</th>
+                    <th class="py-2 px-2 w-14">季度</th>
+                    <th class="py-2 px-2.5">正片覆盖</th>
+                    <th class="py-2 px-2.5">缺号</th>
+                    <th class="py-2 px-2.5 text-right">核验状态 / 操作</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-100 dark:divide-slate-800">${matrixRows}</tbody>
+              </table>
+            </div>`;
+        } else {
+          detailsContentHtml = `<div class="space-y-1.5">${entriesHtml}</div>`;
+        }
+
         return `
           <div id="dir-group-card-${escapeHtml(g.id)}" class="rounded-xl p-3 border ${borderCls} shadow-xs transition space-y-2.5">
             <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
@@ -2182,7 +2254,7 @@
             ${isExpanded ? `
               <div class="pt-2 border-t border-slate-100 dark:border-slate-800/80 space-y-2">
                 ${g.invalidated_reason ? `<div class="text-[11px] text-rose-600 dark:text-rose-400 font-medium">${escapeHtml(g.invalidated_reason)}</div>` : ''}
-                <div class="space-y-1.5">${entriesHtml}</div>
+                ${detailsContentHtml}
               </div>
             ` : ''}
           </div>`;
@@ -2227,6 +2299,40 @@
             </div>
           ` : ''}
         </div>`;
+    }
+
+    async function confirmCleanDirectoryGroupSourceSeason(groupId, recordId, srcPath, seasonLabel, targetPath) {
+      if (!currentTaskId || !groupId || !recordId) {
+        alert('缺少任务或单季信息，无法执行清理');
+        return;
+      }
+      const promptText = `【安全核验通过，确认删除源端单季】\n\n` +
+        `• 目标归档路径（已单独全季齐全）：\n  ${targetPath || '-'}\n` +
+        `• 拟删除源端路径：\n  ${srcPath || '-'} (${seasonLabel})\n\n` +
+        `安全规则保障：\n` +
+        `1. 目标归档目录已单独全季齐全，且已完全覆盖本源季的所有集数；\n` +
+        `2. 源端独有的外挂字幕将自动安全转移至归档目录；\n` +
+        `3. 仅删除该源端单季目录，不级联删除整剧或其他季度。\n\n` +
+        `是否确认删除此源端单季？`;
+      if (!confirm(promptText)) return;
+
+      try {
+        const res = await api(`/api/tasks/${currentTaskId}/directory-groups/${groupId}/clean-source-season`, {
+          method: 'POST',
+          body: JSON.stringify({ season_record_id: recordId })
+        });
+        if (res && (res.ok || res.success)) {
+          alert(res.message || '源端单季清理完成');
+          const task = taskList.find(t => t.id === currentTaskId);
+          if (task) task._seasonsLoaded = false;
+          await loadTasks();
+          if (currentTaskId) selectTask(currentTaskId);
+        } else {
+          alert(`清理失败: ${res?.message || '未能执行源端单季清理'}`);
+        }
+      } catch (err) {
+        alert(`请求失败: ${err.message}`);
+      }
     }
 
     function renderEpisodesList() {
@@ -2443,14 +2549,7 @@
 
         const hasEvDetails = Boolean(ev && (ev.meta_status || ev.meta_error || (ev.release_evidence && ev.release_evidence.dominant_release_title) || (ev.mediaserver_check && (ev.mediaserver_check.checked || ev.mediaserver_check.error))));
         const rawObj = item.raw || {};
-        const showEmbyPromoteBtn = currentCategory === 'anomaly'
-          && item.anomalySubtype === 'file_check'
-          && Boolean(item.tmdbId)
-          && Number(rawObj.total_episodes || 0) > 0
-          && (!Array.isArray(rawObj.recognized_episodes) || rawObj.recognized_episodes.length === 0)
-          && (Array.isArray(rawObj.missing_episodes) && rawObj.missing_episodes.length > 0);
-        const showDetailBtn = currentCategory === 'download' || Boolean(conf && conf.blocking) || Boolean(gapState && gapState.episodes && gapState.episodes.length > 0) || hasEvDetails;
-        const showMappingBtn = ['identity_review', 'unknown', 'review_needed', 'period_review', 'download_needed', 'period_missing'].includes(rawStatus) || Boolean(conf && conf.blocking) || Boolean(mp && mp.target_tmdb_id);
+        const showDetailBtn = currentCategory === 'download' || currentCategory === 'anomaly' || isAnomaly || ['identity_review', 'unknown', 'review_needed', 'period_review', 'download_needed', 'period_missing'].includes(rawStatus) || Boolean(conf && conf.blocking) || Boolean(gapState && gapState.episodes && gapState.episodes.length > 0) || hasEvDetails || Boolean(mp && mp.target_tmdb_id);
         const disableCheck = currentCategory === 'airing' || currentCategory === 'anomaly' || ['inspect_info', 'inspect_gap_detail', 'clean_redundant'].includes(item.actionType) || (currentCategory === 'download' && activeGapTab === 'pushed_pending');
 
         return `
@@ -2477,7 +2576,7 @@
                   ${item.pathB ? `<span>${escapeHtml(item.pathB)}</span>` : ''}
                 </div>
                 <div class="text-[11px] text-slate-600 dark:text-slate-400 flex items-center gap-2 flex-wrap">
-                  <span class="text-${badgeColor}-600 dark:text-${badgeColor}-400 font-medium">👉 ${escapeHtml(item.note || '')}</span>
+                  <span class="text-${badgeColor}-600 dark:text-${badgeColor}-400 font-medium">👉 ${escapeHtml(cleanSeasonStatusNote(item.note) || '')}</span>
                   ${item.dest ? `<span>• ${escapeHtml(item.dest)}</span>` : ''}
                 </div>
                 ${gapSummaryLineHtml}
@@ -2490,27 +2589,9 @@
                   <span>详情</span>
                 </button>
               ` : ''}
-              ${showMappingBtn ? `
-                <button type="button" onclick="openSeasonMappingModal('${item.id}')" class="px-2.5 py-1.5 rounded-lg border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 text-xs font-semibold hover:bg-indigo-100 dark:hover:bg-indigo-900/40 transition flex items-center gap-1 shadow-sm">
-                  <i class="fa-solid fa-link text-xs"></i>
-                  <span>${mp && mp.target_tmdb_id ? '改绑映射' : '人工映射'}</span>
-                </button>
-              ` : ''}
-              ${(mp && mp.target_tmdb_id) ? `
-                <button type="button" onclick="revokeSeasonMapping('${item.id}')" class="px-2.5 py-1.5 rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 text-xs font-semibold hover:bg-amber-100 dark:hover:bg-amber-900/40 transition flex items-center gap-1 shadow-sm">
-                  <i class="fa-solid fa-link-slash text-xs"></i>
-                  <span>撤销映射</span>
-                </button>
-              ` : ''}
               ${currentCategory === 'anomaly' || item.actionType === 'inspect_info' || (conf && conf.blocking) ? `
                 <button onclick="markSeasonHandled('${item.id}', this)" class="px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 text-slate-600 dark:text-slate-300 text-xs font-semibold disabled:opacity-50">
                   <i class="fa-solid fa-check mr-1"></i>已手动处理
-                </button>
-              ` : ''}
-              ${showEmbyPromoteBtn ? `
-                <button type="button" onclick="recheckEmbyForSeason('${item.id}', this)" class="px-2.5 py-1.5 rounded-lg border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 text-xs font-semibold hover:bg-indigo-100 dark:hover:bg-indigo-900/40 transition flex items-center gap-1 shadow-sm disabled:opacity-50" title="实时核查归档与 Emby 媒体服务器；若均确认 0 集且本季已完结，直接转入真缺集待补">
-                  <i class="fa-solid fa-magnifying-glass-arrow-right text-xs"></i>
-                  <span>查 Emby 转待补</span>
                 </button>
               ` : ''}
               ${((item.isAnomaly && item.anomalySubtype === 'unknown_meta') || currentCategory === 'download') ? `
@@ -2535,7 +2616,7 @@
                   <i class="fa-solid ${actionIcon} text-xs"></i>
                   <span>${escapeHtml(item.actionText)}</span>
                 </button>
-              ` : `
+              ` : (item.actionType === 'inspect_info') ? '' : `
                 <button onclick="handleSingleAction('${item.actionType}', '${item.id}')" class="px-3 py-1.5 rounded-lg ${actionBtnClass} text-xs font-semibold shadow-sm transition flex items-center gap-1.5">
                   <i class="fa-solid ${actionIcon} text-xs"></i>
                   <span>${escapeHtml(item.actionText)}</span>
@@ -3349,6 +3430,32 @@
         `);
       }
 
+      // 纠正本季识别 / 单季映射入口收拢
+      const needsOrHasMapping = Boolean(mp && mp.target_tmdb_id) ||
+        Boolean(conf && conf.blocking) ||
+        ['identity_review', 'unknown', 'review_needed', 'period_review'].includes(item.raw?.status) ||
+        Boolean(hasRealConflict);
+      if (needsOrHasMapping) {
+        parts.push(`
+          <div class="p-3 rounded-xl bg-indigo-50/70 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+            <div class="space-y-0.5">
+              <div class="font-bold text-xs text-indigo-900 dark:text-indigo-200">纠正本季识别（单季映射）</div>
+              <div class="text-[11px] text-slate-600 dark:text-slate-400">若本季识别有疑点或需绑定独立条目，可仅对本季进行单季修正，不影响同剧其他季度。</div>
+            </div>
+            <div class="flex items-center gap-2 flex-shrink-0">
+              ${(mp && mp.target_tmdb_id) ? `
+                <button type="button" onclick="document.getElementById('gapFillDetailDialog')?.close(); revokeSeasonMapping('${item.id}')" class="px-2.5 py-1 rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/50 text-amber-700 dark:text-amber-300 text-xs font-semibold hover:bg-amber-100 transition shadow-xs">
+                  <i class="fa-solid fa-link-slash mr-1"></i>撤销映射
+                </button>
+              ` : ''}
+              <button type="button" onclick="document.getElementById('gapFillDetailDialog')?.close(); openSeasonMappingModal('${item.id}')" class="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold transition shadow-xs">
+                <i class="fa-solid fa-link mr-1"></i>${(mp && mp.target_tmdb_id) ? '改绑单季' : '纠正本季识别'}
+              </button>
+            </div>
+          </div>
+        `);
+      }
+
       bodyEl.innerHTML = parts.join('');
       dlg.showModal();
     }
@@ -3648,7 +3755,7 @@
             const res = await processItem(item, i, items.length, appendLog, session.abortController.signal, session.id);
             if (!isCurrentBatch()) return;
 
-            if (res && res.success) {
+            if (res && (res.ok || res.success)) {
               successCount++;
               if (res.submitted_count) {
                 submittedTorrents += res.submitted_count;
