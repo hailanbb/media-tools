@@ -263,4 +263,146 @@ console.log("===================================================================
   assert(anomHtml.includes("recheckEmbyForSeason('nfo-shell', this)"), '0视频空壳异常卡应显示查Emby转待补按钮');
   assert(!anomHtml.includes("recheckEmbyForSeason('has-video', this)"), '含已识别视频的异常卡不应误显示查Emby转待补按钮');
   console.log('✓ 手动处理按钮、缺集删除按钮、无冲突详情降噪、多目录单选与0视频Emby转待补通过');
+
+  // ======================================================================
+  // 验证 v2.5.21 目录组唯一收口待复核清理、真缺集待补隐藏与跨页跳转定位
+  // ======================================================================
+  {
+    const sourceWithCr = name => htmlContent.match(new RegExp('(?:async )?function ' + name + '\\([^]*?\\r?\\n    \\}'))[0];
+    const dgNodes = new Map();
+    const getDgNode = id => {
+      if (!dgNodes.has(id)) {
+        const clsSet = new Set();
+        dgNodes.set(id, {
+          classList: {
+            add(...args) { args.forEach(a => clsSet.add(a)); },
+            remove(...args) { args.forEach(a => clsSet.delete(a)); },
+            contains(a) { return clsSet.has(a); },
+            toggle(a, f) { if (f !== undefined) { f ? clsSet.add(a) : clsSet.delete(a); } else { clsSet.has(a) ? clsSet.delete(a) : clsSet.add(a); } }
+          },
+          innerHTML: '',
+          textContent: '',
+          checked: false,
+          disabled: false,
+          scrollIntoView() {}
+        });
+      }
+      return dgNodes.get(id);
+    };
+
+    const sampleTask = {
+      id: 'task-variety',
+      counts: { review: 0, download: 2, pending_directory_groups: 1 },
+      categories: {
+        review: [],
+        download: [
+          {
+            id: 'season-chengfeng-s06',
+            show: '乘风 (2025)',
+            season: 'S06',
+            statusText: '10/12集',
+            actionType: 'request_download',
+            raw: {
+              show_name: '乘风 (2025)',
+              season_number: 6,
+              tmdb_id: '104716',
+              evidence: {
+                directory_group: { id: 'grp-104716', requires_confirm: true, status: 'pending_confirm' }
+              }
+            }
+          }
+        ]
+      },
+      directoryGroups: [
+        {
+          id: 'grp-104716',
+          tmdb_id: '104716',
+          category_key: 'cat:电视剧/综艺',
+          title: '乘风',
+          canonical_tmdb_title: '乘风',
+          status: 'pending_confirm',
+          entries: [
+            { side: 'source', norm_path: '/src/乘风 (2025)/Season 6', seasons: [6], episodes_by_season: { '6': [1,2,3,4,5,6,7,8,9,10] } },
+            { side: 'source', norm_path: '/src/乘风 2025/Season 6', seasons: [6], episodes_by_season: { '6': [1,2,3] } }
+          ],
+          candidate_targets: [
+            { target_path: '/dst/乘风 (2025) [tmdbid=104716]', raw_name: '乘风 (2025) [tmdbid=104716]', matches_tmdb_page: true }
+          ]
+        },
+        {
+          id: 'grp-already-done',
+          tmdb_id: '88888',
+          title: '已确认综艺',
+          status: 'confirmed',
+          confirmed_target_path: '/dst/已确认综艺',
+          entries: [{ side: 'archive', norm_path: '/dst/已确认综艺', seasons: [1] }]
+        }
+      ]
+    };
+
+    const dgContext = {
+      document: { getElementById: getDgNode },
+      currentCategory: 'download',
+      currentTaskId: 'task-variety',
+      taskList: [sampleTask],
+      escapeHtml: String,
+      updateSelection() {},
+      findItemByRecordId: id => sampleTask.categories.download.find(x => x.id === id),
+      setTimeout: (fn) => fn(),
+      _directoryGroupActiveTab: 'pending',
+      _directoryGroupCollapsed: false,
+      _expandedGroupIds: new Set(),
+      _dirGroupReturnCategory: null
+    };
+
+    const funcs = [
+      'getCategoryName', 'toggleDirectoryGroupsSection', 'setDirectoryGroupViewTab',
+      'toggleDirectoryGroupItemDetail', 'locateDirectoryGroupInReview',
+      'returnFromDirectoryGroupSection', 'filterResultCategory',
+      'renderDirectoryGroupsPanel', 'renderEpisodesList'
+    ].map(sourceWithCr).join(';\n');
+
+    vm.createContext(dgContext);
+    vm.runInContext(funcs, dgContext);
+
+    // 1. 在真缺集待补 (download) 分类下，整批目录组面板必须被完全隐藏！
+    dgContext.currentCategory = 'download';
+    vm.runInContext('renderEpisodesList()', dgContext);
+    const downloadPanel = getDgNode('directoryGroupsContainer');
+    assert(downloadPanel.classList.contains('hidden'), '真缺集待补分类下目录组面板必须添加 hidden 类');
+    assert.strictEqual(downloadPanel.innerHTML, '', '真缺集待补分类下目录组面板 innerHTML 必须清空');
+
+    // 2. 检查真缺集待补季卡中的目录组徽章：必须包含跳转定位按钮及文案
+    const downloadSeasonsHtml = getDgNode('episodeItemContainer').innerHTML;
+    assert(downloadSeasonsHtml.includes("locateDirectoryGroupInReview('grp-104716')"), '关联多目录的季卡必须挂载 locateDirectoryGroupInReview');
+    assert(downloadSeasonsHtml.includes('归档目标待确认 · 查看目录'), '季卡目录组徽章文案必须为「归档目标待确认 · 查看目录」');
+
+    // 3. 点击季卡上的定位按钮：跨页跳转至 review 分类，自动展开对应组
+    vm.runInContext("locateDirectoryGroupInReview('grp-104716')", dgContext);
+    assert.strictEqual(dgContext.currentCategory, 'review', '点击季卡定位后当前分类必须自动切换到 review');
+    assert.strictEqual(dgContext._dirGroupReturnCategory, 'download', '来源分类必须被记录为 download 以支持返回');
+    assert.strictEqual(dgContext._directoryGroupCollapsed, false, '目录组区块必须确保处于展开状态');
+    assert(dgContext._expandedGroupIds.has('grp-104716'), '目标组必须处于展开明细状态');
+
+    // 4. 验证待复核清理 (review) 分类下目录组面板正常渲染且包含作品名与返回按钮
+    const reviewPanel = getDgNode('directoryGroupsContainer');
+    assert(!reviewPanel.classList.contains('hidden'), '待复核清理分类下目录组面板不得含有 hidden 类');
+    const reviewPanelHtml = reviewPanel.innerHTML;
+    assert(reviewPanelHtml.includes('待确认归档目标（1 组待办）'), '面板标题必须显示待处理组数');
+    assert(reviewPanelHtml.includes('乘风 · 确认归档目标'), '必须直接使用作品名作为卡片标题');
+    assert(reviewPanelHtml.includes('TMDB: 104716'), '卡片必须显示 TMDB ID');
+    assert(reviewPanelHtml.includes('TMDB 页面显示：「乘风」'), '卡片必须显示 TMDB 官网页面当前名称');
+    assert(reviewPanelHtml.includes('返回「真缺集待补」'), '跨页跳转后顶部必须显示返回原清单按钮');
+    assert(reviewPanelHtml.includes("openDirectoryGroupDialog('grp-104716')"), '卡片必须挂载确认归档目标弹窗按钮');
+    // 目录组面板绝对不包含 itemCheck checkbox，保证不参与“全选清理冗余”
+    assert(!reviewPanelHtml.includes('name="itemCheck"'), '目录组面板绝不可包含 itemCheck checkbox，防止误入批量清理');
+
+    // 5. 点击“返回「真缺集待补」”按钮：顺利切回 download 分类，目录组面板重新隐藏
+    vm.runInContext('returnFromDirectoryGroupSection()', dgContext);
+    assert.strictEqual(dgContext.currentCategory, 'download', '返回后当前分类必须恢复为 download');
+    assert.strictEqual(dgContext._dirGroupReturnCategory, null, '返回后来源分类必须被清空');
+    assert(getDgNode('directoryGroupsContainer').classList.contains('hidden'), '返回 download 后目录组面板必须重新隐藏');
+
+    console.log('✓ 目录组唯一收口待复核清理、缺集页隐藏、跨页定位跳转与返回原分类契约测试全部通过');
+  }
 }

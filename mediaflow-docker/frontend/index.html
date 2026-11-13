@@ -109,7 +109,7 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.20</span>
+              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.21</span>
             </div>
             <!-- 完善后的命名 -->
             <p class="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">智能媒体库整理与归档工作台</p>
@@ -1254,7 +1254,8 @@
             airing: t.summary.airing || 0,
             archive_check: t.summary.archive_check || 0,
             already_archived: t.summary.already_archived || 0,
-          } : { archive: 0, review: 0, download: 0, download_pushed: 0, airing: 0, archive_check: 0, already_archived: 0 },
+            pending_directory_groups: t.summary.pending_directory_groups || 0,
+          } : { archive: 0, review: 0, download: 0, download_pushed: 0, airing: 0, archive_check: 0, already_archived: 0, pending_directory_groups: 0 },
           categories: { archive: [], review: [], download: [], airing: [], anomaly: [], archive_check: [] },
         }));
         renderTaskList();
@@ -1462,7 +1463,10 @@
       }
 
       document.getElementById('catCountArchive').innerHTML = `${task.counts.archive} <span class="text-xs font-normal">季已齐</span>`;
-      document.getElementById('catCountReview').innerHTML = `${task.counts.review} <span class="text-xs font-normal">处需清理</span>`;
+      const initPendingDg = task.counts.pending_directory_groups || 0;
+      document.getElementById('catCountReview').innerHTML = initPendingDg > 0
+        ? `${task.counts.review} <span class="text-xs font-normal">处需清理</span> · <span class="text-xs font-semibold text-amber-700 dark:text-amber-300">${initPendingDg}组待确认</span>`
+        : `${task.counts.review} <span class="text-xs font-normal">处需清理</span>`;
       const alreadyEl = document.getElementById('catCountAnomaly');
       if (alreadyEl) alreadyEl.innerHTML = `${task.counts.already_archived || 0} <span class="text-xs font-normal">季</span>`;
       const dlInitPushed = task.counts.download_pushed || 0;
@@ -1576,8 +1580,13 @@
       }
 
       if (task._seasonsLoaded) {
-        document.getElementById('catCountReview').textContent = task.categories.review.length + ' 处需复核';
-
+        const revSeasons = (task.categories && Array.isArray(task.categories.review)) ? task.categories.review.length : 0;
+        const pendingDgCount = (task && Array.isArray(task.directoryGroups))
+          ? task.directoryGroups.filter(g => g.status === 'pending_confirm').length
+          : (task.counts.pending_directory_groups || 0);
+        document.getElementById('catCountReview').innerHTML = pendingDgCount > 0
+          ? `${revSeasons} <span class="text-xs font-normal">处需清理</span> · <span class="text-xs font-semibold text-amber-700 dark:text-amber-300">${pendingDgCount}组待确认</span>`
+          : `${revSeasons} <span class="text-xs font-normal">处需复核</span>`;
       }
       const anomCount = (task.categories && task.categories.anomaly) ? task.categories.anomaly.length : (task.counts.already_archived || 0);
       const anomEl = document.getElementById('catCountAnomaly');
@@ -1990,6 +1999,84 @@
     }
 
     // ── 10. 初检结果分类钻取 ──────────────────────────────────
+    let _directoryGroupActiveTab = 'pending'; // 'pending' | 'resolved'
+    let _directoryGroupCollapsed = false;
+    let _expandedGroupIds = new Set();
+    let _dirGroupReturnCategory = null;
+
+    function getCategoryName(cat) {
+      const map = {
+        archive: '齐全可归档',
+        review: '待复核清理',
+        download: '真缺集待补',
+        airing: '连载留源',
+        anomaly: '异常剧集',
+        already_archived: '异常剧集',
+      };
+      return map[cat] || cat || '原清单';
+    }
+
+    function toggleDirectoryGroupsSection() {
+      _directoryGroupCollapsed = !_directoryGroupCollapsed;
+      const task = taskList.find(t => t.id === currentTaskId);
+      if (task && typeof renderDirectoryGroupsPanel === 'function') {
+        renderDirectoryGroupsPanel(task);
+      }
+    }
+
+    function setDirectoryGroupViewTab(tab) {
+      _directoryGroupActiveTab = tab;
+      const task = taskList.find(t => t.id === currentTaskId);
+      if (task && typeof renderDirectoryGroupsPanel === 'function') {
+        renderDirectoryGroupsPanel(task);
+      }
+    }
+
+    function toggleDirectoryGroupItemDetail(groupId) {
+      if (_expandedGroupIds.has(groupId)) {
+        _expandedGroupIds.delete(groupId);
+      } else {
+        _expandedGroupIds.add(groupId);
+      }
+      const task = taskList.find(t => t.id === currentTaskId);
+      if (task && typeof renderDirectoryGroupsPanel === 'function') {
+        renderDirectoryGroupsPanel(task);
+      }
+    }
+
+    function locateDirectoryGroupInReview(groupId) {
+      if (!groupId) return;
+      if (currentCategory !== 'review') {
+        _dirGroupReturnCategory = currentCategory;
+        filterResultCategory('review');
+      }
+      _directoryGroupCollapsed = false;
+      _expandedGroupIds.add(groupId);
+      _directoryGroupActiveTab = 'pending';
+      const task = taskList.find(t => t.id === currentTaskId);
+      if (task && typeof renderDirectoryGroupsPanel === 'function') {
+        renderDirectoryGroupsPanel(task);
+      }
+      setTimeout(() => {
+        const el = document.getElementById(`dir-group-card-${groupId}`);
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          el.classList.add('ring-2', 'ring-amber-500', 'ring-offset-2', 'dark:ring-offset-slate-900');
+          setTimeout(() => {
+            el.classList.remove('ring-2', 'ring-amber-500', 'ring-offset-2', 'dark:ring-offset-slate-900');
+          }, 2500);
+        }
+      }, 100);
+    }
+
+    function returnFromDirectoryGroupSection() {
+      if (_dirGroupReturnCategory) {
+        const targetCat = _dirGroupReturnCategory;
+        _dirGroupReturnCategory = null;
+        filterResultCategory(targetCat);
+      }
+    }
+
     function filterResultCategory(cat) {
       currentCategory = cat === 'archive_check' ? 'anomaly' : cat;
       ['archive', 'review', 'archive_check', 'anomaly', 'download', 'airing'].forEach(c => {
@@ -2009,56 +2096,137 @@
     function renderDirectoryGroupsPanel(task) {
       const panel = document.getElementById('directoryGroupsContainer');
       if (!panel) return;
-      const groups = (task && Array.isArray(task.directoryGroups)) ? task.directoryGroups : [];
-      if (groups.length === 0) {
+      // 核心收口：仅在「待复核清理」（review）分类展示目录组确认区，其他分类彻底隐藏
+      if (currentCategory !== 'review') {
         panel.classList.add('hidden');
         panel.innerHTML = '';
         return;
       }
+      const allGroups = (task && Array.isArray(task.directoryGroups)) ? task.directoryGroups : [];
+      if (allGroups.length === 0) {
+        panel.classList.add('hidden');
+        panel.innerHTML = '';
+        return;
+      }
+
+      const pendingGroups = allGroups.filter(g => g.status === 'pending_confirm');
+      const resolvedGroups = allGroups.filter(g => g.status !== 'pending_confirm');
+
+      // 若处于已处理视图但已处理为空且有待处理，回退到待处理
+      if (_directoryGroupActiveTab === 'resolved' && resolvedGroups.length === 0 && pendingGroups.length > 0) {
+        _directoryGroupActiveTab = 'pending';
+      }
+
+      const displayGroups = _directoryGroupActiveTab === 'resolved' ? resolvedGroups : pendingGroups;
+
       panel.classList.remove('hidden');
-      panel.innerHTML = groups.map(g => {
+
+      const itemsHtml = displayGroups.map(g => {
         const isPending = g.status === 'pending_confirm';
+        const isExpanded = _expandedGroupIds.has(g.id);
         const borderCls = isPending
-          ? 'border-amber-300 dark:border-amber-700 bg-amber-50/70 dark:bg-amber-950/25'
-          : 'border-emerald-200 dark:border-emerald-800 bg-emerald-50/50 dark:bg-emerald-950/20';
+          ? 'border-amber-200 dark:border-amber-800/60 bg-white dark:bg-slate-900'
+          : 'border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-900/40';
         const statusText = isPending
           ? '待确认归档目标（已暂停自动归档/清理/退订）'
           : (g.status === 'confirmed'
               ? `已确认目标：${g.confirmed_target_path || '-'}`
               : '已标记有意共存');
+        const showTitle = g.canonical_tmdb_title
+          ? `${g.canonical_tmdb_title} · 确认归档目标`
+          : (g.title || '同一作品有多个目录');
+
+        const entriesCount = (g.entries || []).length;
         const entriesHtml = (g.entries || []).map(ent => {
           const sideLabel = ent.side === 'archive' ? '归档库' : '源端';
           const sideCls = ent.side === 'archive'
             ? 'bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-300'
             : 'bg-sky-100 dark:bg-sky-900/50 text-sky-700 dark:text-sky-300';
-          const seasonsList = (ent.seasons || []).map(s => `S${String(s).padStart(2, '0')}`).join(', ');
+          const epCov = ent.episodes_by_season || {};
+          const covParts = (ent.seasons || []).map(s => {
+            const eps = epCov[String(s)] || [];
+            return `S${String(s).padStart(2, '0')}${eps.length ? ` (${eps.length}集: ${eps.slice(0, 6).join(',')}${eps.length > 6 ? '...' : ''})` : ''}`;
+          }).join(' · ');
           return `
-            <div class="flex flex-wrap items-center gap-2 text-[11px] font-mono">
-              <span class="px-1.5 py-0.5 rounded font-sans font-semibold ${sideCls}">${sideLabel}</span>
-              <span class="text-slate-700 dark:text-slate-200 break-all">${escapeHtml(ent.norm_path || '')}</span>
-              ${seasonsList ? `<span class="text-slate-500 dark:text-slate-400">(${escapeHtml(seasonsList)})</span>` : ''}
+            <div class="p-2 rounded-lg bg-slate-50 dark:bg-slate-800/50 border border-slate-100 dark:border-slate-800 space-y-0.5 text-[11px] font-mono">
+              <div class="flex items-center justify-between gap-2 flex-wrap">
+                <span class="px-1.5 py-0.5 rounded font-sans font-semibold ${sideCls}">${sideLabel}</span>
+                ${covParts ? `<span class="font-sans text-slate-500 dark:text-slate-400">${escapeHtml(covParts)}</span>` : ''}
+              </div>
+              <div class="text-slate-700 dark:text-slate-200 break-all">${escapeHtml(ent.norm_path || '')}</div>
             </div>`;
         }).join('');
+
         return `
-          <div class="rounded-xl p-4 border ${borderCls} flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div class="space-y-1.5 min-w-0 flex-1">
-              <div class="flex flex-wrap items-center gap-2">
-                <i class="fa-solid fa-folder-tree text-amber-600 dark:text-amber-400 text-xs"></i>
-                <span class="text-xs font-bold text-slate-900 dark:text-white">${escapeHtml(g.title || '同一作品有多个目录')}</span>
-                <span class="text-[11px] px-1.5 py-0.5 rounded bg-slate-200/70 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-mono">TMDB: ${escapeHtml(g.tmdb_id || '')}</span>
-                ${g.canonical_tmdb_title ? `<span class="text-[11px] px-1.5 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800">TMDB 页面显示：「${escapeHtml(g.canonical_tmdb_title)}」</span>` : ''}
-                <span class="text-[11px] font-semibold ${isPending ? 'text-amber-700 dark:text-amber-300' : 'text-emerald-700 dark:text-emerald-300'}">${escapeHtml(statusText)}</span>
+          <div id="dir-group-card-${escapeHtml(g.id)}" class="rounded-xl p-3 border ${borderCls} shadow-xs transition space-y-2.5">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div class="min-w-0 flex-1 space-y-1">
+                <div class="flex flex-wrap items-center gap-2">
+                  <i class="fa-solid fa-folder-tree text-amber-600 dark:text-amber-400 text-xs flex-shrink-0"></i>
+                  <span class="text-xs font-bold text-slate-900 dark:text-white">${escapeHtml(showTitle)}</span>
+                  <span class="text-[11px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-mono">TMDB: ${escapeHtml(g.tmdb_id || '')}</span>
+                  ${g.canonical_tmdb_title ? `<span class="text-[11px] px-1.5 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800">TMDB 页面显示：「${escapeHtml(g.canonical_tmdb_title)}」</span>` : ''}
+                  <span class="text-[11px] font-semibold ${isPending ? 'text-amber-700 dark:text-amber-300' : 'text-emerald-700 dark:text-emerald-300'}">${escapeHtml(statusText)}</span>
+                </div>
               </div>
-              ${g.invalidated_reason ? `<div class="text-[11px] text-rose-600 dark:text-rose-400 font-medium">${escapeHtml(g.invalidated_reason)}</div>` : ''}
-              <div class="space-y-1">${entriesHtml}</div>
+              <div class="flex items-center gap-2 flex-shrink-0">
+                <button type="button" onclick="toggleDirectoryGroupItemDetail('${escapeHtml(g.id)}')" class="px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-slate-100 text-xs font-medium transition flex items-center gap-1.5">
+                  <i class="fa-solid fa-chevron-${isExpanded ? 'up' : 'down'} text-[10px]"></i>
+                  <span>${isExpanded ? '收起目录' : `查看目录 (${entriesCount})`}</span>
+                </button>
+                <button type="button" onclick="openDirectoryGroupDialog('${escapeHtml(g.id)}')" class="px-3 py-1.5 rounded-lg ${isPending ? 'bg-amber-600 hover:bg-amber-700 text-white shadow-xs' : 'border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200'} text-xs font-semibold transition">
+                  ${isPending ? '确认归档目标' : '修改目录确认'}
+                </button>
+              </div>
             </div>
-            <div class="flex items-center gap-2 flex-shrink-0">
-              <button type="button" onclick="openDirectoryGroupDialog('${escapeHtml(g.id)}')" class="px-3 py-1.5 rounded-lg ${isPending ? 'bg-amber-600 hover:bg-amber-700 text-white' : 'border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200'} text-xs font-semibold shadow-sm transition">
-                ${isPending ? '查看目录 / 确认归档目标' : '修改目录确认'}
-              </button>
-            </div>
+            ${isExpanded ? `
+              <div class="pt-2 border-t border-slate-100 dark:border-slate-800/80 space-y-2">
+                ${g.invalidated_reason ? `<div class="text-[11px] text-rose-600 dark:text-rose-400 font-medium">${escapeHtml(g.invalidated_reason)}</div>` : ''}
+                <div class="space-y-1.5">${entriesHtml}</div>
+              </div>
+            ` : ''}
           </div>`;
       }).join('');
+
+      panel.innerHTML = `
+        <div class="border border-amber-200 dark:border-amber-800/80 bg-amber-50/50 dark:bg-amber-950/20 rounded-2xl p-3.5 space-y-3 shadow-xs">
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <div class="flex flex-wrap items-center gap-2.5">
+              <button type="button" onclick="toggleDirectoryGroupsSection()" class="flex items-center gap-2 text-slate-900 dark:text-white hover:text-amber-600 dark:hover:text-amber-400 font-bold text-xs transition cursor-pointer">
+                <i class="fa-solid fa-chevron-${_directoryGroupCollapsed ? 'right' : 'down'} text-[11px] text-amber-600 dark:text-amber-400"></i>
+                <span>待确认归档目标（${pendingGroups.length} 组待办）</span>
+              </button>
+              <div role="tablist" class="inline-flex items-center gap-1 rounded-lg bg-amber-100/70 dark:bg-amber-900/40 p-0.5 text-[11px]">
+                <button type="button" role="tab" onclick="setDirectoryGroupViewTab('pending')" class="px-2.5 py-0.5 rounded-md font-semibold transition ${_directoryGroupActiveTab === 'pending' ? 'bg-white dark:bg-slate-800 text-amber-800 dark:text-amber-200 shadow-xs' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'}">
+                  待处理 (${pendingGroups.length})
+                </button>
+                <button type="button" role="tab" onclick="setDirectoryGroupViewTab('resolved')" class="px-2.5 py-0.5 rounded-md font-semibold transition ${_directoryGroupActiveTab === 'resolved' ? 'bg-white dark:bg-slate-800 text-amber-800 dark:text-amber-200 shadow-xs' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'}">
+                  查看已处理 (${resolvedGroups.length})
+                </button>
+              </div>
+            </div>
+            <div class="flex items-center gap-2">
+              ${_dirGroupReturnCategory ? `
+                <button type="button" onclick="returnFromDirectoryGroupSection()" class="px-2.5 py-1 rounded-lg bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 border border-indigo-200 dark:border-indigo-800 text-xs font-semibold shadow-xs transition flex items-center gap-1.5">
+                  <i class="fa-solid fa-arrow-left text-[10px]"></i>
+                  <span>返回「${escapeHtml(getCategoryName(_dirGroupReturnCategory))}」</span>
+                </button>
+              ` : ''}
+              <button type="button" onclick="toggleDirectoryGroupsSection()" class="text-xs text-slate-500 dark:text-slate-400 hover:text-amber-600 dark:hover:text-amber-400 font-medium">
+                ${_directoryGroupCollapsed ? '展开区块' : '折叠收起'}
+              </button>
+            </div>
+          </div>
+          ${!_directoryGroupCollapsed ? `
+            <div class="space-y-2 pt-0.5">
+              ${displayGroups.length === 0 ? `
+                <div class="py-4 text-center text-xs text-slate-500 dark:text-slate-400">
+                  ${_directoryGroupActiveTab === 'resolved' ? '暂无已处理的目录组记录' : '当前无待确认目录组'}
+                </div>
+              ` : itemsHtml}
+            </div>
+          ` : ''}
+        </div>`;
     }
 
     function renderEpisodesList() {
@@ -2254,7 +2422,7 @@
           : '';
         const dirGrp = (ev && ev.directory_group) || null;
         const dirGroupBadgeHtml = (dirGrp && dirGrp.requires_confirm)
-          ? `<button type="button" onclick="openDirectoryGroupDialog('${escapeHtml(dirGrp.id || '')}')" class="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 font-semibold border border-amber-300 dark:border-amber-700 hover:bg-amber-200 dark:hover:bg-amber-900/50 transition">查看目录 / 确认归档目标</button>`
+          ? `<button type="button" onclick="locateDirectoryGroupInReview('${escapeHtml(dirGrp.id || '')}')" class="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 font-semibold border border-amber-300 dark:border-amber-700 hover:bg-amber-200 dark:hover:bg-amber-900/50 transition flex items-center gap-1"><i class="fa-solid fa-folder-tree text-[9px]"></i><span>归档目标待确认 · 查看目录</span></button>`
           : (dirGrp && dirGrp.status === 'confirmed'
               ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">已确认目录组</span>`
               : '');

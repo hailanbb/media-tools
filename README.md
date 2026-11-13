@@ -4,7 +4,7 @@
 
 > **面向家庭影院与云原生 NAS（115网盘 / CloudDrive2 / MoviePilot / Emby / Jellyfin）的新一代智能影视媒体整理、跨库无损归档与双轨运维治理系统。**
 
-[![Version](https://img.shields.io/badge/Release-v2.5.20-6366f1.svg?style=flat-square&logo=github)](https://github.com/hailanbb/media-tools/releases)
+[![Version](https://img.shields.io/badge/Release-v2.5.21-6366f1.svg?style=flat-square&logo=github)](https://github.com/hailanbb/media-tools/releases)
 [![Docker](https://img.shields.io/badge/Docker-Supported-2496ed.svg?style=flat-square&logo=docker)](mediaflow-docker/)
 [![Windows](https://img.shields.io/badge/Windows-Native-0078d4.svg?style=flat-square&logo=windows)](mediaflow-win/)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776ab.svg?style=flat-square&logo=python)](https://www.python.org/)
@@ -225,7 +225,14 @@ MediaFlow 的每一项核心机制均遵循严谨的第一性原理设计方案�
 
 ## 📜 版本演进历史 (Changelog)
 
-### 🚀 最新稳定版：v2.5.20 (2026-11-13)
+### 🚀 最新稳定版：v2.5.21 (2026-11-13)
+
+* **多目录确认入口唯一收口于「待复核清理」与季卡跨页精准定位**：
+  * **唯一处理位置收口于「待复核清理」（`frontend/index.html`）**：彻底解决跨分类切换时共用面板全量平铺霸屏问题；在「待复核清理」内提供可折叠的「待确认归档目标」独立专区，与逐季重复清理彻底分开计数（如 `0 处需清理 · 33组待确认`），且目录组卡片不参与“全选清理冗余”批量勾选；
+  * **「真缺集待补」等其他分类隐藏大容器并支持季卡跨页精准定位（`frontend/index.html`）**：在真缺集、连载留源等分类中彻底隐藏整批目录组面板，使无待补季的作品（如《我是歌手》）不再错误出现；对确实关联待确认组的季卡展示「归档目标待确认 · 查看目录」徽章，点击无缝切换至待复核清理并平滑滚动高亮展开对应卡片，顶部提供「返回原清单」便捷按钮；
+  * **支持待处理/已处理分栏查看与折叠收起**：默认紧凑展示待处理组，支持一键切换查看已确认或有意共存的已处理历史，并可在单组卡片内展开查看多路径明细与覆盖季集信息。
+
+#### v2.5.20 (2026-11-13)
 
 * **0 视频 `[tmdbid=...]` 空壳目录 Emby 联动核查与直转「真缺集待补」**：
   * **MoviePilot × Emby 实时探测联动（`moviepilot` + `inspector`）**：源季目录为 0 视频空壳（如仅剩 `.nfo` 等附件且无未查子目录）、带明确 `[tmdbid=...]` 且归档库未命中任何正片时，自动调用 `POST /api/v1/mediaserver/exists_remote` 核对 Emby 入库集数；若 Emby 同样 0 集且本季已完结，直接进入「真缺集待补 (`download_needed`)」，若 Emby 已有剧集或服务未连接则安全保留 `archive_check` 防止盲重下；
