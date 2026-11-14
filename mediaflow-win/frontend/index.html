@@ -109,7 +109,7 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.22</span>
+              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.23</span>
             </div>
             <!-- 完善后的命名 -->
             <p class="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">智能媒体库整理与归档工作台</p>
@@ -1208,6 +1208,7 @@
       const map = {
         pending: 'bg-slate-400',
         running: 'bg-amber-500 animate-pulse',
+        stopping: 'bg-indigo-500 animate-pulse',
         paused: 'bg-orange-500',
         stopped: 'bg-slate-500',
         completed: 'bg-emerald-500',
@@ -1219,6 +1220,7 @@
     function formatSummaryText(task) {
       if (task.status === 'pending') return '等待初检...';
       if (task.status === 'running') return '⚡ 多任务加速初检中...';
+      if (task.status === 'stopping') return '⏳ 正在保存已分析数据...';
       if (task.status === 'paused') return '⏸️ 初检已暂停';
       if (task.status === 'stopped') return '⏹️ 初检已手动停止';
       if (task.status === 'failed') return '初检失败';
@@ -1310,6 +1312,13 @@
                 <i class="fa-solid fa-stop"></i>
               </button>
             </div>`;
+        } else if (task.status === 'stopping') {
+          actionButtons = `
+            <div class="flex items-center space-x-1 pl-1">
+              <span class="text-[10px] text-indigo-600 dark:text-indigo-400 font-medium flex items-center gap-1">
+                <i class="fa-solid fa-spinner fa-spin text-[9px]"></i> 保存中
+              </span>
+            </div>`;
         } else if (task.status === 'paused') {
           actionButtons = `
             <div class="flex items-center space-x-1 pl-1">
@@ -1348,17 +1357,17 @@
                 ${actionButtons}
               </div>
             </div>
-            ${(task.status === 'running' || task.status === 'paused') ? `
+            ${(task.status === 'running' || task.status === 'paused' || task.status === 'stopping') ? `
             <div class="mt-2 pt-1.5 border-t border-slate-100 dark:border-slate-800 space-y-1">
               <div class="flex items-center justify-between text-[10px]">
                 <span class="text-indigo-600 dark:text-indigo-400 font-semibold truncate max-w-[130px] flex items-center gap-1">
                   <i class="fa-solid fa-satellite-dish text-[8px] animate-pulse"></i>
-                  <span id="task-card-show-${task.id}">${task.status === 'paused' ? '初检已暂停' : '并发分析中...'}</span>
+                  <span id="task-card-show-${task.id}">${task.status === 'stopping' ? '正在安全保存进度...' : (task.status === 'paused' ? '初检已暂停' : '并发分析中...')}</span>
                 </span>
-                <span class="font-mono font-bold text-indigo-600 dark:text-indigo-400" id="task-card-pct-${task.id}">${task.status === 'paused' ? '暂停' : '扫描中'}</span>
+                <span class="font-mono font-bold text-indigo-600 dark:text-indigo-400" id="task-card-pct-${task.id}">${task.status === 'stopping' ? '保存中' : (task.status === 'paused' ? '暂停' : '扫描中')}</span>
               </div>
               <div class="w-full bg-slate-100 dark:bg-slate-800 rounded-full h-1.5 overflow-hidden">
-                <div id="task-card-bar-${task.id}" class="bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 h-full rounded-full transition-all duration-300" style="width: ${task.status === 'paused' ? '50%' : '15%'}"></div>
+                <div id="task-card-bar-${task.id}" class="bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 h-full rounded-full transition-all duration-300" style="width: ${task.status === 'stopping' ? '90%' : (task.status === 'paused' ? '50%' : '15%')}"></div>
               </div>
             </div>` : `
             <div class="mt-2 pt-1.5 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between text-[10px]">
@@ -1445,6 +1454,8 @@
       return '';
     }
 
+    let _selectTaskSeq = 0;
+
     async function selectTask(taskId) {
       currentTaskId = taskId;
       try { localStorage.setItem('mediaflow_selected_task_id', taskId); } catch(e) {}
@@ -1485,10 +1496,14 @@
         : `${task.counts.download} <span class="text-xs font-normal">季需补</span>`;
       document.getElementById('catCountAiring').innerHTML = `${task.counts.airing} <span class="text-xs font-normal">季连载</span>`;
 
-      // 从后端加载季度明细数据
-      if (task.status === 'completed' && !task._seasonsLoaded) {
+      // 从后端加载季度明细数据：只要存在已发布的结果或已手动停止，均可按已发布明细加载
+      const hasPublishedResults = task.status === 'completed' || task.status === 'stopped' || (task.counts && (task.counts.total > 0 || (task.summary && task.summary.total_seasons > 0)));
+      if (hasPublishedResults && !task._seasonsLoaded) {
+        const fetchSeq = ++_selectTaskSeq;
         try {
           const seasons = await api(`/api/tasks/${taskId}/seasons`);
+          if (fetchSeq !== _selectTaskSeq || currentTaskId !== taskId) return;
+          task._seasonsLoadError = false;
           task.categories = { archive: [], review: [], download: [], download_pushed: [], airing: [], anomaly: [], archive_check: [] };
           for (const s of seasons) {
             const missing = s.missing_episodes || [];
@@ -1575,7 +1590,9 @@
           task._seasonsLoaded = true;
           try {
             const dgRes = await api(`/api/tasks/${taskId}/directory-groups`);
-            task.directoryGroups = (dgRes && Array.isArray(dgRes.groups)) ? dgRes.groups : [];
+            if (fetchSeq === _selectTaskSeq && currentTaskId === taskId) {
+              task.directoryGroups = (dgRes && Array.isArray(dgRes.groups)) ? dgRes.groups : [];
+            }
           } catch (_dgErr) {
             task.directoryGroups = task.directoryGroups || [];
           }
@@ -1585,7 +1602,11 @@
             ? `${dlLoadedTodo} <span class="text-xs font-normal">季待补 · ${dlLoadedPushed}已推</span>`
             : `${dlLoadedTodo} <span class="text-xs font-normal">季需补</span>`;
         } catch (e) {
-          console.error('加载季度数据失败:', e);
+          if (fetchSeq === _selectTaskSeq && currentTaskId === taskId) {
+            task._seasonsLoadError = true;
+            task._seasonsLoaded = false;
+            console.error('加载季度数据失败:', e);
+          }
         }
       }
 
@@ -1603,6 +1624,15 @@
       if (anomEl) anomEl.innerHTML = `${anomCount} <span class="text-xs font-normal">季异常</span>`;
 
       filterResultCategory(currentCategory);
+    }
+
+    async function retryLoadSeasons(taskId) {
+      const task = taskList.find(t => t.id === taskId);
+      if (task) {
+        task._seasonsLoaded = false;
+        task._seasonsLoadError = false;
+        await selectTask(taskId);
+      }
     }
 
     // ── 8. 任务操作（创建/删除/重检）─────────────────────────
@@ -1757,6 +1787,11 @@
             } else if (p.status === 'running') {
               if (pauseBtnText) pauseBtnText.textContent = '暂停';
               if (pauseIcon) pauseIcon.className = "fa-solid fa-pause text-xs";
+            } else if (p.status === 'stopping') {
+              if (pStep) pStep.textContent = '正在安全写入数据库并归档检查点...';
+              if (pShow) pShow.textContent = p.message || '已收到停止请求，正在保存已分析进度...';
+              if (ctrlGroup) ctrlGroup.classList.add('hidden');
+              if (closeBtn) closeBtn.classList.remove('hidden');
             }
 
             // 完成处理
@@ -1785,8 +1820,8 @@
               inspectTimer = null;
               activeInspectTaskId = null;
 
-              if (pShow) pShow.textContent = p.message || '初检已停止';
-              if (pStep) pStep.textContent = '初检已手动停止';
+              if (pShow) pShow.textContent = p.message || '初检已停止：已保存分析进度';
+              if (pStep) pStep.textContent = '初检已手动停止并保存完成';
               if (ctrlGroup) ctrlGroup.classList.add('hidden');
               if (closeBtn) closeBtn.classList.remove('hidden');
 
@@ -1846,10 +1881,17 @@
     async function triggerStopTask(taskId) {
       if (!confirm('确定停止当前的初检任务吗？已分析出的剧集数据将自动保存。')) return;
       try {
-        await api(`/api/inspect/${taskId}/stop`, { method: 'POST' });
-        closeInspectProgressModal();
+        const resp = await api(`/api/inspect/${taskId}/stop`, { method: 'POST' });
+        const pShow = document.getElementById('inspectProgressShow');
+        const pStep = document.getElementById('inspectProgressStep');
+        if (pShow && activeInspectTaskId === taskId) {
+          pShow.textContent = (resp && resp.message) || '已收到停止请求，正在安全保存已分析进度...';
+          if (pStep) pStep.textContent = '正在安全写入数据库并归档检查点...';
+        }
         await loadTasks();
-        selectTask(taskId);
+        if (currentTaskId === taskId) {
+          selectTask(taskId);
+        }
       } catch (e) {
         alert(`停止失败: ${e.message}`);
       }
@@ -2456,24 +2498,46 @@
 
       if (items.length === 0) {
         const isNoTask = !task;
+        const isStopping = task && task.status === 'stopping';
         const isPending = task && (task.status === 'pending' || task.status === 'running');
         let emptyMsg = currentCategory === 'download' && activeGapTab === 'pushed_pending'
           ? '当前暂无已推送待入库的剧季'
-          : '该任务在此分类下暂无待处理项目';
+          : '该分类无条目';
         let emptyIcon = 'fa-circle-check text-emerald-500';
+        let retryBtn = '';
+
         if (isNoTask) {
           emptyMsg = '请在左侧选择一个任务';
           emptyIcon = 'fa-hand-pointer text-indigo-400';
+        } else if (isStopping) {
+          emptyMsg = '初检正在停止，正在安全保存已分析进度...';
+          emptyIcon = 'fa-spinner fa-spin text-indigo-500';
         } else if (isPending) {
           emptyMsg = '初检引擎正在扫描分析中，请稍候...';
           emptyIcon = 'fa-spinner fa-spin text-blue-500';
-        } else if (task?.status === 'completed' && !(currentCategory === 'download' && activeGapTab === 'pushed_pending')) {
-          emptyMsg = '当前分类没有待处理项目';
+        } else if (task?._seasonsLoadError) {
+          emptyMsg = '明细加载失败，请检查网络或点击重试';
+          emptyIcon = 'fa-circle-exclamation text-amber-500';
+          retryBtn = `<button onclick="retryLoadSeasons('${task.id}')" class="mt-2.5 px-3 py-1 text-xs rounded bg-indigo-50 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-100">重新加载明细</button>`;
+        } else {
+          const totalSeasons = (task.counts && typeof task.counts.total === 'number')
+            ? task.counts.total
+            : (task.summary ? (task.summary.total_seasons || 0) : 0);
+          if (totalSeasons === 0) {
+            emptyMsg = task.status === 'stopped' ? '本轮尚无已分析剧季' : '本轮尚无已分析剧季，可点击重新初检';
+            emptyIcon = 'fa-inbox text-slate-400';
+          } else {
+            emptyMsg = (currentCategory === 'download' && activeGapTab === 'pushed_pending')
+              ? '当前暂无已推送待入库的剧季'
+              : '该分类无条目';
+            emptyIcon = 'fa-circle-check text-emerald-500';
+          }
         }
         container.innerHTML = `
           <div class="p-8 text-center text-slate-400 dark:text-slate-500">
-            <i class="fa-solid ${emptyIcon} text-2xl mb-2"></i>
+            <i class="fa-solid ${emptyIcon} text-2xl mb-2 block"></i>
             <p class="text-xs">${emptyMsg}</p>
+            ${retryBtn}
           </div>`;
         updateSelection();
         return;

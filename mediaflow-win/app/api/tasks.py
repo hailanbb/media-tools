@@ -134,7 +134,7 @@ async def reinspect_task(
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
     task.status = "pending"  # type: ignore[assignment]
-    task.summary_json = None  # type: ignore[assignment]
+    # 保留已有 summary_json 作为 fallback 快照，避免重检立即中止时丢失已有数字
     await db.commit()
     await db.refresh(task)
     return _task_to_out(task)

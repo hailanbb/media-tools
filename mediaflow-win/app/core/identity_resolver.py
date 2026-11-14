@@ -607,8 +607,9 @@ def translate_search_to_local_episodes(episodes: list[int], mapping: dict[str, A
 async def get_verified_metadata_snapshot(
     db: AsyncSession | None,
     cache_key: str,
+    ttl_seconds: int | None = None,
 ) -> dict[str, Any] | None:
-    """读取已核实的持久化元数据快照（永不返回未核实空快照）。"""
+    """读取已核实的持久化元数据快照（支持按完结/连载分级 TTL 有效期管理）。"""
     if db is None:
         return None
     row = (
@@ -625,6 +626,20 @@ async def get_verified_metadata_snapshot(
     try:
         data = json.loads(row.payload_json or "{}")
         if isinstance(data, dict) and data:
+            # 跨任务元数据复用有效期：已完结季 7 天，连载季 1 小时
+            ref_dt = row.updated_at or row.fetched_at
+            if ref_dt:
+                from datetime import datetime as _dt, timezone as _tz
+                now_utc = _dt.now(_tz.utc)
+                if ref_dt.tzinfo is None:
+                    ref_dt = ref_dt.replace(tzinfo=_tz.utc)
+                age_sec = (now_utc - ref_dt).total_seconds()
+                max_age = ttl_seconds
+                if max_age is None:
+                    is_fin = bool(data.get("finished") or (data.get("work_info") or {}).get("status") == "Ended")
+                    max_age = 7 * 86400 if is_fin else 3600
+                if age_sec > max_age:
+                    return None
             return data
     except Exception:
         pass

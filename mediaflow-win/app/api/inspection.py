@@ -37,11 +37,13 @@ async def run_inspection(task_id: str, db: AsyncSession = Depends(get_db)) -> St
         if existing_worker and not existing_worker.done():
             if task.status == "paused":
                 return StatusResponse(ok=False, message="任务已处于暂停状态，请点击【恢复】继续执行或【停止】终止")
+            if task.status == "stopping":
+                return StatusResponse(ok=False, message="任务正在停止并保存进度，请等待保存完成")
             return StatusResponse(ok=False, message="任务正在后台执行中，请勿重复拉起")
 
         prog = get_task_progress(task_id)
-        if task.status == "running" and prog.get("status") == "running":
-            return StatusResponse(ok=False, message="任务正在执行中，请等待完成")
+        if task.status in ("running", "stopping") or prog.get("status") in ("running", "stopping"):
+            return StatusResponse(ok=False, message="任务正在执行或保存中，请等待完成")
 
         # 1. 立即重置内存中的进度状态为初始 running
         TASK_PROGRESS[task_id] = {
@@ -103,10 +105,11 @@ async def stop_inspection(task_id: str, db: AsyncSession = Depends(get_db)) -> S
         raise HTTPException(status_code=404, detail="任务不存在")
 
     await stop_task(task_id)
-    task.status = "stopped"
-    await db.commit()
+    if task.status in ("running", "paused"):
+        task.status = "stopping"
+        await db.commit()
 
-    return StatusResponse(ok=True, message="初检任务已停止")
+    return StatusResponse(ok=True, message="已收到停止请求，正在保存已分析进度...")
 
 
 @router.get("/{task_id}/progress")

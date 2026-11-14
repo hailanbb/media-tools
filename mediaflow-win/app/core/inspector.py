@@ -760,7 +760,16 @@ async def run_inspection(
     if single_season and entry.parent.name:
         show_list.append({"name": entry.parent.name, "path": str(entry.parent)})
     else:
-        await _discover_shows(cd2_client, source_path, show_list, max_depth=4, log=log, progress_callback=progress_callback)
+        await _discover_shows(
+            cd2_client,
+            source_path,
+            show_list,
+            max_depth=4,
+            log=log,
+            progress_callback=progress_callback,
+            cancelled_tasks=cancelled_tasks,
+            task_id=task_id,
+        )
 
     total_shows = len(show_list)
     log.info("源目录 %s 下递归发现 %d 个剧集目录", source_path, total_shows)
@@ -775,6 +784,7 @@ async def run_inspection(
     physical_dir_entries_by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
     tmdb_meta_by_id: dict[str, dict[str, Any]] = {}
     confirmed_targets_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    task_ms_cache: dict[int, dict] = {}
     if db is not None:
         try:
             from sqlalchemy import select as _sa_select
@@ -800,16 +810,22 @@ async def run_inspection(
             confirmed_targets_by_key = {}
 
     async def _inspect_single_show(show_item: dict) -> list[SeasonDiagnosis]:
+        if cancelled_tasks and task_id and task_id in cancelled_tasks:
+            return []
         show_name = show_item["name"]
         show_path = show_item["path"]
         diagnosed_seasons: list[SeasonDiagnosis] = []
 
-        try:
-            all_items = await cd2_client.list_files(show_path)
-        except Exception as e:
-            result.errors.append(f"扫描 {show_name} 失败: {e}")
-            log.error("扫描 %s 失败: %s", show_path, e)
-            return []
+        cached_entries = show_item.pop("entries", None)
+        if isinstance(cached_entries, list) and cached_entries:
+            all_items = cached_entries
+        else:
+            try:
+                all_items = await cd2_client.list_files(show_path)
+            except Exception as e:
+                result.errors.append(f"扫描 {show_name} 失败: {e}")
+                log.error("扫描 %s 失败: %s", show_path, e)
+                return []
 
         season_dirs: list[tuple[int, dict]] = []
         loose_files: list[dict] = []
@@ -870,6 +886,9 @@ async def run_inspection(
                 tmdb_client=active_tmdb,
                 log=log,
             )
+
+        if cancelled_tasks and task_id and task_id in cancelled_tasks:
+            return []
 
         primary_work_info: dict[str, Any] = dict(meta_evidence.get("work_info") or {})
         primary_work_valid = bool(primary_work_info.get("seasons_present") or tmdb_seasons_data)
@@ -952,7 +971,6 @@ async def run_inspection(
 
         show_src_ep_map: dict[str, list[int]] = {}
         show_src_seasons: list[int] = []
-        show_ms_cache: dict[int, dict[str, Any]] = {}
 
         for season_num, season_item in sorted(season_dirs, key=lambda x: x[0]):
             season_path = season_item["path"]
@@ -992,7 +1010,7 @@ async def run_inspection(
                 if target_tid and (mp_client or active_tmdb):
                     try:
                         mapped_seasons = await _fetch_seasons_by_tmdb_id(
-                            mp_client, int(target_tid), log, tmdb_client=active_tmdb, meta_out=mapped_probe
+                            mp_client, int(target_tid), log, tmdb_client=active_tmdb, meta_out=mapped_probe, needed_seasons=[target_sn]
                         )
                     except TypeError:
                         mapped_seasons = await _fetch_seasons_by_tmdb_id(mp_client, int(target_tid), log)
@@ -1367,14 +1385,14 @@ async def run_inspection(
                         )
                         if can_check_emby:
                             tid_key = int(tmdb_id_num)
-                            if tid_key not in show_ms_cache:
-                                show_ms_cache[tid_key] = await mp_client.check_mediaserver_exists_remote(
+                            if tid_key not in task_ms_cache:
+                                task_ms_cache[tid_key] = await mp_client.check_mediaserver_exists_remote(
                                     tid_key,
                                     title=str(primary_work_info.get("name") or ""),
                                     year=str(primary_work_info.get("first_air_date") or "")[:4],
                                     media_type="电视剧",
                                 )
-                            ms_res = show_ms_cache[tid_key]
+                            ms_res = task_ms_cache[tid_key]
                             emby_eps = list((ms_res.get("season_episodes") or {}).get(season_num, []))
                             mediaserver_check = {
                                 "checked": bool(ms_res.get("checked")),
@@ -1690,6 +1708,7 @@ async def run_inspection(
                 raw_groups.append(grp)
 
         if db is not None:
+            is_cancelled = bool(cancelled_tasks and task_id in cancelled_tasks)
             partial_keys_arg = (
                 {
                     (
@@ -1699,7 +1718,7 @@ async def run_inspection(
                     for s in result.seasons
                     if str(s.tmdb_id or extract_dir_tmdb_id(s.show_name) or "").isdigit()
                 }
-                if only_season_path is not None
+                if (only_season_path is not None or is_cancelled)
                 else None
             )
             synced = await sync_directory_groups_for_task(
@@ -1786,7 +1805,15 @@ _SKIP_DIRS = {"mount-check", ".recycle", "@eaDir", "#recycle", ".trash"}
 
 
 async def _discover_shows(
-    cd2_client, dir_path: str, results: list[dict], max_depth: int = 4, log=None, progress_callback=None, stable_id: str = ""
+    cd2_client,
+    dir_path: str,
+    results: list[dict],
+    max_depth: int = 4,
+    log=None,
+    progress_callback=None,
+    stable_id: str = "",
+    cancelled_tasks=None,
+    task_id: str | None = None,
 ) -> None:
     """递归发现剧集目录。
 
@@ -1803,6 +1830,8 @@ async def _discover_shows(
     """
     if max_depth <= 0:
         return
+    if cancelled_tasks and task_id and task_id in cancelled_tasks:
+        return
 
     dir_basename = dir_path.rstrip("/").rsplit("/", 1)[-1] if "/" in dir_path else dir_path
     if progress_callback:
@@ -1816,6 +1845,9 @@ async def _discover_shows(
     except Exception as e:
         if log:
             log.warning("递归扫描 %s 失败: %s", dir_path, e)
+        return
+
+    if cancelled_tasks and task_id and task_id in cancelled_tasks:
         return
 
     has_season_dir = False
@@ -1838,15 +1870,17 @@ async def _discover_shows(
     labelled_children = any(re.search(r"\[tmdbid[=:]\d+\]|[（(]\d{4}[)）]", sub["name"], re.I)
                             for sub in subdirs)
     if has_season_dir or (has_video and not labelled_children):
-        # 这是一个剧集目录
+        # 这是一个剧集目录，携带已列出的目录项供本剧直接消费，避免进入分析后重复 list_files
         dir_name = dir_path.rstrip("/").rsplit("/", 1)[-1] if "/" in dir_path else dir_path
-        item_rec: dict[str, Any] = {"name": dir_name, "path": dir_path}
+        item_rec: dict[str, Any] = {"name": dir_name, "path": dir_path, "entries": items}
         if stable_id:
             item_rec["stable_id"] = stable_id
         results.append(item_rec)
     else:
         # 这是分类目录，继续递归
         for sub in subdirs:
+            if cancelled_tasks and task_id and task_id in cancelled_tasks:
+                return
             sub_sid = str(sub.get("id") or sub.get("fileId") or "")
             await _discover_shows(
                 cd2_client,
@@ -1856,6 +1890,8 @@ async def _discover_shows(
                 log,
                 progress_callback,
                 stable_id=sub_sid,
+                cancelled_tasks=cancelled_tasks,
+                task_id=task_id,
             )
 
 
@@ -1967,8 +2003,11 @@ async def _fetch_seasons_by_tmdb_id(
     log,
     tmdb_client=None,
     meta_out: dict[str, Any] | None = None,
+    needed_seasons: list[int] | set[int] | None = None,
 ) -> dict[int, dict]:
     """已知 tmdb_id，获取季度信息并进行非正片预告剔除与科学完结判定。
+
+    按需抓取分集详情：仅对本地目标季拉取分集详情，其余季保留完整季表摘要，大幅减少外部网络请求。
 
     Returns:
         {season_num: {"total": N, "finished": bool, ...}}
@@ -2011,6 +2050,7 @@ async def _fetch_seasons_by_tmdb_id(
     if isinstance(seasons_raw, list) and seasons_raw:
         today = _dt.now()
         work_status = str((tv_summary or {}).get("status") or "")
+        needed_set = set(needed_seasons) if needed_seasons is not None else None
         for s in seasons_raw:
             sn = s.get("season_number")
             if sn is None:
@@ -2024,7 +2064,9 @@ async def _fetch_seasons_by_tmdb_id(
             ordinals = {}
             episode_titles: dict[int, str] = {}
 
-            if raw_ep_count > 0:
+            should_fetch_episodes = (needed_set is None or sn in needed_set) and raw_ep_count > 0
+
+            if should_fetch_episodes:
                 try:
                     episodes_info = await mp_client.get_tmdb_episodes(tmdb_id, sn) if mp_client else None
                     if not episodes_info and tmdb_client is not None and callable(getattr(type(tmdb_client), "fetch_season_detail", None)):
@@ -2077,6 +2119,17 @@ async def _fetch_seasons_by_tmdb_id(
                             finished = True
                 except Exception:
                     pass
+            elif raw_ep_count > 0:
+                season_air = s.get("air_date") or ""
+                if season_air:
+                    try:
+                        s_date = _dt.strptime(season_air, "%Y-%m-%d")
+                        if (today - s_date).days > 180 or work_status == "Ended":
+                            finished = True
+                    except Exception:
+                        pass
+                elif work_status == "Ended":
+                    finished = True
 
             seasons_data[sn] = {
                 "total": real_total if real_total > 0 else None,
@@ -2621,7 +2674,7 @@ async def _resolve_show_metadata(
     if tmdb_id_num and (mp_client or tmdb_client):
         try:
             seasons_data = await _fetch_seasons_by_tmdb_id(
-                mp_client, tmdb_id_num, log, tmdb_client=tmdb_client, meta_out=meta_probe
+                mp_client, tmdb_id_num, log, tmdb_client=tmdb_client, meta_out=meta_probe, needed_seasons=needed_seasons
             )
         except TypeError:
             # 兼容仅接受 3 参的老式单测 Mock

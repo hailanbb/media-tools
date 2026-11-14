@@ -4,7 +4,7 @@
 
 > **面向家庭影院与云原生 NAS（115网盘 / CloudDrive2 / MoviePilot / Emby / Jellyfin）的新一代智能影视媒体整理、跨库无损归档与双轨运维治理系统。**
 
-[![Version](https://img.shields.io/badge/Release-v2.5.22-6366f1.svg?style=flat-square&logo=github)](https://github.com/hailanbb/media-tools/releases)
+[![Version](https://img.shields.io/badge/Release-v2.5.23-6366f1.svg?style=flat-square&logo=github)](https://github.com/hailanbb/media-tools/releases)
 [![Docker](https://img.shields.io/badge/Docker-Supported-2496ed.svg?style=flat-square&logo=docker)](mediaflow-docker/)
 [![Windows](https://img.shields.io/badge/Windows-Native-0078d4.svg?style=flat-square&logo=windows)](mediaflow-win/)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776ab.svg?style=flat-square&logo=python)](https://www.python.org/)
@@ -220,13 +220,32 @@ MediaFlow 的每一项核心机制均遵循严谨的第一性原理设计方案�
 * 🧩 [《MediaFlow季号错配与跨条目集数核对方案》](MediaFlow季号错配与跨条目集数核对方案-2026-11-12.md) —— 作品归属冲突隔离、短标题防误绑、单季可逆跨条目映射、元数据失败态分层与只读重算；
 * 🔄 [《MediaFlow批量补缺完成刷新与待补清单优化方案》](MediaFlow批量补缺完成刷新与待补清单优化方案-2026-11-12.md) —— 推种前落盘意图、脱敏回执逐集扣减、真缺集待补与已推送待入库同页切换及一键核对入库；
 * 🧭 [《MediaFlow外文发行名误报与同一TMDB多目录复核方案》](MediaFlow外文发行名误报与同一TMDB多目录复核方案-2026-11-12.md) —— 显式 TMDB ID 外文发行名去误报、英文/多语言别名缓存、只读重评估，以及同 ID 多目录合并确认门禁与漂移自动失效；
-* 🛡️ [《MediaFlow异常剧集自动核查与多目录逐季覆盖清理方案》](MediaFlow异常剧集自动核查与多目录逐季覆盖清理方案-2026-11-13.md) —— 初检自动核查 Emby 分集覆盖、0 视频直转待补、多目录逐季覆盖矩阵与单季物理安全清理门禁。
+* 🛡️ [《MediaFlow异常剧集自动核查与多目录逐季覆盖清理方案》](MediaFlow异常剧集自动核查与多目录逐季覆盖清理方案-2026-11-13.md) —— 初检自动核查 Emby 分集覆盖、0 视频直转待补、多目录逐季覆盖矩阵与单季物理安全清理门禁；
+* ⚡ [《MediaFlow初检提速与结果一致性优化方案》](MediaFlow初检提速与结果一致性优化方案-v2.5.22-2026-11-14.md) —— 按需拉取分集详情剪枝、目录项复用消除重复读取、Emby 任务级共享、跨任务元数据缓存复用与停止状态一致性保护。
 
 ---
 
 ## 📜 版本演进历史 (Changelog)
 
-### 🚀 最新稳定版：v2.5.22 (2026-11-13)
+### 🚀 最新稳定版：v2.5.23 (2026-11-14)
+
+* **初检提速与停止状态一致性保护（基于《MediaFlow初检提速与结果一致性优化方案-v2.5.22-2026-11-14.md》）**：
+  * **停止状态一致性与旧结果保护（P0 级修复，`task_service.py` + `tasks.py` + `inspection.py`）**：
+    * 停止请求引入 `stopping` 优雅过渡态，后端保存与落库完成前不提前标记终态；
+    * 零产出中止保护：当任务在中途或目录发现阶段被停止导致本轮产出为 0 时，严禁清空数据库中已有的历史季记录与目录组，完整保留上轮已发布的季明细与汇总快照；
+    * 部分完成安全合并：任务部分完成中止时，仅更新已扫描剧目范围，未扫描范围的已有历史季记录完好留存；
+    * 异常事务安全回滚：发生异常时先回滚当前事务，再用独立事务记录 failed，防止脏写；
+  * **初检性能提速四项组合拳（`inspector.py` + `identity_resolver.py`）**：
+    * 按需拉取分集详情：底层查询仅对当前所需季（`needed_seasons`）请求 `get_tmdb_episodes` / `fetch_season_detail`，其余季仅保留摘要，长寿多季剧分析大幅提速；
+    * 目录发现结果复用：`_discover_shows` 列出的目录项在剧目发现时挂载至 `entries` 并在 `_inspect_single_show` 中直接消费并释放，消除 350+ 次重复的 `list_files` 调用；
+    * 任务内共享 TMDB ID 媒体服务器（Emby）核查结果：将 `task_ms_cache` 提升至任务级，同一任务同 ID 别名目录仅核查一次 Emby；
+    * 跨任务元数据缓存复用与 TTL：完结季设置 7 天 TTL，连载季设置 1 小时 TTL，过期自动重算，有效时直接命中缓存；
+  * **前端去伪存真与平滑交互（`frontend/index.html`）**：
+    * `selectTask` 只要任务存在已发布结果（`completed` / `stopped` / 总数 > 0）均正常加载明细与目录组，杜绝“stopped 有数字无列表”假象；
+    * 细化无记录空态显示，明确区分“本轮尚无已分析剧季”、“该分类无条目”、“明细加载失败，可重试”；
+    * `triggerStopTask` 平滑等待后台轮询完成，状态提示支持 `stopping`（显示保存中进度条与文案）。
+
+#### v2.5.22 (2026-11-13)
 
 * **异常剧集自动核查 Emby 分集覆盖与多目录逐季覆盖安全清理**：
   * **初检主链路自动打通 Emby 分集覆盖核查（`moviepilot` + `inspector`）**：彻底取代卡面手动点击。对带 TMDB ID 且正片为 0（如仅剩 NFO 的空壳目录）或正片有缺失的目录，初检时自动远程核查 Emby；若 Emby 全无直接转入「真缺集待补」；若 Emby 部分收录则精准扣减已收录集仅补差集（如 1–8 集已在 Emby 中则仅补 9–12 集）；若各端并集已齐全则从待补清单移出并明确标注文案，无需人工反复探测；

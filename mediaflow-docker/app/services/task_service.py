@@ -64,8 +64,8 @@ async def stop_task(task_id: str) -> bool:
     evt = get_task_control_event(task_id)
     evt.set()
     if task_id in TASK_PROGRESS:
-        TASK_PROGRESS[task_id]["status"] = "stopped"
-        TASK_PROGRESS[task_id]["message"] = "初检任务已被手动停止，已保存目前进度"
+        TASK_PROGRESS[task_id]["status"] = "stopping"
+        TASK_PROGRESS[task_id]["message"] = "已收到停止请求，正在安全保存已分析进度..."
     return True
 
 
@@ -138,7 +138,7 @@ async def execute_inspection(task_id: str, db: AsyncSession) -> InspectionResult
     async def _on_progress(current: int, total: int, show_name: str, message: str) -> None:
         pct = int((current / total) * 100) if total > 0 else 0
         if task_id in TASK_CANCELLED:
-            cur_status = "stopped"
+            cur_status = "stopping"
         elif control_event and not control_event.is_set():
             cur_status = "paused"
         else:
@@ -199,15 +199,51 @@ async def execute_inspection(task_id: str, db: AsyncSession) -> InspectionResult
                 diag.status = "manually_handled"
         result.compute_summary()
 
-        # 4. 清除旧记录，写入新结果，并继承/隔离在途补缺状态
-        old_records = await db.execute(
-            select(SeasonRecord).where(SeasonRecord.task_id == task_id)
-        )
-        for old in old_records.scalars().all():
-            await db.delete(old)
-        await db.flush()
+        # 4. 结果安全落库与历史保护（重检中止时不覆盖未扫描范围）
+        is_stopped = task_id in TASK_CANCELLED
+
+        if is_stopped and len(result.seasons) == 0:
+            # 零产出中止保护：严禁删除旧记录！完整保留上次发布的季记录与汇总
+            task.status = "stopped"  # type: ignore[assignment]
+            await db.commit()
+
+            TASK_PROGRESS[task_id] = {
+                "task_id": task_id,
+                "status": "stopped",
+                "current": 0,
+                "total": 0,
+                "current_show": "",
+                "percent": 0,
+                "message": "初检已停止（本轮未产出新记录，完整保留上次已有结果）",
+                "error": None,
+            }
+            TASK_EVENTS.pop(task_id, None)
+            TASK_CANCELLED.discard(task_id)
+            return result
 
         now_checked = datetime.now(timezone.utc)
+        scanned_show_paths = {diag.show_path for diag in result.seasons}
+
+        if is_stopped:
+            # 部分完成中止：仅删除本轮已完整扫描的剧目旧记录，保留其余未扫描剧目的历史记录
+            old_records_to_del = await db.scalars(
+                select(SeasonRecord).where(
+                    SeasonRecord.task_id == task_id,
+                    SeasonRecord.show_path.in_(scanned_show_paths),
+                )
+            )
+            for old in old_records_to_del.all():
+                await db.delete(old)
+            await db.flush()
+        else:
+            # 完整扫描成功：全量替换该任务旧记录
+            old_records = await db.execute(
+                select(SeasonRecord).where(SeasonRecord.task_id == task_id)
+            )
+            for old in old_records.scalars().all():
+                await db.delete(old)
+            await db.flush()
+
         for diag in result.seasons:
             record = SeasonRecord(
                 task_id=task_id,
@@ -247,21 +283,22 @@ async def execute_inspection(task_id: str, db: AsyncSession) -> InspectionResult
             )
 
         # 5. 更新任务汇总（扣除已推送全涵盖，保留真实待补清单）
-        is_stopped = task_id in TASK_CANCELLED
         final_status = "stopped" if is_stopped else "completed"
 
         task.status = final_status  # type: ignore[assignment]
         await refresh_task_summary(task_id, db)
         await db.commit()
 
+        total_db_seasons = len(await get_task_seasons(task_id, None, db))
+
         TASK_PROGRESS[task_id] = {
             "task_id": task_id,
             "status": final_status,
-            "current": len(result.seasons),
-            "total": len(result.seasons),
+            "current": total_db_seasons,
+            "total": total_db_seasons,
             "current_show": "",
             "percent": 100 if not is_stopped else TASK_PROGRESS.get(task_id, {}).get("percent", 50),
-            "message": f"初检已停止：已保存已分析的 {len(result.seasons)} 季" if is_stopped else f"初检完成：已分析 {len(result.seasons)} 季",
+            "message": f"初检已停止：已保存已分析的 {len(result.seasons)} 季（当前任务共保留 {total_db_seasons} 季）" if is_stopped else f"初检完成：已分析 {len(result.seasons)} 季",
             "error": None,
         }
 
@@ -271,8 +308,14 @@ async def execute_inspection(task_id: str, db: AsyncSession) -> InspectionResult
         return result
 
     except Exception as exc:
-        task.status = "failed"  # type: ignore[assignment]
-        await db.commit()
+        await db.rollback()
+        try:
+            task = await db.get(Task, task_id)
+            if task:
+                task.status = "failed"  # type: ignore[assignment]
+                await db.commit()
+        except Exception:
+            pass
         TASK_PROGRESS[task_id] = {
             "task_id": task_id,
             "status": "failed",

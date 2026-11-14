@@ -965,6 +965,167 @@ class ReleaseAliasAndMultiDirTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(rec_after.status, "cleaned_redundant")
                     self.assertIn("已通过多目录归档覆盖核验清理源端残留", rec_after.status_detail)
 
+    async def test_08_reinspect_stop_preserves_old_records_when_zero_or_partial(self):
+        """P0 回归：停止与重检保护旧记录，零产出绝不删除已有季明细，部分完成保留未扫描范围。"""
+        import asyncio
+        from app.services.task_service import execute_inspection, TASK_CANCELLED, get_task_seasons
+        from app.api.tasks import reinspect_task
+
+        task_id = "t-stop-protect"
+        src_path = "/src/Variety"
+        show_a_path = f"{src_path}/剧目A [tmdbid=1001]"
+        show_b_path = f"{src_path}/剧目B [tmdbid=1002]"
+        async with async_session() as db:
+            task = Task(id=task_id, name="综艺任务", source_path=src_path, media_type="tv", status="completed", summary_json=json.dumps({"total_seasons": 2, "archive_ready": 2}))
+            db.add(task)
+            rec1 = SeasonRecord(
+                task_id=task_id, show_name="剧目A", show_path=show_a_path, tmdb_id=1001, season_number=1, season_path=f"{show_a_path}/Season 1", total_episodes=10, local_episode_count=10, status="archive_ready"
+            )
+            rec2 = SeasonRecord(
+                task_id=task_id, show_name="剧目B", show_path=show_b_path, tmdb_id=1002, season_number=1, season_path=f"{show_b_path}/Season 1", total_episodes=12, local_episode_count=12, status="archive_ready"
+            )
+            db.add(rec1)
+            db.add(rec2)
+            await db.commit()
+
+        # 1. 测试 reinspect_task 不清除已有 summary_json
+        async with async_session() as db:
+            out = await reinspect_task(task_id, db=db)
+            self.assertEqual(out.status, "pending")
+            reloaded = await db.get(Task, task_id)
+            self.assertIsNotNone(reloaded.summary_json, "reinspect 不得清空已有的 summary_json 快照")
+
+        # 2. 模拟目录发现阶段即被停止（0 季产出）
+        class StopDuringDiscoverCD2(MockCD2):
+            async def list_files(self, path: str):
+                from app.services.task_service import stop_task
+                await stop_task(task_id)
+                return await super().list_files(path)
+
+        cd2_empty = StopDuringDiscoverCD2({src_path: []})
+        mp = MockMP()
+        tmdb = MockTMDB({})
+        with patch("app.clients.clouddrive2.CloudDrive2Client", return_value=cd2_empty), \
+             patch("app.clients.moviepilot.MoviePilotClient", return_value=mp), \
+             patch("app.clients.tmdb.TMDBClient", return_value=tmdb):
+            async with async_session() as db:
+                res = await execute_inspection(task_id, db)
+                self.assertEqual(len(res.seasons), 0)
+
+        # 核心断言：已有 2 条 SeasonRecord 绝不可被抹除！
+        async with async_session() as db:
+            t = await db.get(Task, task_id)
+            self.assertEqual(t.status, "stopped")
+            seasons = await get_task_seasons(task_id, None, db)
+            self.assertEqual(len(seasons), 2, "零产出中止时旧季记录必须被完整保留！")
+
+        # 3. 模拟部分完成中止：仅更新已扫描剧目A，剧目B继续保留
+        cd2_partial = MockCD2({
+            src_path: [
+                {"name": "剧目A [tmdbid=1001]", "path": show_a_path, "isDirectory": True},
+                {"name": "剧目B [tmdbid=1002]", "path": show_b_path, "isDirectory": True},
+            ],
+            show_a_path: [{"name": "剧目A.S01E01.mp4", "path": f"{show_a_path}/剧目A.S01E01.mp4", "isDirectory": False, "size": 1000}],
+            show_b_path: [{"name": "剧目B.S01E01.mp4", "path": f"{show_b_path}/剧目B.S01E01.mp4", "isDirectory": False, "size": 1000}],
+        })
+
+        from app.services.task_service import TASK_PROGRESS
+        class PartialStopMP(MockMP):
+            async def get_tmdb_seasons(self, tmdb_id: int):
+                if tmdb_id == 1002:
+                    while TASK_PROGRESS.get(task_id, {}).get("current", 0) < 1:
+                        await asyncio.sleep(0.01)
+                    from app.services.task_service import stop_task
+                    await stop_task(task_id)
+                return await super().get_tmdb_seasons(tmdb_id)
+
+        stop_mp = PartialStopMP()
+        stop_mp.seasons_by_tid[1001] = [{"season_number": 1, "episode_count": 1}]
+        stop_mp.eps_by_key[(1001, 1)] = [{"episode_number": 1, "name": "第1集"}]
+        stop_mp.seasons_by_tid[1002] = [{"season_number": 1, "episode_count": 12}]
+        stop_mp.eps_by_key[(1002, 1)] = [{"episode_number": 1, "name": "第1集"}]
+
+        with patch("app.clients.clouddrive2.CloudDrive2Client", return_value=cd2_partial), \
+             patch("app.clients.moviepilot.MoviePilotClient", return_value=stop_mp), \
+             patch("app.clients.tmdb.TMDBClient", return_value=tmdb):
+            async with async_session() as db:
+                res2 = await execute_inspection(task_id, db)
+                self.assertEqual(len(res2.seasons), 1)
+
+        async with async_session() as db:
+            seasons_after = await get_task_seasons(task_id, None, db)
+            # 剧目A 更新为新扫描结果 (1集)，未扫描的剧目B 依然保留 (12集)！总数仍为 2！
+            self.assertEqual(len(seasons_after), 2, "部分扫描中止时，未扫描范围的历史记录必须保留！")
+            names = {s.show_name.split()[0] for s in seasons_after}
+            self.assertEqual(names, {"剧目A", "剧目B"})
+
+    async def test_09_fetch_seasons_needed_seasons_pruning_and_cache_reuse(self):
+        """初检提速改动回归：按需拉取分集详情剪枝、目录快照复用与 Emby 任务级共享。"""
+        import logging
+        from app.core.inspector import _fetch_seasons_by_tmdb_id, _discover_shows
+        from app.core.identity_resolver import get_verified_metadata_snapshot, save_verified_metadata_snapshot
+
+        # 1. 验证 needed_seasons 剪枝：当所需季只有 S01 时，S02 的 get_tmdb_episodes 不被调用
+        class TrackingMP(MockMP):
+            def __init__(self):
+                super().__init__()
+                self.ep_calls = []
+            async def get_tmdb_episodes(self, tmdb_id: int, season_num: int):
+                self.ep_calls.append((tmdb_id, season_num))
+                return await super().get_tmdb_episodes(tmdb_id, season_num)
+
+        tracking_mp = TrackingMP()
+        tracking_mp.seasons_by_tid[9999] = [
+            {"season_number": 1, "episode_count": 5, "name": "第一季"},
+            {"season_number": 2, "episode_count": 20, "name": "第二季"},
+        ]
+        tracking_mp.eps_by_key[(9999, 1)] = [{"episode_number": i, "name": f"第{i}集"} for i in range(1, 6)]
+        tracking_mp.eps_by_key[(9999, 2)] = [{"episode_number": i, "name": f"第{i}集"} for i in range(1, 21)]
+
+        data = await _fetch_seasons_by_tmdb_id(
+            tracking_mp, 9999, logging.getLogger("test"), needed_seasons=[1]
+        )
+        self.assertIn(1, data)
+        self.assertIn(2, data)
+        # 核心断言：仅 S01 产生了分集网络请求，S02 被剪枝！
+        self.assertIn((9999, 1), tracking_mp.ep_calls)
+        self.assertNotIn((9999, 2), tracking_mp.ep_calls)
+        self.assertEqual(data[2]["total"], 20, "未深度拉取的季仍完整保留季摘要总集数！")
+
+        # 2. 验证 _discover_shows 携带 entries 快照
+        cd2_tree = MockCD2({
+            "/src/TestRoot": [
+                {"name": "极地恶灵 [tmdbid=75191]", "path": "/src/TestRoot/极地恶灵 [tmdbid=75191]", "isDirectory": True}
+            ],
+            "/src/TestRoot/极地恶灵 [tmdbid=75191]": [
+                {"name": "Season 1", "path": "/src/TestRoot/极地恶灵 [tmdbid=75191]/Season 1", "isDirectory": True}
+            ]
+        })
+        shows = []
+        await _discover_shows(cd2_tree, "/src/TestRoot", shows, max_depth=3)
+        self.assertEqual(len(shows), 1)
+        self.assertIn("entries", shows[0], "发现剧集时必须挂载已列出的目录项快照 entries")
+        self.assertEqual(len(shows[0]["entries"]), 1)
+
+        # 3. 验证 MetadataCache TTL：已完结季 7 天有效，连载季 1 小时
+        async with async_session() as db:
+            await save_verified_metadata_snapshot(
+                db, "tmdb:test_fin:S01", "tmdb_season", "test_fin", 1, {"total": 10, "finished": True}
+            )
+            await save_verified_metadata_snapshot(
+                db, "tmdb:test_airing:S01", "tmdb_season", "test_airing", 1, {"total": 10, "finished": False}
+            )
+            await db.commit()
+
+            # 正常读取未过期
+            s_fin = await get_verified_metadata_snapshot(db, "tmdb:test_fin:S01")
+            self.assertIsNotNone(s_fin)
+            self.assertEqual(s_fin["total"], 10)
+
+            # 传入超短 ttl 模拟过期
+            s_expired = await get_verified_metadata_snapshot(db, "tmdb:test_fin:S01", ttl_seconds=-1)
+            self.assertIsNone(s_expired, "超过 TTL 的快照必须判定为过期并返回 None")
+
 
 if __name__ == "__main__":
     unittest.main()
