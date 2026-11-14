@@ -151,6 +151,82 @@ async def _safe_cleanup_source_show_dir(
         return False
 
 
+async def _migrate_specials_to_season_0(
+    cd2: CloudDrive2Client,
+    contents: list[dict[str, Any]],
+    target_parent: str,
+    target_parent_files: list[dict[str, Any]],
+    season_number: int,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """检测并迁移季内先导特辑 (E00/SP01) 至目标剧集的 Season 0 (特别篇) 目录。"""
+    from app.core.episode_parser import parse_episode
+    from app.core.file_utils import is_video_file
+
+    special_videos = []
+    for f in contents:
+        if f.get("isDirectory"):
+            continue
+        fname = f.get("name", "")
+        if not is_video_file(fname):
+            continue
+        parsed = parse_episode(fname)
+        is_e00 = (parsed.episode_numbers == [0]) or bool(
+            re.search(r"(?:^|[^a-z0-9])[Ss]0*\d+[Ee]00(?!\d)|(?:^|[^a-z0-9])[Ee]00(?!\d)|SP0*1", fname, re.I)
+        )
+        if is_e00:
+            special_videos.append(f)
+
+    if not special_videos:
+        return contents, []
+
+    special_stems = {re.sub(r"\.[^.]+$", "", v.get("name", "")).lower() for v in special_videos}
+    special_files_to_move = []
+    remaining_contents = []
+
+    for f in contents:
+        fname = f.get("name", "")
+        stem = re.sub(r"\.[^.]+$", "", fname).lower()
+        clean_stem = re.sub(r"-thumb$", "", stem)
+        if stem in special_stems or clean_stem in special_stems or f in special_videos:
+            special_files_to_move.append(f)
+        else:
+            remaining_contents.append(f)
+
+    if not special_files_to_move:
+        return contents, []
+
+    s0_dir_name = "Season 0"
+    for tf in target_parent_files:
+        if tf.get("isDirectory") and tf.get("name", "").lower() in ("season 0", "season 00", "specials", "特别篇"):
+            s0_dir_name = tf.get("name")
+            break
+
+    target_s0_path = posixpath.join(target_parent, s0_dir_name)
+    try:
+        await cd2.mkdir(target_s0_path)
+    except Exception as e:
+        log.warning("创建目标特别篇目录 %s 失败或已存在: %s", target_s0_path, e)
+
+    moved_names = []
+    for sf in special_files_to_move:
+        src_path = sf.get("path")
+        if not src_path:
+            continue
+        try:
+            mv_res = await cd2.move_file(src_path, target_s0_path, skip_existing=True)
+            if mv_res.get("success", True):
+                moved_names.append(sf.get("name", ""))
+                log.info("已智能将先导特辑移入特别篇目录: %s -> %s", sf.get("name"), target_s0_path)
+            else:
+                log.warning("迁移先导特辑 %s 失败: %s", sf.get("name"), mv_res.get("errorMessage"))
+                remaining_contents.append(sf)
+        except Exception as mv_err:
+            log.warning("迁移先导特辑 %s 异常: %s", sf.get("name"), mv_err)
+            remaining_contents.append(sf)
+
+    return remaining_contents, moved_names
+
+
 async def _refresh_task_summary(task_id: str, db: AsyncSession) -> None:
     """级联刷新关联 Task 的汇总统计 summary_json（含真缺集待补与已推送待入库）。"""
     from app.services.gap_fill_tracker import refresh_task_summary
@@ -314,6 +390,17 @@ async def execute_archive(
                                 log.error(err_msg)
                                 errors.append(err_msg)
                                 continue
+
+                        # 智能分流季内先导特辑 (E00/SP01) 至目标特别篇 Season 0
+                        contents, moved_specials = await _migrate_specials_to_season_0(
+                            cd2=cd2,
+                            contents=contents,
+                            target_parent=target_parent,
+                            target_parent_files=target_parent_files_cache or [],
+                            season_number=rec.season_number,
+                        )
+                        if moved_specials:
+                            log.info("%s S%02d: 成功智能分流 %d 个先导特辑/伴生文件至 Season 0", rec.show_name, rec.season_number, len(moved_specials))
 
                         # 【P0: 目标季匹配多个候选时停止，展示候选路径】
                         candidate_seasons = [

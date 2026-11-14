@@ -375,6 +375,10 @@ def diagnose_season(
 
     # 3. 超范围集号容错与异常保护 (P1-4):
     if out_of_range:
+        # 先导片/季前特辑智能容错：超范围集号仅为 [0]，正片 1..total 全部就绪且无重复，视为附随先导特辑直接就绪可归档（归档时智能移入 Season 0）
+        if out_of_range == [0] and not has_duplicates:
+            return "archive_ready", f"全 {total_episodes} 集齐全（附带第 0 集先导特辑，归档时智能移入 Season 0），可归档"
+
         # 若允许加更特辑容错且官方总集数正常 (>=6)，超出部分紧邻总集数（<= total + 4 且数量 <= 3），无重复集，视为附随特辑直接就绪可归档
         if allow_bonus_specials and total_episodes >= 6 and max(out_of_range) <= total_episodes + 4 and len(out_of_range) <= 3 and not has_duplicates:
             extra_desc = f"（附带 {len(out_of_range)} 集加更/特辑: {out_of_range}）"

@@ -39,7 +39,7 @@ SHARED_SCRAPE = re.compile(
     re.IGNORECASE,
 )
 EXTRA_REGEX = re.compile(
-    r"(?:^|[\s._\-\(\[])(?:日记|Diary|花活儿|Extra|花絮|彩蛋|纯享|采访|访谈|先行片|预告|Preview|Behind[._\s-]the[._\s-]Scenes|Making[._\s-]of)(?:$|[\s._\-\)\]])",
+    r"(?:^|[\s._\-\(\[])(?:日记|Diary|花活儿|Extra|花絮|彩蛋|纯享|采访|访谈|先行片|先导(?:片)?|超前(?:企划)?|预告|Preview|Behind[._\s-]the[._\s-]Scenes|Making[._\s-]of|SP\d*)(?:$|[\s._\-\)\]])",
     re.IGNORECASE,
 )
 TMP_DOWNLOAD_REGEX = re.compile(r"\.(?:part|tmp|temp|download|downloading|crdownload|!qb|aria2|xltd)$", re.IGNORECASE)
@@ -104,48 +104,63 @@ def episode_from_any_name(filename: str, season: Optional[int] = None) -> Option
 
 
 def episodes_from_name(filename: str, season: Optional[int] = None) -> List[int]:
-    """从文件名中提取所有集号（F07: 支持范围集如 S01E01-E02、EP01-03、第01-02集 等多集格式）。"""
+    """从文件名中提取所有集号（支持范围集如 S01E01-E02、EP01-03、第01-02集 等多集格式）。"""
     if not filename or not MEDIA_REGEX.search(filename):
         return []
 
     name = re.sub(r"\.[^.]+$", "", filename)
-    # 忽略特典
-    if re.search(r"(?:^|[\s._\-[\]])(?:NCOP|NCED|PV|CM|Preview|Menu|Creditless|Textless|CleanOP|CleanED)\d*", name, re.IGNORECASE):
-        return []
 
+    # 1. 优先提取明确的季集号与分集编号
+    extracted: List[int] = []
     if season is not None:
         se_pattern = re.compile(rf"(?:^|[^a-z0-9])S0*{season}\s*E(\d{{1,4}})(?:-[Ee]?(\d{{1,4}}))?(?!\d)", re.IGNORECASE)
         m = se_pattern.search(name)
         if m:
             s_ep = int(m.group(1))
             e_ep = int(m.group(2)) if m.group(2) else s_ep
-            return list(range(s_ep, e_ep + 1))
+            extracted = list(range(s_ep, e_ep + 1))
 
-    m = re.search(r"(?:^|[^a-z0-9])S\d{1,4}\s*E(\d{1,4})(?:-[Ee]?(\d{1,4}))?(?!\d)", name, re.IGNORECASE)
-    if m:
-        s_ep = int(m.group(1))
-        e_ep = int(m.group(2)) if m.group(2) else s_ep
-        return list(range(s_ep, e_ep + 1))
+    if not extracted:
+        m = re.search(r"(?:^|[^a-z0-9])S\d{1,4}\s*E(\d{1,4})(?:-[Ee]?(\d{1,4}))?(?!\d)", name, re.IGNORECASE)
+        if m:
+            s_ep = int(m.group(1))
+            e_ep = int(m.group(2)) if m.group(2) else s_ep
+            extracted = list(range(s_ep, e_ep + 1))
 
-    m = re.search(r"第\s*(\d{1,4})(?:\s*[-~至到]\s*(\d{1,4}))?\s*[集话話回章]", name)
-    if m:
-        s_ep = int(m.group(1))
-        e_ep = int(m.group(2)) if m.group(2) else s_ep
-        return list(range(s_ep, e_ep + 1))
+    if not extracted:
+        m = re.search(r"第\s*(\d{1,4})(?:\s*[-~至到]\s*(\d{1,4}))?\s*[集话話回章]", name)
+        if m:
+            s_ep = int(m.group(1))
+            e_ep = int(m.group(2)) if m.group(2) else s_ep
+            extracted = list(range(s_ep, e_ep + 1))
 
-    m = re.search(r"(?:^|[\s._\-[\]])(?:EP|E)\s*(\d{1,4})(?:-[Ee]?[Pp]?(\d{1,4}))?(?!\d)", name, re.IGNORECASE)
-    if m:
-        s_ep = int(m.group(1))
-        e_ep = int(m.group(2)) if m.group(2) else s_ep
-        return list(range(s_ep, e_ep + 1))
+    if not extracted:
+        m = re.search(r"(?:^|[\s._\-[\]])(?:EP|E)\s*(\d{1,4})(?:-[Ee]?[Pp]?(\d{1,4}))?(?!\d)", name, re.IGNORECASE)
+        if m:
+            s_ep = int(m.group(1))
+            e_ep = int(m.group(2)) if m.group(2) else s_ep
+            extracted = list(range(s_ep, e_ep + 1))
 
-    m = re.search(r"[\s._-](\d{2,4})(?:v\d+)?[\s._\-\]]", name)
-    if m:
-        ep_val = int(m.group(1))
-        if 0 < ep_val < 1000:
-            return [ep_val]
+    if not extracted:
+        m = re.search(r"[\s._-](\d{2,4})(?:v\d+)?[\s._\-\]]", name)
+        if m:
+            ep_val = int(m.group(1))
+            if 0 < ep_val < 1000:
+                extracted = [ep_val]
 
-    return []
+    # 2. 特典文件安全识别：严格词边界，严防误伤 CMCTV、CMCT、PreviewX 等发布组标签
+    # 且若文件名已携带标准 SxxExx 明确正片集号（>=1），具有绝对正片优先级，禁止视作纯特典抛弃
+    has_explicit_episode = bool(extracted and any(e > 0 for e in extracted) and re.search(r"[Ss]\d{1,2}[Ee]\d+", name))
+    if not has_explicit_episode:
+        is_pure_special = bool(re.search(
+            r"(?:^|[\s._\-[\]])(?:NCOP|NCED|PV|CM|Menu|Creditless|Textless|CleanOP|CleanED)\d*(?:$|[\s._\-[\]])",
+            name,
+            re.IGNORECASE,
+        ))
+        if is_pure_special:
+            return []
+
+    return extracted
 
 
 def episode_from_name(filename: str, season: Optional[int] = None) -> Optional[int]:
