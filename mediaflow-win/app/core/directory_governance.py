@@ -454,13 +454,28 @@ def build_group_coverage_matrix(
     confirmed_target = normalize_dir_path(group_dict.get("confirmed_target_path") or "")
     confirmation_mode = str(group_dict.get("confirmation_mode") or "")
 
+    # 仅从与当前组匹配（同 TMDB ID 或路径属于本组）的记录中收集季度与总集数，防止全任务季号污染
+    group_tmdb_id = str(group_dict.get("tmdb_id") or "").strip()
+    group_show_paths = {
+        normalize_dir_path(ent.get("norm_path") or "")
+        for ent in entries
+        if isinstance(ent, dict) and ent.get("norm_path")
+    }
+
+    matched_records: list[Any] = []
+    for rec in season_records:
+        r_tid = str(getattr(rec, "tmdb_id", "") or "").strip()
+        r_sp = normalize_dir_path(getattr(rec, "show_path", "") or "")
+        if (group_tmdb_id and r_tid == group_tmdb_id) or (r_sp and r_sp in group_show_paths):
+            matched_records.append(rec)
+
     # 汇总所有涉及到的季度
     seasons_set: set[int] = set()
     for ent in entries:
         for s in ent.get("seasons") or []:
             if str(s).isdigit():
                 seasons_set.add(int(s))
-    for rec in season_records:
+    for rec in matched_records:
         if getattr(rec, "season_number", None) is not None:
             seasons_set.add(int(rec.season_number))
 
@@ -469,7 +484,7 @@ def build_group_coverage_matrix(
 
     rec_by_show_and_sn: dict[tuple[str, int], Any] = {}
     total_by_sn: dict[int, int] = {}
-    for rec in season_records:
+    for rec in matched_records:
         sp = normalize_dir_path(getattr(rec, "show_path", "") or "")
         sn = int(getattr(rec, "season_number", 1))
         rec_by_show_and_sn[(sp, sn)] = rec
@@ -746,6 +761,7 @@ async def enrich_directory_groups_from_db(
 
     missing_tids = {t for t in tids if not meta_by_tid.get(t, {}).get("name")}
     task_season_records: list[Any] = []
+    arc_parent_by_show: dict[str, str] = {}
     if callable(scalars_fn):
         q_all_recs = scalars_fn(select(SeasonRecord).where(SeasonRecord.task_id == task_id))
         if _inspect.isawaitable(q_all_recs):

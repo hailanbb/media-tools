@@ -109,7 +109,7 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.27</span>
+              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.28</span>
             </div>
             <!-- 完善后的命名 -->
             <p class="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">智能媒体库整理与归档工作台</p>
@@ -1631,21 +1631,23 @@
       if (task._seasonsLoaded) {
         const revSeasons = (task.categories && Array.isArray(task.categories.review)) ? task.categories.review.length : 0;
         document.getElementById('catCountReview').innerHTML = `${revSeasons} <span class="text-xs font-normal">处需清理</span>`;
-        const anomCount = (task.categories && task.categories.anomaly) ? task.categories.anomaly.length : (task.counts.archive_check || 0);
-        const trackingCount = (task.categories && task.categories.anomaly)
-          ? task.categories.anomaly.filter(it => it.actionType === 'system_tracking' || (it.raw && it.raw.status === 'period_review')).length
-          : 0;
+        const anomList = (task.categories && Array.isArray(task.categories.anomaly)) ? task.categories.anomaly : [];
+        const anomCount = anomList.length || (task.counts.archive_check || 0);
+        const cleanableCount = anomList.filter(it => it.actionType === 'clean_redundant' || it.raw?.status === 'already_archived').length;
+        const pendingEvCount = anomList.filter(it => it.actionType === 'system_tracking' || it.raw?.status === 'period_review' || it.raw?.status === 'unknown').length;
+        const decisionCount = Math.max(0, anomCount - cleanableCount - pendingEvCount);
+
         const pendingDgCount = (task && Array.isArray(task.directoryGroups))
           ? task.directoryGroups.filter(g => g.status === 'pending_confirm').length
           : (task.counts.pending_directory_groups || 0);
         const anomEl = document.getElementById('catCountAnomaly');
         if (anomEl) {
           let extraHtml = '';
-          if (trackingCount > 0) {
-            extraHtml += ` · <span class="text-xs font-normal text-slate-500 dark:text-slate-400">跟踪${trackingCount}</span>`;
+          if (anomCount > 0) {
+            extraHtml += ` · <span class="text-xs font-normal text-amber-700 dark:text-amber-300">需决定${decisionCount}</span> · <span class="text-xs font-normal text-slate-500 dark:text-slate-400">待决${pendingEvCount}</span> · <span class="text-xs font-normal text-emerald-700 dark:text-emerald-300">清源${cleanableCount}</span>`;
           }
           if (pendingDgCount > 0) {
-            extraHtml += ` · <span class="text-xs font-semibold text-amber-700 dark:text-amber-300">${pendingDgCount}组待确认</span>`;
+            extraHtml += ` · <span class="text-xs font-semibold text-purple-700 dark:text-purple-300">${pendingDgCount}组待确认</span>`;
           }
           anomEl.innerHTML = `${anomCount} <span class="text-xs font-normal">季异常</span>${extraHtml}`;
         }
@@ -2242,48 +2244,52 @@
 
         let detailsContentHtml = '';
         if (Array.isArray(g.coverage_matrix) && g.coverage_matrix.length > 0) {
-          const matrixRows = g.coverage_matrix.map(row => {
-            const isSource = row.side === 'source';
-            const badgeCls = isSource
-              ? 'bg-sky-100 dark:bg-sky-900/50 text-sky-700 dark:text-sky-300'
-              : (row.is_confirmed_target
-                  ? 'bg-emerald-100 dark:bg-emerald-900/50 text-emerald-700 dark:text-emerald-300'
-                  : 'bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-300');
-            const sideLabel = isSource
-              ? '源端'
-              : (row.is_confirmed_target ? '已确认归档目标' : '归档库候补');
+          const matrixRows = [];
+          g.coverage_matrix.forEach(sec => {
+            const rows = Array.isArray(sec.rows) ? sec.rows : (sec.side ? [sec] : []);
+            rows.forEach(row => {
+              const isSource = row.side === 'source';
+              const badgeCls = isSource
+                ? 'bg-sky-100 dark:bg-sky-900/50 text-sky-700 dark:text-sky-300'
+                : (row.is_confirmed_target
+                    ? 'bg-emerald-100 dark:bg-emerald-900/50 text-emerald-700 dark:text-emerald-300'
+                    : 'bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-300');
+              const sideLabel = isSource
+                ? '源端'
+                : (row.is_confirmed_target ? '已确认归档目标' : '归档库候补');
 
-            let opCellHtml = '';
-            if (isSource) {
-              if (row.can_delete) {
-                opCellHtml = `
-                  <button type="button" onclick="confirmCleanDirectoryGroupSourceSeason('${escapeHtml(g.id)}', '${escapeHtml(row.season_record_id || '')}', '${escapeHtml(row.path || '')}', '${escapeHtml(row.season_label || '')}', '${escapeHtml(g.confirmed_target_path || '')}')" class="px-2.5 py-1 rounded-lg bg-purple-600 hover:bg-purple-700 text-white font-semibold text-xs shadow-xs transition flex items-center gap-1 ml-auto">
-                    <i class="fa-solid fa-trash-can text-[10px]"></i>
-                    <span>删除源端（本季）</span>
-                  </button>`;
+              let opCellHtml = '';
+              if (isSource) {
+                if (row.can_delete) {
+                  opCellHtml = `
+                    <button type="button" onclick="confirmCleanDirectoryGroupSourceSeason('${escapeHtml(g.id)}', '${escapeHtml(row.season_record_id || '')}', '${escapeHtml(row.path || '')}', '${escapeHtml(row.season_label || '')}', '${escapeHtml(g.confirmed_target_path || '')}')" class="px-2.5 py-1 rounded-lg bg-purple-600 hover:bg-purple-700 text-white font-semibold text-xs shadow-xs transition flex items-center gap-1 ml-auto">
+                      <i class="fa-solid fa-trash-can text-[10px]"></i>
+                      <span>删除源端（本季）</span>
+                    </button>`;
+                } else {
+                  opCellHtml = `<span class="text-slate-400 dark:text-slate-500 text-[11px] block text-right" title="${escapeHtml(row.delete_block_reason || '')}">${escapeHtml(row.delete_block_reason || '保留源端')}</span>`;
+                }
               } else {
-                opCellHtml = `<span class="text-slate-400 dark:text-slate-500 text-[11px] block text-right" title="${escapeHtml(row.delete_block_reason || '')}">${escapeHtml(row.delete_block_reason || '保留源端')}</span>`;
+                opCellHtml = row.is_confirmed_target
+                  ? `<span class="text-emerald-600 dark:text-emerald-400 font-semibold text-[11px] block text-right">✓ 选定目标</span>`
+                  : `<span class="text-slate-400 dark:text-slate-500 text-[11px] block text-right">候补目录</span>`;
               }
-            } else {
-              opCellHtml = row.is_confirmed_target
-                ? `<span class="text-emerald-600 dark:text-emerald-400 font-semibold text-[11px] block text-right">✓ 选定目标</span>`
-                : `<span class="text-slate-400 dark:text-slate-500 text-[11px] block text-right">候补目录</span>`;
-            }
 
-            return `
-              <tr class="hover:bg-slate-50/50 dark:hover:bg-slate-800/40 transition">
-                <td class="py-2 px-2.5 space-y-0.5">
-                  <div class="inline-block px-1.5 py-0.5 rounded text-[10px] font-sans font-semibold ${badgeCls}">${sideLabel}</div>
-                  <div class="font-mono text-slate-700 dark:text-slate-200 text-[11px] break-all">${escapeHtml(row.path || '')}</div>
-                </td>
-                <td class="py-2 px-2 font-mono font-semibold text-slate-900 dark:text-white">${escapeHtml(row.season_label || 'S01')}</td>
-                <td class="py-2 px-2.5 font-mono text-slate-700 dark:text-slate-300">${escapeHtml(row.coverage_text || '-')}</td>
-                <td class="py-2 px-2.5 font-mono ${row.missing_text === '无' ? 'text-emerald-600 dark:text-emerald-400 font-semibold' : 'text-slate-500 dark:text-slate-400'}">${escapeHtml(row.missing_text || '-')}</td>
-                <td class="py-2 px-2.5 text-right">${opCellHtml}</td>
-              </tr>`;
-          }).join('');
+              matrixRows.push(`
+                <tr class="hover:bg-slate-50/50 dark:hover:bg-slate-800/40 transition">
+                  <td class="py-2 px-2.5 space-y-0.5">
+                    <div class="inline-block px-1.5 py-0.5 rounded text-[10px] font-sans font-semibold ${badgeCls}">${sideLabel}</div>
+                    <div class="font-mono text-slate-700 dark:text-slate-200 text-[11px] break-all">${escapeHtml(row.path || '')}</div>
+                  </td>
+                  <td class="py-2 px-2 font-mono font-semibold text-slate-900 dark:text-white">${escapeHtml(row.season_label || sec.season_label || 'S01')}</td>
+                  <td class="py-2 px-2.5 font-mono text-slate-700 dark:text-slate-300">${escapeHtml(row.coverage_text || '-')}</td>
+                  <td class="py-2 px-2.5 font-mono ${row.missing_text === '无' ? 'text-emerald-600 dark:text-emerald-400 font-semibold' : 'text-slate-500 dark:text-slate-400'}">${escapeHtml(row.missing_text || '-')}</td>
+                  <td class="py-2 px-2.5 text-right">${opCellHtml}</td>
+                </tr>`);
+            });
+          });
 
-          detailsContentHtml = `
+          detailsContentHtml = matrixRows.length > 0 ? `
             <div class="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800">
               <table class="w-full text-left border-collapse text-[11px]">
                 <thead class="bg-slate-100/80 dark:bg-slate-800/80 text-slate-600 dark:text-slate-300 font-semibold">
@@ -2295,9 +2301,9 @@
                     <th class="py-2 px-2.5 text-right">核验状态 / 操作</th>
                   </tr>
                 </thead>
-                <tbody class="divide-y divide-slate-100 dark:divide-slate-800">${matrixRows}</tbody>
+                <tbody class="divide-y divide-slate-100 dark:divide-slate-800">${matrixRows.join('')}</tbody>
               </table>
-            </div>`;
+            </div>` : `<div class="space-y-1.5">${entriesHtml}</div>`;
         } else {
           detailsContentHtml = `<div class="space-y-1.5">${entriesHtml}</div>`;
         }
@@ -2426,8 +2432,9 @@
       const downloadPushedItems = (task && task.categories && Array.isArray(task.categories.download_pushed)) ? task.categories.download_pushed : [];
 
       const anomalyItems = (task && task.categories && Array.isArray(task.categories.anomaly)) ? task.categories.anomaly : [];
-      const anomalyTrackingItems = anomalyItems.filter(it => it.actionType === 'system_tracking' || (it.raw && it.raw.status === 'period_review'));
-      const anomalyManualItems = anomalyItems.filter(it => it.actionType !== 'system_tracking' && !(it.raw && it.raw.status === 'period_review'));
+      const anomalyCleanableItems = anomalyItems.filter(it => it.actionType === 'clean_redundant' || it.raw?.status === 'already_archived');
+      const anomalyPendingEvidenceItems = anomalyItems.filter(it => it.actionType === 'system_tracking' || it.raw?.status === 'period_review' || it.raw?.status === 'unknown');
+      const anomalyDecisionItems = anomalyItems.filter(it => !anomalyCleanableItems.includes(it) && !anomalyPendingEvidenceItems.includes(it));
       const curAnomalyTab = (typeof activeAnomalyTab !== 'undefined') ? activeAnomalyTab : 'all';
 
       // 动态 banner 与 batch 按钮（按分类切换）
@@ -2461,29 +2468,31 @@
           </div>`;
       } else if (currentCategory === 'anomaly' || currentCategory === 'already_archived') {
         if (selectAllLabel) selectAllLabel.textContent = "逐项核对";
-        if (anomalyTrackingItems.length > 0) {
-          batchContainer.innerHTML = `
-            <div role="tablist" aria-label="异常分类清单" class="inline-flex items-center gap-1 rounded-xl bg-slate-100 dark:bg-slate-800/80 p-1">
-              <button type="button" role="tab" data-anomaly-tab="all" aria-selected="${curAnomalyTab === 'all' ? 'true' : 'false'}" onclick="switchAnomalyTab('all')" class="px-3 py-1 rounded-lg text-xs font-semibold transition ${curAnomalyTab === 'all' ? 'bg-white dark:bg-slate-900 text-purple-600 dark:text-purple-400 shadow-sm' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'}">
-                全部异常 (${anomalyItems.length})
-              </button>
-              <button type="button" role="tab" data-anomaly-tab="manual" aria-selected="${curAnomalyTab === 'manual' ? 'true' : 'false'}" onclick="switchAnomalyTab('manual')" class="px-3 py-1 rounded-lg text-xs font-semibold transition ${curAnomalyTab === 'manual' ? 'bg-white dark:bg-slate-900 text-rose-600 dark:text-rose-400 shadow-sm' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'}">
-                需人工查明 (${anomalyManualItems.length})
-              </button>
-              <button type="button" role="tab" data-anomaly-tab="tracking" aria-selected="${curAnomalyTab === 'tracking' ? 'true' : 'false'}" onclick="switchAnomalyTab('tracking')" class="px-3 py-1 rounded-lg text-xs font-semibold transition ${curAnomalyTab === 'tracking' ? 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 shadow-sm' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'}">
-                系统跟踪，无需操作 (${anomalyTrackingItems.length})
-              </button>
-            </div>`;
-        } else {
-          batchContainer.innerHTML = '';
-        }
+        batchContainer.innerHTML = `
+          <div role="tablist" aria-label="异常分类清单" class="inline-flex flex-wrap items-center gap-1 rounded-xl bg-slate-100 dark:bg-slate-800/80 p-1">
+            <button type="button" role="tab" data-anomaly-tab="all" aria-selected="${curAnomalyTab === 'all' ? 'true' : 'false'}" onclick="switchAnomalyTab('all')" class="px-3 py-1 rounded-lg text-xs font-semibold transition ${curAnomalyTab === 'all' ? 'bg-white dark:bg-slate-900 text-purple-600 dark:text-purple-400 shadow-sm' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'}">
+              全部 (${anomalyItems.length})
+            </button>
+            <button type="button" role="tab" data-anomaly-tab="decision" aria-selected="${curAnomalyTab === 'decision' ? 'true' : 'false'}" onclick="switchAnomalyTab('decision')" class="px-3 py-1 rounded-lg text-xs font-semibold transition ${curAnomalyTab === 'decision' ? 'bg-white dark:bg-slate-900 text-amber-600 dark:text-amber-400 shadow-sm' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'}">
+              需你决定 (${anomalyDecisionItems.length})
+            </button>
+            <button type="button" role="tab" data-anomaly-tab="cleanable" aria-selected="${curAnomalyTab === 'cleanable' ? 'true' : 'false'}" onclick="switchAnomalyTab('cleanable')" class="px-3 py-1 rounded-lg text-xs font-semibold transition ${curAnomalyTab === 'cleanable' ? 'bg-white dark:bg-slate-900 text-emerald-600 dark:text-emerald-400 shadow-sm' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'}">
+              归档已齐可清源 (${anomalyCleanableItems.length})
+            </button>
+            <button type="button" role="tab" data-anomaly-tab="pending_evidence" aria-selected="${curAnomalyTab === 'pending_evidence' ? 'true' : 'false'}" onclick="switchAnomalyTab('pending_evidence')" class="px-3 py-1 rounded-lg text-xs font-semibold transition ${curAnomalyTab === 'pending_evidence' ? 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 shadow-sm' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'}">
+              证据待决 · 安全保留 (${anomalyPendingEvidenceItems.length})
+            </button>
+          </div>`;
         banner.className = "p-3.5 rounded-xl bg-purple-50 dark:bg-purple-950/30 border border-purple-200 dark:border-purple-800/60 flex items-start space-x-3 text-xs";
-        const trackingNote = anomalyTrackingItems.length > 0 ? `（包含 <b>${anomalyTrackingItems.length}</b> 季系统后台自动跟踪）` : '';
         banner.innerHTML = `
-          <i class="fa-solid fa-server text-purple-600 text-sm mt-0.5"></i>
+          <i class="fa-solid fa-clipboard-check text-purple-600 text-sm mt-0.5"></i>
           <div class="flex-1 space-y-1">
-            <div class="font-bold text-purple-900 dark:text-purple-300">仍需查明原因的剧季${trackingNote}</div>
-            <div class="text-slate-600 dark:text-slate-300">查看条目中的目录或资料问题。系统跟踪项无需人工打开样片，由系统后台维护；其他完成核对后可点击“已手动处理”。</div>
+            <div class="font-bold text-purple-900 dark:text-purple-300">
+              需你决定 ${anomalyDecisionItems.length} 季 · 可清源 ${anomalyCleanableItems.length} 季 · 证据待决 ${anomalyPendingEvidenceItems.length} 季
+            </div>
+            <div class="text-slate-600 dark:text-slate-300">
+              基于本轮快照：需决定的请选择目标或归属；归档已齐的可核验删除源端；证据待决的已安全保留原样，无需操作即可结束本轮。
+            </div>
           </div>`;
       } else if (currentCategory === 'download') {
         if (selectAll) selectAll.disabled = (activeGapTab === 'pushed_pending');
@@ -2549,11 +2558,13 @@
             : (task.categories[currentCategory] || []))
         : [];
 
-      if (currentCategory === 'anomaly') {
-        if (curAnomalyTab === 'manual') {
-          items = anomalyManualItems;
-        } else if (curAnomalyTab === 'tracking') {
-          items = anomalyTrackingItems;
+      if (currentCategory === 'anomaly' || currentCategory === 'already_archived') {
+        if (curAnomalyTab === 'decision' || curAnomalyTab === 'manual') {
+          items = anomalyDecisionItems;
+        } else if (curAnomalyTab === 'cleanable') {
+          items = anomalyCleanableItems;
+        } else if (curAnomalyTab === 'pending_evidence' || curAnomalyTab === 'tracking') {
+          items = anomalyPendingEvidenceItems;
         }
       }
 
@@ -2752,9 +2763,9 @@
                   <span>${escapeHtml(item.actionText)}</span>
                 </button>
               ` : (item.actionType === 'system_tracking' || item.raw?.status === 'period_review') ? `
-                <span class="px-2.5 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 text-xs font-medium border border-slate-200 dark:border-slate-700 flex items-center gap-1">
-                  <i class="fa-solid fa-clock-rotate-left text-xs"></i>
-                  <span>系统跟踪，无需操作</span>
+                <span class="px-2.5 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800/80 text-slate-600 dark:text-slate-400 text-xs font-medium border border-slate-200 dark:border-slate-700 flex items-center gap-1.5" title="本轮资料待更或依据不足，源端文件已安全保留，无需用户操作">
+                  <i class="fa-solid fa-shield-halved text-slate-500 text-xs"></i>
+                  <span>证据待决 · 安全保留</span>
                 </span>
               ` : (item.actionType === 'inspect_info') ? '' : `
                 <button onclick="handleSingleAction('${item.actionType}', '${item.id}')" class="px-3 py-1.5 rounded-lg ${actionBtnClass} text-xs font-semibold shadow-sm transition flex items-center gap-1.5">
@@ -3136,8 +3147,8 @@
 
     let activeAnomalyTab = 'all';
     function switchAnomalyTab(tab) {
-      activeAnomalyTab = ['manual', 'tracking'].includes(tab) ? tab : 'all';
-      renderWorkRecords();
+      activeAnomalyTab = ['decision', 'cleanable', 'pending_evidence', 'manual', 'tracking'].includes(tab) ? tab : 'all';
+      renderEpisodesList();
     }
 
     // ── 9.5 补缺待入库双视图切换、入库核对、只读重算与跨条目映射 ────
