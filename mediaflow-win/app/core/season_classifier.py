@@ -125,6 +125,8 @@ def classify_single_record(
             action_type = "clean_redundant"
         elif status == "unknown":
             action_type = "calibrate"
+        elif status == "period_review":
+            action_type = "system_tracking"
         else:
             action_type = "inspect_info"
     elif conflict.get("blocking"):
@@ -199,6 +201,7 @@ def consolidate_seasons_to_work_records(
             "download_pushed": 0,
             "airing": 0,
             "anomaly": 0,
+            "system_tracking": 0,
             "total_work_seasons": 0,
         }
 
@@ -217,6 +220,7 @@ def consolidate_seasons_to_work_records(
         "download_pushed": 0,
         "airing": 0,
         "anomaly": 0,
+        "system_tracking": 0,
         "total_work_seasons": 0,
     }
 
@@ -311,6 +315,8 @@ def consolidate_seasons_to_work_records(
         counts[best_cat] += 1
         if is_pushed_pending:
             counts["download_pushed"] += 1
+        if best_cat == "anomaly" and (primary_act == "system_tracking" or getattr(primary_rec, "status", None) == "period_review"):
+            counts["system_tracking"] += 1
         counts["total_work_seasons"] += 1
 
         work_records.append(base_dict)

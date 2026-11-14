@@ -1481,13 +1481,31 @@ async def run_inspection(
 
             parts = info.get("parts") or {}
             segmented = any(any(v) for v in parts.values())
+            period_evidence = {}
             if segmented and status != "archive_check" and not identity_conflict:
                 period_total = len(parts)
                 if db_tot and db_tot > period_total and (info.get("bound") or db_tot > (tmdb_tot or 0)):
                     period_total = db_tot
                     season_finished = info.get("douban_finished", False)
-                period = diagnose_periods(season_files + archive_items, season_num, parts,
-                                          info.get("ordinals", {}), period_total, season_finished, bool(actual))
+                
+                # 分别核验源端与归档端覆盖情况，避免混淆两端独有内容
+                src_period = diagnose_periods(
+                    season_files, season_num, parts,
+                    info.get("ordinals", {}), period_total, season_finished, False,
+                    douban_total=db_tot
+                )
+                arc_period = diagnose_periods(
+                    archive_items, season_num, parts,
+                    info.get("ordinals", {}), period_total, season_finished, True,
+                    douban_total=db_tot
+                ) if archive_items else None
+
+                period = diagnose_periods(
+                    season_files + archive_items, season_num, parts,
+                    info.get("ordinals", {}), period_total, season_finished, bool(actual),
+                    archive_files=archive_items if actual else None,
+                    douban_total=db_tot
+                )
                 if period:
                     status, detail, missing, recognized = period
                     if status == "period_ready" and alias and not actual:
@@ -1498,6 +1516,14 @@ async def run_inspection(
                         detail = f"目前仅取得 {len(parts)} 期的分段资料，全季期数待更新。"
                     duplicates = []
                     edition_note = f"（豆瓣条目 {info['douban_id']} 收录 {db_tot} 集）" if db_tot else ""
+                    period_evidence = {
+                        "is_segmented": True,
+                        "parts_total": len(parts),
+                        "source_status": src_period[0] if src_period else None,
+                        "archive_status": arc_period[0] if arc_period else None,
+                        "combined_status": status,
+                        "confirmed_missing": missing,
+                    }
                 else:
                     status = "archive_check"
                     detail = "本季含分段，目录中还有无法核实的内容。请检查子目录及未编号视频。"
@@ -1605,6 +1631,7 @@ async def run_inspection(
                 },
                 "dual_archive_info": dual_archive_info,
                 "mediaserver_check": mediaserver_check,
+                "period_evidence": period_evidence,
             }
 
             show_src_seasons.append(season_num)

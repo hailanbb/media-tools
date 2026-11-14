@@ -109,7 +109,7 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.25</span>
+              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.26</span>
             </div>
             <!-- 完善后的命名 -->
             <p class="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">智能媒体库整理与归档工作台</p>
@@ -1543,16 +1543,17 @@
             else if (catKey === 'download') { actionType = 'download'; actionText = '推送补缺'; }
             else if (catKey === 'airing') { actionType = 'skip'; actionText = '留源'; }
 
-            const checkOnly = ['identity_review', 'period_review'].includes(s.status) ||
+            const checkOnly = ['identity_review'].includes(s.status) ||
               Boolean(conflict && conflict.blocking) ||
               (s.status === 'review_needed' && total && maxRec > total);
             if (checkOnly) { actionType = 'inspect_info'; actionText = '查看依据'; }
+            if (s.status === 'period_review') { actionType = 'system_tracking'; actionText = '系统跟踪'; }
             if (s.status === 'period_ready') actionText = '保留全部版本归档';
             if (s.status === 'already_archived') { actionType = 'clean_redundant'; actionText = '删除源端（本季）'; }
             const uniqueCount = recEps.length;
             let statusText = `${uniqueCount}/${total || '?'}集`;
             if (['period_missing', 'period_review'].includes(s.status)) {
-              statusText = s.status === 'period_missing' ? `确认缺 ${missing.length} 期 / 全 ${total} 期` : `全 ${total} 期 · 编号待核对`;
+              statusText = s.status === 'period_missing' ? `确认缺 ${missing.length} 期 / 全 ${total} 期` : `全 ${total} 期 · 系统跟踪，无需操作`;
             }
             if (dup && dup.length > 0) {
               statusText += `，第 ${dup.join("、")} 集有多个版本`;
@@ -1623,14 +1624,22 @@
         const revSeasons = (task.categories && Array.isArray(task.categories.review)) ? task.categories.review.length : 0;
         document.getElementById('catCountReview').innerHTML = `${revSeasons} <span class="text-xs font-normal">处需清理</span>`;
         const anomCount = (task.categories && task.categories.anomaly) ? task.categories.anomaly.length : (task.counts.archive_check || 0);
+        const trackingCount = (task.categories && task.categories.anomaly)
+          ? task.categories.anomaly.filter(it => it.actionType === 'system_tracking' || (it.raw && it.raw.status === 'period_review')).length
+          : 0;
         const pendingDgCount = (task && Array.isArray(task.directoryGroups))
           ? task.directoryGroups.filter(g => g.status === 'pending_confirm').length
           : (task.counts.pending_directory_groups || 0);
         const anomEl = document.getElementById('catCountAnomaly');
         if (anomEl) {
-          anomEl.innerHTML = pendingDgCount > 0
-            ? `${anomCount} <span class="text-xs font-normal">季异常</span> · <span class="text-xs font-semibold text-amber-700 dark:text-amber-300">${pendingDgCount}组待确认</span>`
-            : `${anomCount} <span class="text-xs font-normal">季异常</span>`;
+          let extraHtml = '';
+          if (trackingCount > 0) {
+            extraHtml += ` · <span class="text-xs font-normal text-slate-500 dark:text-slate-400">跟踪${trackingCount}</span>`;
+          }
+          if (pendingDgCount > 0) {
+            extraHtml += ` · <span class="text-xs font-semibold text-amber-700 dark:text-amber-300">${pendingDgCount}组待确认</span>`;
+          }
+          anomEl.innerHTML = `${anomCount} <span class="text-xs font-normal">季异常</span>${extraHtml}`;
         }
       }
       const anomCount = (task.categories && task.categories.anomaly) ? task.categories.anomaly.length : (task.counts.already_archived || 0);
@@ -2408,6 +2417,11 @@
       const downloadTodoItems = (task && task.categories && Array.isArray(task.categories.download)) ? task.categories.download : [];
       const downloadPushedItems = (task && task.categories && Array.isArray(task.categories.download_pushed)) ? task.categories.download_pushed : [];
 
+      const anomalyItems = (task && task.categories && Array.isArray(task.categories.anomaly)) ? task.categories.anomaly : [];
+      const anomalyTrackingItems = anomalyItems.filter(it => it.actionType === 'system_tracking' || (it.raw && it.raw.status === 'period_review'));
+      const anomalyManualItems = anomalyItems.filter(it => it.actionType !== 'system_tracking' && !(it.raw && it.raw.status === 'period_review'));
+      const curAnomalyTab = (typeof activeAnomalyTab !== 'undefined') ? activeAnomalyTab : 'all';
+
       // 动态 banner 与 batch 按钮（按分类切换）
       if (currentCategory === 'archive') {
         if (selectAllLabel) selectAllLabel.textContent = "全选齐全剧集";
@@ -2439,13 +2453,29 @@
           </div>`;
       } else if (currentCategory === 'anomaly' || currentCategory === 'already_archived') {
         if (selectAllLabel) selectAllLabel.textContent = "逐项核对";
-        batchContainer.innerHTML = '';
+        if (anomalyTrackingItems.length > 0) {
+          batchContainer.innerHTML = `
+            <div role="tablist" aria-label="异常分类清单" class="inline-flex items-center gap-1 rounded-xl bg-slate-100 dark:bg-slate-800/80 p-1">
+              <button type="button" role="tab" data-anomaly-tab="all" aria-selected="${curAnomalyTab === 'all' ? 'true' : 'false'}" onclick="switchAnomalyTab('all')" class="px-3 py-1 rounded-lg text-xs font-semibold transition ${curAnomalyTab === 'all' ? 'bg-white dark:bg-slate-900 text-purple-600 dark:text-purple-400 shadow-sm' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'}">
+                全部异常 (${anomalyItems.length})
+              </button>
+              <button type="button" role="tab" data-anomaly-tab="manual" aria-selected="${curAnomalyTab === 'manual' ? 'true' : 'false'}" onclick="switchAnomalyTab('manual')" class="px-3 py-1 rounded-lg text-xs font-semibold transition ${curAnomalyTab === 'manual' ? 'bg-white dark:bg-slate-900 text-rose-600 dark:text-rose-400 shadow-sm' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'}">
+                需人工查明 (${anomalyManualItems.length})
+              </button>
+              <button type="button" role="tab" data-anomaly-tab="tracking" aria-selected="${curAnomalyTab === 'tracking' ? 'true' : 'false'}" onclick="switchAnomalyTab('tracking')" class="px-3 py-1 rounded-lg text-xs font-semibold transition ${curAnomalyTab === 'tracking' ? 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 shadow-sm' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'}">
+                系统跟踪，无需操作 (${anomalyTrackingItems.length})
+              </button>
+            </div>`;
+        } else {
+          batchContainer.innerHTML = '';
+        }
         banner.className = "p-3.5 rounded-xl bg-purple-50 dark:bg-purple-950/30 border border-purple-200 dark:border-purple-800/60 flex items-start space-x-3 text-xs";
+        const trackingNote = anomalyTrackingItems.length > 0 ? `（包含 <b>${anomalyTrackingItems.length}</b> 季系统后台自动跟踪）` : '';
         banner.innerHTML = `
           <i class="fa-solid fa-server text-purple-600 text-sm mt-0.5"></i>
           <div class="flex-1 space-y-1">
-            <div class="font-bold text-purple-900 dark:text-purple-300">仍需查明原因的剧季</div>
-            <div class="text-slate-600 dark:text-slate-300">查看条目中的目录或资料问题。完成核对后可点击“已手动处理”。</div>
+            <div class="font-bold text-purple-900 dark:text-purple-300">仍需查明原因的剧季${trackingNote}</div>
+            <div class="text-slate-600 dark:text-slate-300">查看条目中的目录或资料问题。系统跟踪项无需人工打开样片，由系统后台维护；其他完成核对后可点击“已手动处理”。</div>
           </div>`;
       } else if (currentCategory === 'download') {
         if (selectAll) selectAll.disabled = (activeGapTab === 'pushed_pending');
@@ -2505,11 +2535,19 @@
       }
 
       // 获取当前分类下的项目
-      const items = (task && task.categories)
+      let items = (task && task.categories)
         ? ((currentCategory === 'download' && activeGapTab === 'pushed_pending')
             ? downloadPushedItems
             : (task.categories[currentCategory] || []))
         : [];
+
+      if (currentCategory === 'anomaly') {
+        if (curAnomalyTab === 'manual') {
+          items = anomalyManualItems;
+        } else if (curAnomalyTab === 'tracking') {
+          items = anomalyTrackingItems;
+        }
+      }
 
       if (items.length === 0) {
         const isNoTask = !task;
@@ -2705,6 +2743,11 @@
                   <i class="fa-solid ${actionIcon} text-xs"></i>
                   <span>${escapeHtml(item.actionText)}</span>
                 </button>
+              ` : (item.actionType === 'system_tracking' || item.raw?.status === 'period_review') ? `
+                <span class="px-2.5 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 text-xs font-medium border border-slate-200 dark:border-slate-700 flex items-center gap-1">
+                  <i class="fa-solid fa-clock-rotate-left text-xs"></i>
+                  <span>系统跟踪，无需操作</span>
+                </span>
               ` : (item.actionType === 'inspect_info') ? '' : `
                 <button onclick="handleSingleAction('${item.actionType}', '${item.id}')" class="px-3 py-1.5 rounded-lg ${actionBtnClass} text-xs font-semibold shadow-sm transition flex items-center gap-1.5">
                   <i class="fa-solid ${actionIcon} text-xs"></i>
@@ -3082,6 +3125,12 @@
 
     function openModal(id) { document.getElementById(id).classList.remove('hidden'); }
     function closeModal(id) { document.getElementById(id).classList.add('hidden'); }
+
+    let activeAnomalyTab = 'all';
+    function switchAnomalyTab(tab) {
+      activeAnomalyTab = ['manual', 'tracking'].includes(tab) ? tab : 'all';
+      renderWorkRecords();
+    }
 
     // ── 9.5 补缺待入库双视图切换、入库核对、只读重算与跨条目映射 ────
     function switchGapFillTab(tab) {
