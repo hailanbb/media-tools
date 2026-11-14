@@ -6,3 +6,6 @@ data/
 *.db
 .vscode/
 .idea/
+manual-actions-*/
+mf-probe-*/
+scratch/

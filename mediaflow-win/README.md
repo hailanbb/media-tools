@@ -4,7 +4,7 @@
 
 [![Windows](https://img.shields.io/badge/Windows-Native-0078d4.svg?style=flat-square&logo=windows)](#)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776ab.svg?style=flat-square&logo=python)](#)
-[![Version](https://img.shields.io/badge/Release-v2.5.23-6366f1.svg?style=flat-square)](#)
+[![Version](https://img.shields.io/badge/Release-v2.5.24-6366f1.svg?style=flat-square)](#)
 
 ---
 

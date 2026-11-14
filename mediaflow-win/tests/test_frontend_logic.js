@@ -42,7 +42,7 @@ function classifySeason(s) {
     isAnomaly,
     anomalySubtype,
     statusText,
-    hasCleanPreviewButton: (catKey === 'review' || (catKey === 'download' && dup.length > 0) || (catKey === 'anomaly' && dup.length > 0))
+    hasCleanPreviewButton: (catKey === 'review' && dup.length > 0)
   };
 }
 
@@ -81,20 +81,23 @@ console.log("===================================================================
     recognized_episodes: [1,2,3,4,5,6,7,8,9,10,11,12,13,15,16,17,18,19,20], // 19 集
     local_episode_count: 20, // 20 个物理文件
     duplicate_episodes: [15],
-    status_detail: "已完结但缺失 第 14 集（同时存在重复集: 第 15 集，优先补缺，亦可顺带清理冗余）"
+    status_detail: "已完结但缺失 第 14 集（同时存在重复集: 第 15 集，优先补缺，齐集后再清理冗余）"
   };
   const res = classifySeason(s);
   assert.strictEqual(res.catKey, "download", "缺集剧集必须归入 download 分类！");
   assert.strictEqual(res.isAnomaly, false);
   // 核心断言：绝对不能显示为 20/20集，必须去伪存真显示去重后集数并标注重复
   assert.strictEqual(res.statusText, "19/20集，第 15 集有多个版本", "statusText 必须如实反映 19 集和重复情况！");
-  assert.strictEqual(res.hasCleanPreviewButton, true, "缺集分类中含重复集的卡片必须挂载清理预览按钮！");
+  assert.strictEqual(res.hasCleanPreviewButton, false, "真缺集待补分类中不得挂载清理预览按钮（齐集后再清理）！");
   console.log("  ✓ [Test 02] 缺集属实优先进待补缺与 statusText 去伪存真：通过");
 }
 
 for (const [status, category] of Object.entries({
-  identity_review: 'review', period_review: 'review', already_archived: 'review',
-  period_missing: 'download', period_ready: 'archive', source_absent: ''
+  identity_review: 'anomaly', period_review: 'anomaly', already_archived: 'anomaly',
+  archive_check: 'anomaly', unknown: 'anomaly',
+  period_missing: 'download', download_needed: 'download',
+  period_ready: 'archive', archive_ready: 'archive',
+  review_needed: 'review', airing: 'airing', source_absent: ''
 })) assert.strictEqual(seasonCategory(status), category);
 
 // --- 测试用例 3: 真实集数失真/拆分冲突（本地 24 集超出官方 12 集） ---
@@ -116,7 +119,7 @@ for (const [status, category] of Object.entries({
   console.log("  ✓ [Test 03] 本地超出官方总集数拆分冲突精准捕获：通过");
 }
 
-// --- 测试用例 4: 归档库已有残留剧集 ---
+// --- 测试用例 4: 归档库已有残留剧集（属于 anomaly 异常分类） ---
 {
   const s = {
     show_name: "已归档剧集 (2024)",
@@ -130,9 +133,9 @@ for (const [status, category] of Object.entries({
     status_detail: "目标归档库已存在完整剧集"
   };
   const res = classifySeason(s);
-  assert.strictEqual(res.isAnomaly, false);
-  assert.strictEqual(res.catKey, "review");
-  console.log("  ✓ [Test 04] 归档已有残留精准识别：通过");
+  assert.strictEqual(res.isAnomaly, true, "归档已有残留必须归入 anomaly 异常剧集！");
+  assert.strictEqual(res.catKey, "anomaly", "归档已有残留分类必须为 anomaly！");
+  console.log("  ✓ [Test 04] 归档已有残留精准识别为 anomaly：通过");
 }
 
 console.log("======================================================================");
@@ -166,8 +169,15 @@ console.log("===================================================================
   context.currentCategory = 'download';
   vm.runInContext('renderEpisodesList()', context);
   const downloadCard = getNode('episodeItemContainer').innerHTML;
-  assert(downloadCard.includes("promptDeleteSourceShow('record')"));
+  assert(!downloadCard.includes("promptDeleteSourceShow("), "真缺集待补分类绝不应包含删除源端整剧删除按钮！");
   assert(!downloadCard.includes('markSeasonHandled('));
+
+  // 验证未收录异常项挂载整剧删除
+  item.anomalySubtype = 'unknown_meta';
+  context.currentCategory = 'anomaly';
+  vm.runInContext('renderEpisodesList()', context);
+  const anomalyUnknownCard = getNode('episodeItemContainer').innerHTML;
+  assert(anomalyUnknownCard.includes("promptDeleteSourceShow('record')"), "异常剧集未收录项必须挂载删除源端按钮！");
   vm.runInContext(source('promptDeleteSourceShow') + ";promptDeleteSourceShow('record')", context);
   assert.strictEqual(getNode('deleteSourceShowPath').textContent, '源端目标路径: /src/Show');
   assert.strictEqual(context.openedModal, 'deleteSourceShowModal');
@@ -396,7 +406,7 @@ console.log("===================================================================
     const funcs = [
       'cleanSeasonStatusNote', 'confirmCleanDirectoryGroupSourceSeason',
       'getCategoryName', 'toggleDirectoryGroupsSection', 'setDirectoryGroupViewTab',
-      'toggleDirectoryGroupItemDetail', 'locateDirectoryGroupInReview',
+      'toggleDirectoryGroupItemDetail', 'locateDirectoryGroupInAnomaly', 'locateDirectoryGroupInReview',
       'returnFromDirectoryGroupSection', 'filterResultCategory',
       'renderDirectoryGroupsPanel', 'renderEpisodesList'
     ].map(sourceWithCr).join(';\n');
@@ -413,28 +423,28 @@ console.log("===================================================================
 
     // 2. 检查真缺集待补季卡中的目录组徽章：必须包含跳转定位按钮及文案
     const downloadSeasonsHtml = getDgNode('episodeItemContainer').innerHTML;
-    assert(downloadSeasonsHtml.includes("locateDirectoryGroupInReview('grp-104716')"), '关联多目录的季卡必须挂载 locateDirectoryGroupInReview');
+    assert(downloadSeasonsHtml.includes("locateDirectoryGroupInAnomaly('grp-104716')"), '关联多目录的季卡必须挂载 locateDirectoryGroupInAnomaly');
     assert(downloadSeasonsHtml.includes('归档目标待确认 · 查看目录'), '季卡目录组徽章文案必须为「归档目标待确认 · 查看目录」');
 
-    // 3. 点击季卡上的定位按钮：跨页跳转至 review 分类，自动展开对应组
-    vm.runInContext("locateDirectoryGroupInReview('grp-104716')", dgContext);
-    assert.strictEqual(dgContext.currentCategory, 'review', '点击季卡定位后当前分类必须自动切换到 review');
+    // 3. 点击季卡上的定位按钮：跨页跳转至 anomaly 异常剧集分类，自动展开对应组
+    vm.runInContext("locateDirectoryGroupInAnomaly('grp-104716')", dgContext);
+    assert.strictEqual(dgContext.currentCategory, 'anomaly', '点击季卡定位后当前分类必须自动切换到 anomaly');
     assert.strictEqual(dgContext._dirGroupReturnCategory, 'download', '来源分类必须被记录为 download 以支持返回');
     assert.strictEqual(dgContext._directoryGroupCollapsed, false, '目录组区块必须确保处于展开状态');
     assert(dgContext._expandedGroupIds.has('grp-104716'), '目标组必须处于展开明细状态');
 
-    // 4. 验证待复核清理 (review) 分类下目录组面板正常渲染且包含作品名与返回按钮
-    const reviewPanel = getDgNode('directoryGroupsContainer');
-    assert(!reviewPanel.classList.contains('hidden'), '待复核清理分类下目录组面板不得含有 hidden 类');
-    const reviewPanelHtml = reviewPanel.innerHTML;
-    assert(reviewPanelHtml.includes('待确认归档目标（1 组待办）'), '面板标题必须显示待处理组数');
-    assert(reviewPanelHtml.includes('乘风 · 确认归档目标'), '必须直接使用作品名作为卡片标题');
-    assert(reviewPanelHtml.includes('TMDB: 104716'), '卡片必须显示 TMDB ID');
-    assert(reviewPanelHtml.includes('TMDB 页面显示：「乘风」'), '卡片必须显示 TMDB 官网页面当前名称');
-    assert(reviewPanelHtml.includes('返回「真缺集待补」'), '跨页跳转后顶部必须显示返回原清单按钮');
-    assert(reviewPanelHtml.includes("openDirectoryGroupDialog('grp-104716')"), '卡片必须挂载确认归档目标弹窗按钮');
+    // 4. 验证异常剧集 (anomaly) 分类下目录组面板正常渲染且包含作品名与返回按钮
+    const anomalyPanel = getDgNode('directoryGroupsContainer');
+    assert(!anomalyPanel.classList.contains('hidden'), '异常剧集分类下目录组面板不得含有 hidden 类');
+    const anomalyPanelHtml = anomalyPanel.innerHTML;
+    assert(anomalyPanelHtml.includes('待确认归档目标（1 组待办）'), '面板标题必须显示待处理组数');
+    assert(anomalyPanelHtml.includes('乘风 · 确认归档目标'), '必须直接使用作品名作为卡片标题');
+    assert(anomalyPanelHtml.includes('TMDB: 104716'), '卡片必须显示 TMDB ID');
+    assert(anomalyPanelHtml.includes('TMDB 页面显示：「乘风」'), '卡片必须显示 TMDB 官网页面当前名称');
+    assert(anomalyPanelHtml.includes('返回「真缺集待补」'), '跨页跳转后顶部必须显示返回原清单按钮');
+    assert(anomalyPanelHtml.includes("openDirectoryGroupDialog('grp-104716')"), '卡片必须挂载确认归档目标弹窗按钮');
     // 目录组面板绝对不包含 itemCheck checkbox，保证不参与“全选清理冗余”
-    assert(!reviewPanelHtml.includes('name="itemCheck"'), '目录组面板绝不可包含 itemCheck checkbox，防止误入批量清理');
+    assert(!anomalyPanelHtml.includes('name="itemCheck"'), '目录组面板绝不可包含 itemCheck checkbox，防止误入批量清理');
 
     // 5. 点击“返回「真缺集待补」”按钮：顺利切回 download 分类，目录组面板重新隐藏
     vm.runInContext('returnFromDirectoryGroupSection()', dgContext);
@@ -443,7 +453,7 @@ console.log("===================================================================
     assert(getDgNode('directoryGroupsContainer').classList.contains('hidden'), '返回 download 后目录组面板必须重新隐藏');
 
     // 6. 验证已确认目录组展开时渲染逐路径逐季对照表格与单季清理按钮
-    dgContext.currentCategory = 'review';
+    dgContext.currentCategory = 'anomaly';
     dgContext._directoryGroupActiveTab = 'resolved';
     dgContext._expandedGroupIds.add('grp-already-done');
     vm.runInContext('renderEpisodesList()', dgContext);
@@ -455,6 +465,6 @@ console.log("===================================================================
     assert(resolvedPanelHtml.includes('删除源端（本季）'), '可清理源端行必须展示「删除源端（本季）」操作按钮');
     assert(resolvedPanelHtml.includes('✓ 选定目标'), '已确认归档目标必须标明「✓ 选定目标」');
 
-    console.log('✓ 目录组唯一收口待复核清理、缺集页隐藏、跨页定位跳转、逐季覆盖矩阵与单季删除源端契约测试全部通过');
+    console.log('✓ 目录组唯一收口异常剧集、缺集页隐藏、跨页定位跳转、逐季覆盖矩阵与单季删除源端契约测试全部通过');
   }
 }

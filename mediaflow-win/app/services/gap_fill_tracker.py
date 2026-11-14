@@ -927,7 +927,7 @@ async def reconcile_gap_fill_records(
 
 
 async def refresh_task_summary(task_id: str, db: AsyncSession) -> dict[str, Any]:
-    """统一重算 Task.summary_json（区分真缺集待补 download_needed 与已全量推送待入库 download_pushed）。"""
+    """统一重算 Task.summary_json（按作品季互斥分流与唯一主待办归并）。"""
     task = await db.get(Task, task_id)
     stmt = select(SeasonRecord).where(SeasonRecord.task_id == task_id)
     res = await db.execute(stmt)
@@ -937,28 +937,9 @@ async def refresh_task_summary(task_id: str, db: AsyncSession) -> dict[str, Any]
         if s.status not in ("manually_handled", "verified_complete", "cleaned_redundant", "source_absent")
     ]
 
-    archive_ready_count = sum(1 for s in all_seasons if s.status in ("archive_ready", "period_ready"))
-    review_needed_count = sum(
-        1 for s in all_seasons if s.status in ("review_needed", "period_review", "identity_review")
-    )
-    airing_count = sum(1 for s in all_seasons if s.status == "airing")
-    archive_check_count = sum(1 for s in all_seasons if s.status == "archive_check")
-    already_archived_count = sum(1 for s in all_seasons if s.status == "already_archived")
-
-    download_needed_count = 0
-    download_pushed_count = 0
-    for s in all_seasons:
-        if s.status in ("download_needed", "period_missing"):
-            view = await compute_season_gap_fill_view(db, s)
-            if view["view_bucket"] == "todo":
-                download_needed_count += 1
-            elif view["view_bucket"] == "pushed_pending":
-                download_pushed_count += 1
-            elif not view["pushed_episodes"] and not view["reconciled_in_library_episodes"]:
-                download_needed_count += 1
-
     import inspect as _inspect
     from app.models.directory_group import DirectoryGroup
+    from app.core.season_classifier import consolidate_seasons_to_work_records
 
     scalars_fn = getattr(db, "scalars", None)
     dg_call = (
@@ -971,20 +952,50 @@ async def refresh_task_summary(task_id: str, db: AsyncSession) -> dict[str, Any]
         if callable(scalars_fn)
         else None
     )
-    pending_dir_groups = (
-        len(list((await dg_call).all())) if _inspect.isawaitable(dg_call) else 0
+    pending_dir_group_ids = (
+        set((await dg_call).all()) if _inspect.isawaitable(dg_call) else set()
     )
 
+    records_with_gap_view: list[dict[str, Any]] = []
+    for s in all_seasons:
+        gap_view = None
+        if s.status in ("download_needed", "period_missing") or s.missing_episodes_json:
+            gap_view = await compute_season_gap_fill_view(db, s)
+        records_with_gap_view.append({
+            "id": s.id,
+            "task_id": s.task_id,
+            "show_name": s.show_name,
+            "show_path": s.show_path,
+            "tmdb_id": s.tmdb_id,
+            "season_number": s.season_number,
+            "season_path": s.season_path,
+            "total_episodes": s.total_episodes,
+            "local_episode_count": s.local_episode_count,
+            "recognized_episodes": _parse_json_safe(s.recognized_episodes_json, []),
+            "missing_episodes": _parse_json_safe(s.missing_episodes_json, []),
+            "duplicate_episodes": _parse_json_safe(s.duplicate_episodes_json, []),
+            "status": s.status,
+            "status_detail": s.status_detail,
+            "archive_target_path": s.archive_target_path,
+            "season_finished": s.season_finished,
+            "evidence": _parse_json_safe(getattr(s, "evidence_json", None), {}),
+            "conflict": _parse_json_safe(getattr(s, "conflict_json", None), {}),
+            "mapping": _parse_json_safe(getattr(s, "mapping_json", None), {}),
+            "gap_fill_state": gap_view,
+        })
+
+    _, counts = consolidate_seasons_to_work_records(records_with_gap_view, pending_dir_group_ids)
+
     summary = {
-        "archive_ready": archive_ready_count,
-        "review_needed": review_needed_count,
-        "download_needed": download_needed_count,
-        "download_pushed": download_pushed_count,
-        "airing": airing_count,
-        "archive_check": archive_check_count,
-        "already_archived": already_archived_count,
-        "total_seasons": len(all_seasons),
-        "pending_directory_groups": pending_dir_groups,
+        "archive_ready": counts["archive"],
+        "review_needed": counts["review"],
+        "download_needed": max(0, counts["download"] - counts["download_pushed"]),
+        "download_pushed": counts["download_pushed"],
+        "airing": counts["airing"],
+        "archive_check": counts["anomaly"],
+        "already_archived": 0,
+        "total_seasons": counts["total_work_seasons"],
+        "pending_directory_groups": len(pending_dir_group_ids),
     }
     if task:
         task.summary_json = json.dumps(summary, ensure_ascii=False)  # type: ignore[assignment]

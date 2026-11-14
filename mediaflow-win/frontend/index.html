@@ -109,7 +109,7 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.23</span>
+              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.24</span>
             </div>
             <!-- 完善后的命名 -->
             <p class="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">智能媒体库整理与归档工作台</p>
@@ -1446,9 +1446,9 @@
     }
 
     function seasonCategory(status, legacyCheck = false) {
-      if (legacyCheck || ['archive_check', 'unknown'].includes(status)) return 'anomaly';
+      if (legacyCheck || ['archive_check', 'unknown', 'identity_review', 'period_review', 'already_archived'].includes(status)) return 'anomaly';
       if (['archive_ready', 'period_ready'].includes(status)) return 'archive';
-      if (['review_needed', 'period_review', 'identity_review', 'already_archived'].includes(status)) return 'review';
+      if (status === 'review_needed') return 'review';
       if (['download_needed', 'period_missing'].includes(status)) return 'download';
       if (status === 'airing') return 'airing';
       return '';
@@ -1484,12 +1484,14 @@
       }
 
       document.getElementById('catCountArchive').innerHTML = `${task.counts.archive} <span class="text-xs font-normal">季已齐</span>`;
-      const initPendingDg = task.counts.pending_directory_groups || 0;
-      document.getElementById('catCountReview').innerHTML = initPendingDg > 0
-        ? `${task.counts.review} <span class="text-xs font-normal">处需清理</span> · <span class="text-xs font-semibold text-amber-700 dark:text-amber-300">${initPendingDg}组待确认</span>`
-        : `${task.counts.review} <span class="text-xs font-normal">处需清理</span>`;
+      document.getElementById('catCountReview').innerHTML = `${task.counts.review} <span class="text-xs font-normal">处需清理</span>`;
       const alreadyEl = document.getElementById('catCountAnomaly');
-      if (alreadyEl) alreadyEl.innerHTML = `${task.counts.already_archived || 0} <span class="text-xs font-normal">季</span>`;
+      const initPendingDg = task.counts.pending_directory_groups || 0;
+      if (alreadyEl) {
+        alreadyEl.innerHTML = initPendingDg > 0
+          ? `${task.counts.archive_check || 0} <span class="text-xs font-normal">季异常</span> · <span class="text-xs font-semibold text-amber-700 dark:text-amber-300">${initPendingDg}组待确认</span>`
+          : `${task.counts.archive_check || 0} <span class="text-xs font-normal">季异常</span>`;
+      }
       const dlInitPushed = task.counts.download_pushed || 0;
       document.getElementById('catCountDownload').innerHTML = dlInitPushed > 0
         ? `${task.counts.download} <span class="text-xs font-normal">季待补 · ${dlInitPushed}已推</span>`
@@ -1506,6 +1508,9 @@
           task._seasonsLoadError = false;
           task.categories = { archive: [], review: [], download: [], download_pushed: [], airing: [], anomaly: [], archive_check: [] };
           for (const s of seasons) {
+            // 若为作品季归并的从属目录记录，直接并入主卡片，不单独作为顶层待办
+            if (s.is_primary_work_record === false) continue;
+
             const missing = s.missing_episodes || [];
             const dup = s.duplicate_episodes || [];
             const total = s.total_episodes || null;
@@ -1523,15 +1528,17 @@
             if (legacyCheck && s.local_episode_count === 0) {
               note = '上次初检在源季本层找到 0 个视频。请重新初检核对归档情况。';
             }
-            const catKey = seasonCategory(s.status, legacyCheck);
+            const catKey = s.main_category || seasonCategory(s.status, legacyCheck);
             if (!catKey) continue;
             const isAnomaly = catKey === 'anomaly';
             const anomalySubtype = isAnomaly ? (s.status === 'unknown' ? 'unknown_meta' : 'file_check') : '';
 
-            let actionType = 'archive', actionText = '一键归档';
+            let actionType = s.action_type || 'archive';
+            let actionText = '一键归档';
             if (catKey === 'anomaly') {
-              if (anomalySubtype === 'file_check') { actionType = 'inspect_info'; actionText = '详情'; }
-              else { actionType = 'calibrate'; actionText = '校准集数'; }
+              if (s.status === 'already_archived') { actionType = 'clean_redundant'; actionText = '删除源端（本季）'; }
+              else if (s.status === 'unknown') { actionType = 'calibrate'; actionText = '校准集数'; }
+              else { actionType = 'inspect_info'; actionText = '查看依据'; }
             } else if (catKey === 'review') { actionType = 'clean'; actionText = '清理冗余'; }
             else if (catKey === 'download') { actionType = 'download'; actionText = '推送补缺'; }
             else if (catKey === 'airing') { actionType = 'skip'; actionText = '留源'; }
@@ -1584,6 +1591,8 @@
               conflict: conflict,
               mapping: mapping,
               lastCheckedAt: s.last_checked_at || null,
+              associatedRecords: s.associated_records || [],
+              totalDirCount: s.total_dir_count || 1,
               raw: s,
             });
           }
@@ -1612,16 +1621,21 @@
 
       if (task._seasonsLoaded) {
         const revSeasons = (task.categories && Array.isArray(task.categories.review)) ? task.categories.review.length : 0;
+        document.getElementById('catCountReview').innerHTML = `${revSeasons} <span class="text-xs font-normal">处需清理</span>`;
+        const anomCount = (task.categories && task.categories.anomaly) ? task.categories.anomaly.length : (task.counts.archive_check || 0);
         const pendingDgCount = (task && Array.isArray(task.directoryGroups))
           ? task.directoryGroups.filter(g => g.status === 'pending_confirm').length
           : (task.counts.pending_directory_groups || 0);
-        document.getElementById('catCountReview').innerHTML = pendingDgCount > 0
-          ? `${revSeasons} <span class="text-xs font-normal">处需清理</span> · <span class="text-xs font-semibold text-amber-700 dark:text-amber-300">${pendingDgCount}组待确认</span>`
-          : `${revSeasons} <span class="text-xs font-normal">处需复核</span>`;
+        const anomEl = document.getElementById('catCountAnomaly');
+        if (anomEl) {
+          anomEl.innerHTML = pendingDgCount > 0
+            ? `${anomCount} <span class="text-xs font-normal">季异常</span> · <span class="text-xs font-semibold text-amber-700 dark:text-amber-300">${pendingDgCount}组待确认</span>`
+            : `${anomCount} <span class="text-xs font-normal">季异常</span>`;
+        }
       }
       const anomCount = (task.categories && task.categories.anomaly) ? task.categories.anomaly.length : (task.counts.already_archived || 0);
       const anomEl = document.getElementById('catCountAnomaly');
-      if (anomEl) anomEl.innerHTML = `${anomCount} <span class="text-xs font-normal">季异常</span>`;
+      if (anomEl && !task._seasonsLoaded) anomEl.innerHTML = `${anomCount} <span class="text-xs font-normal">季异常</span>`;
 
       filterResultCategory(currentCategory);
     }
@@ -2096,11 +2110,11 @@
       }
     }
 
-    function locateDirectoryGroupInReview(groupId) {
+    function locateDirectoryGroupInAnomaly(groupId) {
       if (!groupId) return;
-      if (currentCategory !== 'review') {
+      if (currentCategory !== 'anomaly') {
         _dirGroupReturnCategory = currentCategory;
-        filterResultCategory('review');
+        filterResultCategory('anomaly');
       }
       _directoryGroupCollapsed = false;
       _expandedGroupIds.add(groupId);
@@ -2113,12 +2127,16 @@
         const el = document.getElementById(`dir-group-card-${groupId}`);
         if (el) {
           el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          el.classList.add('ring-2', 'ring-amber-500', 'ring-offset-2', 'dark:ring-offset-slate-900');
+          el.classList.add('ring-2', 'ring-purple-500', 'ring-offset-2', 'dark:ring-offset-slate-900');
           setTimeout(() => {
-            el.classList.remove('ring-2', 'ring-amber-500', 'ring-offset-2', 'dark:ring-offset-slate-900');
+            el.classList.remove('ring-2', 'ring-purple-500', 'ring-offset-2', 'dark:ring-offset-slate-900');
           }, 2500);
         }
       }, 100);
+    }
+
+    function locateDirectoryGroupInReview(groupId) {
+      locateDirectoryGroupInAnomaly(groupId);
     }
 
     function returnFromDirectoryGroupSection() {
@@ -2131,6 +2149,8 @@
 
     function filterResultCategory(cat) {
       currentCategory = cat === 'archive_check' ? 'anomaly' : cat;
+      const container = document.getElementById('episodeItemContainer');
+      if (container) container.innerHTML = '';
       ['archive', 'review', 'archive_check', 'anomaly', 'download', 'airing'].forEach(c => {
         const card = document.getElementById(`cat-card-${c}`);
         if (!card) return;
@@ -2148,8 +2168,8 @@
     function renderDirectoryGroupsPanel(task) {
       const panel = document.getElementById('directoryGroupsContainer');
       if (!panel) return;
-      // 核心收口：仅在「待复核清理」（review）分类展示目录组确认区，其他分类彻底隐藏
-      if (currentCategory !== 'review') {
+      // 核心收口：仅在「异常剧集」（anomaly）分类展示目录组确认区，其他分类彻底隐藏
+      if (currentCategory !== 'anomaly') {
         panel.classList.add('hidden');
         panel.innerHTML = '';
         return;
@@ -2385,6 +2405,7 @@
       const selectAll = document.getElementById('selectAllCheckbox');
       const selectAllLabel = document.getElementById('selectAllLabel');
       if (selectAll) selectAll.checked = false;
+      if (container) container.innerHTML = '';
       if (typeof renderDirectoryGroupsPanel === 'function') renderDirectoryGroupsPanel(task);
 
       if (selectAll) selectAll.disabled = false;
@@ -2543,8 +2564,9 @@
         return;
       }
 
-      container.innerHTML = items.map(item => {
-        let badgeColor = 'emerald', actionBtnClass = 'bg-emerald-600 hover:bg-emerald-700 text-white', actionIcon = 'fa-box-archive';
+      try {
+        container.innerHTML = items.map(item => {
+          let badgeColor = 'emerald', actionBtnClass = 'bg-emerald-600 hover:bg-emerald-700 text-white', actionIcon = 'fa-box-archive';
         if (currentCategory === 'review') { badgeColor = 'amber'; actionBtnClass = 'bg-amber-600 hover:bg-amber-700 text-white'; actionIcon = 'fa-broom'; }
         else if (currentCategory === 'anomaly' || currentCategory === 'already_archived') { badgeColor = 'rose'; actionBtnClass = 'bg-rose-600 hover:bg-rose-700 text-white'; actionIcon = 'fa-triangle-exclamation'; }
         else if (currentCategory === 'download') { badgeColor = 'blue'; actionBtnClass = 'bg-blue-600 hover:bg-blue-700 text-white'; actionIcon = item.actionType === 'download_repair' ? 'fa-arrows-rotate' : (item.actionType === 'inspect_gap_detail' ? 'fa-clipboard-list' : 'fa-cloud-arrow-down'); }
@@ -2592,7 +2614,7 @@
           : '';
         const dirGrp = (ev && ev.directory_group) || null;
         const dirGroupBadgeHtml = (dirGrp && dirGrp.requires_confirm)
-          ? `<button type="button" onclick="locateDirectoryGroupInReview('${escapeHtml(dirGrp.id || '')}')" class="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 font-semibold border border-amber-300 dark:border-amber-700 hover:bg-amber-200 dark:hover:bg-amber-900/50 transition flex items-center gap-1"><i class="fa-solid fa-folder-tree text-[9px]"></i><span>归档目标待确认 · 查看目录</span></button>`
+          ? `<button type="button" onclick="locateDirectoryGroupInAnomaly('${escapeHtml(dirGrp.id || '')}')" class="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 font-semibold border border-amber-300 dark:border-amber-700 hover:bg-amber-200 dark:hover:bg-amber-900/50 transition flex items-center gap-1"><i class="fa-solid fa-folder-tree text-[9px]"></i><span>归档目标待确认 · 查看目录</span></button>`
           : (dirGrp && dirGrp.status === 'confirmed'
               ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">已确认目录组</span>`
               : '');
@@ -2613,8 +2635,16 @@
 
         const hasEvDetails = Boolean(ev && (ev.meta_status || ev.meta_error || (ev.release_evidence && ev.release_evidence.dominant_release_title) || (ev.mediaserver_check && (ev.mediaserver_check.checked || ev.mediaserver_check.error))));
         const rawObj = item.raw || {};
-        const showDetailBtn = currentCategory === 'download' || currentCategory === 'anomaly' || isAnomaly || ['identity_review', 'unknown', 'review_needed', 'period_review', 'download_needed', 'period_missing'].includes(rawStatus) || Boolean(conf && conf.blocking) || Boolean(gapState && gapState.episodes && gapState.episodes.length > 0) || hasEvDetails || Boolean(mp && mp.target_tmdb_id);
+        const showDetailBtn = currentCategory === 'download' || currentCategory === 'anomaly' || Boolean(item.isAnomaly) || ['identity_review', 'unknown', 'review_needed', 'period_review', 'download_needed', 'period_missing'].includes(rawStatus) || Boolean(conf && conf.blocking) || Boolean(gapState && gapState.episodes && gapState.episodes.length > 0) || hasEvDetails || Boolean(mp && mp.target_tmdb_id);
         const disableCheck = currentCategory === 'airing' || currentCategory === 'anomaly' || ['inspect_info', 'inspect_gap_detail', 'clean_redundant'].includes(item.actionType) || (currentCategory === 'download' && activeGapTab === 'pushed_pending');
+
+        const assocRecs = item.associatedRecords || [];
+        const assocDirHtml = assocRecs.length > 0 ? `
+          <div class="text-[11px] text-amber-600 dark:text-amber-400 flex items-center gap-1.5 flex-wrap font-medium">
+            <i class="fa-solid fa-folder-tree text-[10px]"></i>
+            <span>关联多物理目录 (${assocRecs.length + 1} 处目录覆盖): ${escapeHtml([item.pathA, ...assocRecs.map(r => r.season_path || r.show_path)].filter(Boolean).join(' · '))}</span>
+          </div>
+        ` : '';
 
         return `
           <div class="app-card rounded-xl p-4 transition flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-l-4 border-l-${badgeColor}-500">
@@ -2639,6 +2669,7 @@
                   <span>${escapeHtml(item.pathA || '')}</span>
                   ${item.pathB ? `<span>${escapeHtml(item.pathB)}</span>` : ''}
                 </div>
+                ${assocDirHtml}
                 <div class="text-[11px] text-slate-600 dark:text-slate-400 flex items-center gap-2 flex-wrap">
                   <span class="text-${badgeColor}-600 dark:text-${badgeColor}-400 font-medium">👉 ${escapeHtml(cleanSeasonStatusNote(item.note) || '')}</span>
                   ${item.dest ? `<span>• ${escapeHtml(item.dest)}</span>` : ''}
@@ -2658,13 +2689,13 @@
                   <i class="fa-solid fa-check mr-1"></i>已手动处理
                 </button>
               ` : ''}
-              ${((item.isAnomaly && item.anomalySubtype === 'unknown_meta') || currentCategory === 'download') ? `
+              ${(currentCategory === 'anomaly' && item.isAnomaly && item.anomalySubtype === 'unknown_meta') ? `
                 <button onclick="promptDeleteSourceShow('${item.id}')" class="px-2.5 py-1.5 rounded-lg border border-rose-200 dark:border-rose-800 bg-rose-50 dark:bg-rose-950/40 text-rose-600 dark:text-rose-400 text-xs font-semibold hover:bg-rose-100 dark:hover:bg-rose-900/40 transition flex items-center gap-1 shadow-sm" title="彻底删除源端整个剧集目录及其所有文件，并在删除后立即强制刷新源目录">
                   <i class="fa-solid fa-trash-can text-xs"></i>
                   <span>删除源端</span>
                 </button>
               ` : ''}
-              ${(!['inspect_info', 'inspect_gap_detail', 'clean_redundant'].includes(item.actionType) && item.duplicates && item.duplicates.length > 0) ? `
+              ${(currentCategory === 'review' && !['inspect_info', 'inspect_gap_detail', 'clean_redundant'].includes(item.actionType) && item.duplicates && item.duplicates.length > 0) ? `
                 <button onclick="openCleanPreview('${item.id}')" class="px-2.5 py-1.5 rounded-lg border border-amber-200 dark:border-amber-700 bg-white dark:bg-slate-800 text-amber-600 dark:text-amber-400 text-xs font-semibold hover:bg-amber-50 dark:hover:bg-amber-950/30 transition flex items-center gap-1.5 shadow-sm" title="查看保留版本与拟删除文件">
                   <i class="fa-solid fa-file-magnifying-glass text-xs"></i>
                   <span>清理预览</span>
@@ -2688,7 +2719,16 @@
               `}
             </div>
           </div>`;
-      }).join('');
+        }).join('');
+      } catch (renderErr) {
+        console.error('渲染剧季卡片列表异常:', renderErr);
+        container.innerHTML = `
+          <div class="p-8 text-center text-slate-400 dark:text-slate-500">
+            <i class="fa-solid fa-triangle-exclamation text-amber-500 text-2xl mb-2 block"></i>
+            <p class="text-xs">加载列表项出现异常，可点击重试</p>
+            <button onclick="renderEpisodesList()" class="mt-2.5 px-3 py-1 text-xs rounded bg-indigo-50 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-100">重试渲染</button>
+          </div>`;
+      }
       updateSelection();
     }
 

@@ -1,0 +1,22 @@
+# MediaFlow Docker Compose
+# 使用: 1) 复制 .env.example 为 .env 并填写  2) docker compose up -d  3) 访问 http://<IP>:8080
+
+services:
+  mediaflow:
+    build: .
+    container_name: mediaflow
+    restart: unless-stopped
+    ports:
+      - "${MF_PORT:-8080}:8080"
+    volumes:
+      - ./data:/app/data
+    env_file:
+      - .env
+    environment:
+      - TZ=Asia/Shanghai
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/api/system/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

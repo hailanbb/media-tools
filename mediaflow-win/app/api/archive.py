@@ -1171,8 +1171,10 @@ async def delete_source_show(
     if not rec:
         return StatusResponse(ok=False, message="剧季记录不存在")
 
-    if rec.status in ("archive_check", "period_review", "period_ready", "identity_review", "already_archived", "manually_handled", "verified_complete", "source_absent", "cleaned_redundant"):
-        return StatusResponse(ok=False, message="归档核对记录仅供查看，保留源端")
+    if rec.status in ("download_needed", "period_missing"):
+        return StatusResponse(ok=False, message="真缺集待补剧集严禁删除源端整剧，仅支持推送补缺")
+    if rec.status != "unknown":
+        return StatusResponse(ok=False, message="仅未收录/元数据未知的异常剧集允许整剧删除源端")
     c_info = json.loads(rec.conflict_json or "{}") if getattr(rec, "conflict_json", None) else {}
     if isinstance(c_info, dict) and c_info.get("blocking"):
         return StatusResponse(ok=False, message="存在作品身份冲突，安全拦截删除源端目录")

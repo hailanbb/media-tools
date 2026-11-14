@@ -204,13 +204,29 @@ async def get_task_seasons(
     records = result.scalars().all()
 
     serialized = [await _serialize_season_record(db, r) for r in records]
+
+    from app.models.directory_group import DirectoryGroup
+    from app.core.season_classifier import consolidate_seasons_to_work_records
+
+    pending_dg = (
+        await db.execute(
+            select(DirectoryGroup.id).where(
+                DirectoryGroup.task_id == task_id,
+                DirectoryGroup.status == "pending_confirm",
+            )
+        )
+    ).scalars().all()
+    pending_dir_group_ids = set(pending_dg)
+
+    work_records, _ = consolidate_seasons_to_work_records(serialized, pending_dir_group_ids)
+
     if gap_view in ("todo", "pushed_pending"):
-        serialized = [
+        work_records = [
             item
-            for item in serialized
+            for item in work_records
             if (item.get("gap_fill_state") or {}).get("view_bucket") == gap_view
         ]
-    return serialized
+    return work_records
 
 
 class RecalculateRequest(BaseModel):
