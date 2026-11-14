@@ -965,6 +965,50 @@ class ReleaseAliasAndMultiDirTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(rec_after.status, "cleaned_redundant")
                     self.assertIn("已通过多目录归档覆盖核验清理源端残留", rec_after.status_detail)
 
+    async def test_stop_returns_while_inspection_holds_database_writer(self):
+        import asyncio
+        from sqlalchemy import update
+        from app.api.inspection import stop_inspection
+        from app.services.task_service import TASK_CANCELLED, TASK_PROGRESS, TASK_RUNNING_WORKERS
+        tid = "stopping-with-writer"
+        async with async_session() as db:
+            db.add(Task(id=tid, name="停止回归", source_path="/qa", status="running"))
+            await db.commit()
+        TASK_RUNNING_WORKERS[tid] = asyncio.current_task()
+        TASK_PROGRESS[tid] = {"status": "running"}
+        try:
+            async with async_session() as writer, async_session() as reader:
+                await writer.execute(update(Task).where(Task.id == tid).values(name="保存中"))
+                result = await asyncio.wait_for(stop_inspection(tid, reader), timeout=2)
+                self.assertTrue(result.ok)
+                self.assertIn(tid, TASK_CANCELLED)
+                await reader.close()
+                await writer.execute(update(Task).where(Task.id == tid).values(status="stopped"))
+                await writer.commit()
+            async with async_session() as reader:
+                self.assertEqual((await reader.get(Task, tid)).status, "stopped")
+        finally:
+            TASK_RUNNING_WORKERS.pop(tid, None)
+            TASK_PROGRESS.pop(tid, None)
+            TASK_CANCELLED.discard(tid)
+
+    async def test_stop_interrupts_slow_metadata_without_waiting_for_timeout(self):
+        import asyncio
+        from unittest.mock import AsyncMock
+        entered, stopped = asyncio.Event(), asyncio.Event()
+        async def slow(**kwargs):
+            entered.set()
+            await asyncio.sleep(30)
+        disk = AsyncMock()
+        disk.list_files.return_value = [{"name": "Season 1", "path": "/qa/Show/Season 1", "isDirectory": True}]
+        with patch("app.core.inspector._resolve_show_metadata", side_effect=slow):
+            scan = asyncio.create_task(run_inspection("stop", "/qa/Show", disk, tmdb_client=AsyncMock(),
+                                                      stop_event=stopped))
+            await asyncio.wait_for(entered.wait(), timeout=2)
+            stopped.set()
+            result = await asyncio.wait_for(scan, timeout=2)
+        self.assertEqual(result.seasons, [])
+
     async def test_08_reinspect_stop_preserves_old_records_when_zero_or_partial(self):
         """P0 回归：停止与重检保护旧记录，零产出绝不删除已有季明细，部分完成保留未扫描范围。"""
         import asyncio

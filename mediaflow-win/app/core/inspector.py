@@ -708,6 +708,7 @@ async def run_inspection(
     concurrency: int = 3,
     only_season_path: str | None = None,
     db=None,
+    stop_event=None,
 ) -> InspectionResult:
     """执行初检流程 — 扫描 CD2 目录、解析集号、查询 TMDB、生成诊断。
 
@@ -866,26 +867,43 @@ async def run_inspection(
                 season_mappings[sn] = mp_map
 
         needed_seasons = [sn for sn, _ in season_dirs]
-        try:
-            resolved_tmdb_id, tmdb_seasons_data = await _resolve_show_metadata(
-                show_name=show_name,
-                needed_seasons=needed_seasons,
-                tmdb_id_num=tmdb_id_num,
-                mp_client=mp_client,
-                tmdb_client=active_tmdb,
-                log=log,
-                evidence_out=meta_evidence,
-            )
-        except TypeError:
-            # 兼容测试环境中对 _resolve_show_metadata 的 5/6 参 Patch
-            resolved_tmdb_id, tmdb_seasons_data = await _resolve_show_metadata(
-                show_name=show_name,
-                needed_seasons=needed_seasons,
-                tmdb_id_num=tmdb_id_num,
-                mp_client=mp_client,
-                tmdb_client=active_tmdb,
-                log=log,
-            )
+        async def resolve_metadata():
+            try:
+                return await _resolve_show_metadata(
+                    show_name=show_name,
+                    needed_seasons=needed_seasons,
+                    tmdb_id_num=tmdb_id_num,
+                    mp_client=mp_client,
+                    tmdb_client=active_tmdb,
+                    log=log,
+                    evidence_out=meta_evidence,
+                )
+            except TypeError:
+                # 兼容测试环境中对 _resolve_show_metadata 的 5/6 参 Patch
+                return await _resolve_show_metadata(
+                    show_name=show_name,
+                    needed_seasons=needed_seasons,
+                    tmdb_id_num=tmdb_id_num,
+                    mp_client=mp_client,
+                    tmdb_client=active_tmdb,
+                    log=log,
+                )
+
+        if stop_event is None:
+            resolved_tmdb_id, tmdb_seasons_data = await resolve_metadata()
+        else:
+            lookup = asyncio.create_task(resolve_metadata())
+            stopped = asyncio.create_task(stop_event.wait())
+            try:
+                await asyncio.wait((lookup, stopped), return_when=asyncio.FIRST_COMPLETED)
+                if stop_event.is_set():
+                    return []
+                resolved_tmdb_id, tmdb_seasons_data = lookup.result()
+            finally:
+                for pending in (lookup, stopped):
+                    if not pending.done():
+                        pending.cancel()
+                await asyncio.gather(lookup, stopped, return_exceptions=True)
 
         if cancelled_tasks and task_id and task_id in cancelled_tasks:
             return []
@@ -973,6 +991,8 @@ async def run_inspection(
         show_src_seasons: list[int] = []
 
         for season_num, season_item in sorted(season_dirs, key=lambda x: x[0]):
+            if cancelled_tasks and task_id in cancelled_tasks:
+                break
             season_path = season_item["path"]
             try:
                 season_files = all_items if season_path == show_path else await cd2_client.list_files(season_path)

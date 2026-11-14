@@ -4,7 +4,7 @@
 
 > **面向家庭影院与云原生 NAS（115网盘 / CloudDrive2 / MoviePilot / Emby / Jellyfin）的新一代智能影视媒体整理、跨库无损归档与双轨运维治理系统。**
 
-[![Version](https://img.shields.io/badge/Release-v2.5.24-6366f1.svg?style=flat-square&logo=github)](https://github.com/hailanbb/media-tools/releases)
+[![Version](https://img.shields.io/badge/Release-v2.5.25-6366f1.svg?style=flat-square&logo=github)](https://github.com/hailanbb/media-tools/releases)
 [![Docker](https://img.shields.io/badge/Docker-Supported-2496ed.svg?style=flat-square&logo=docker)](mediaflow-docker/)
 [![Windows](https://img.shields.io/badge/Windows-Native-0078d4.svg?style=flat-square&logo=windows)](mediaflow-win/)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776ab.svg?style=flat-square&logo=python)](https://www.python.org/)

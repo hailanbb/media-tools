@@ -63,12 +63,14 @@ def _task_to_out(task: Task) -> TaskOut:
             summary = TaskSummary(**d)
         except Exception:
             pass
+    from app.services.task_service import TASK_CANCELLED
+    stopping = task.id in TASK_CANCELLED and task.status in ("running", "paused")
     return TaskOut(
         id=task.id,
         name=task.name,
         source_path=task.source_path,
         media_type=task.media_type,
-        status=task.status,
+        status="stopping" if stopping else task.status,
         created_at=task.created_at,
         updated_at=task.updated_at,
         summary=summary,
