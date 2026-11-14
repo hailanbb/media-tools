@@ -153,13 +153,17 @@ def classify_single_record(
             return "download", "inspect_gap_detail"
         return "download", "download"
 
-    # 4. 待复核清理 (review) 判定（正片已齐但有重复副本或可淘汰冗余）
-    if status == "review_needed" or (duplicates and not missing):
+    regular_duplicates = [d for d in duplicates if isinstance(d, int) and d > 0]
+
+    # 4. 待复核清理 (review) 判定（正片已齐但有正片重复副本或可淘汰冗余）
+    if status not in ("archive_ready", "period_ready") and (
+        status == "review_needed" or (regular_duplicates and not missing)
+    ):
         return "review", "clean"
 
     # 5. 齐全可归档 (archive) 判定
     if status in ("archive_ready", "period_ready") or (
-        not missing and not duplicates and total_eps and len(rec_eps) >= total_eps
+        not missing and not regular_duplicates and total_eps and len([e for e in rec_eps if e > 0]) >= total_eps
     ):
         return "archive", "archive"
 

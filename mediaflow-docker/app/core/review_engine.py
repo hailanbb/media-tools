@@ -42,6 +42,10 @@ EXTRA_REGEX = re.compile(
     r"(?:^|[\s._\-\(\[])(?:日记|Diary|花活儿|Extra|花絮|彩蛋|纯享|采访|访谈|先行片|先导(?:片)?|超前(?:企划)?|预告|Preview|Behind[._\s-]the[._\s-]Scenes|Making[._\s-]of|SP\d*)(?:$|[\s._\-\)\]])",
     re.IGNORECASE,
 )
+SPECIAL_E00_REGEX = re.compile(
+    r"(?:^|[^a-z0-9])[Ss]0*\d+[Ee]00(?!\d)|(?:^|[^a-z0-9])[Ee]00(?!\d)|(?:^|[^a-z0-9])SP0*1(?!\d)",
+    re.IGNORECASE,
+)
 TMP_DOWNLOAD_REGEX = re.compile(r"\.(?:part|tmp|temp|download|downloading|crdownload|!qb|aria2|xltd)$", re.IGNORECASE)
 
 
@@ -265,6 +269,21 @@ def generate_review_clean_plan(
 
         eps = episodes_from_name(f_name, season_number)
         if not eps:
+            continue
+
+        # 检测是否为季前先导特辑 (E00) 或纯特别篇 (无正片编号 >= 1)，绝对保护不删
+        if (eps == [0] or (len(eps) == 1 and eps[0] == 0)) or (
+            bool(SPECIAL_E00_REGEX.search(f_name)) and not any(e > 0 for e in eps)
+        ):
+            extra_files.append({
+                "episode": 0,
+                "key": "specials_e00",
+                "name": f_name,
+                "path": f.get("path"),
+                "modified": f.get("modified"),
+                "size": f.get("size", 0),
+                "reason": "季前先导特辑/特别篇 (E00)，保护保留（归档时智能分流至 Season 0）",
+            })
             continue
 
         stem = re.sub(r"\.[^.]+$", "", f_name)

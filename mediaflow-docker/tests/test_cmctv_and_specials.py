@@ -51,6 +51,64 @@ class TestCmctvAndSpecials(unittest.TestCase):
         )
         self.assertEqual(status, "review_needed")
 
+    def test_multiple_e00_specials_without_regular_duplicates_archive_ready(self):
+        """测试仅第 0 集（先导片与特别企划）有多份副本、正片齐全且无正片重复时，直接判定可归档。"""
+        # 中餐厅 S06：官方 12 集，本地有 0..12，但仅 0 号集有两个版本（先导片与特别企划）
+        status, detail = diagnose_season(
+            recognized=list(range(0, 13)),
+            total_episodes=12,
+            season_finished=True,
+            has_duplicates=True,
+            duplicate_episodes=[0],
+        )
+        self.assertEqual(status, "archive_ready")
+        self.assertIn("Season 0", detail)
+        self.assertIn("第 0 集先导特辑/特别篇", detail)
+
+    def test_multiple_e00_specials_classified_to_archive_category(self):
+        """测试仅有第 0 集重复的记录在五模块分流中直接归入 archive (齐全可归档)。"""
+        from app.core.season_classifier import classify_single_record, consolidate_seasons_to_work_records
+        rec = {
+            "show_name": "中餐厅 (2017) [tmdbid=91914]",
+            "season_number": 6,
+            "tmdb_id": 91914,
+            "total_episodes": 12,
+            "status": "archive_ready",
+            "status_detail": "全 12 集齐全（附带第 0 集先导特辑/特别篇，归档时智能移入 Season 0），可归档",
+            "recognized_episodes_json": "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]",
+            "duplicate_episodes_json": "[0]",
+            "missing_episodes_json": "[]",
+        }
+        cat, action = classify_single_record(rec)
+        self.assertEqual(cat, "archive")
+        self.assertEqual(action, "archive")
+        works, counts = consolidate_seasons_to_work_records([rec])
+        self.assertEqual(counts["archive"], 1)
+        self.assertEqual(counts["review"], 0)
+        self.assertEqual(works[0]["main_category"], "archive")
+
+    def test_review_clean_engine_safely_protects_all_specials(self):
+        """测试清理引擎对第 0 集先导片与各类特辑绝对保护不删，只清理正片冗余。"""
+        files = [
+            {"name": "中餐厅 - S10E00 - 中餐厅.Chinese.Restaurant.2026.S10E00.1080p.WEB-DL.H264.AAC-PTerWEB.mp4", "path": "/src/S10/e00_1.mp4", "size": 1000},
+            {"name": "中餐厅 - S10E00 - 中餐厅特别企划.Chinese.Restaurant.Plus.2026.S10SP01.1080p.WEB-DL.H264.AAC-PTerWEB.mp4", "path": "/src/S10/e00_2.mp4", "size": 1200},
+        ]
+        for i in range(1, 13):
+            files.append({"name": f"中餐厅 - S10E{i:02d} - 1080p.mp4", "path": f"/src/S10/e{i:02d}_1080.mp4", "size": 2000})
+            files.append({"name": f"中餐厅 - S10E{i:02d} - 720p.mp4", "path": f"/src/S10/e{i:02d}_720.mp4", "size": 1000})
+
+        plan = generate_review_clean_plan(files, season_number=10, total_episodes=12)
+        self.assertTrue(plan["can_clean"])
+        kept_names = [k["name"] for k in plan["to_keep"]]
+        del_names = [d["name"] for d in plan["to_delete"]]
+        # 两个 E00 特辑均必须 100% 保护在 to_keep 中
+        self.assertIn("中餐厅 - S10E00 - 中餐厅.Chinese.Restaurant.2026.S10E00.1080p.WEB-DL.H264.AAC-PTerWEB.mp4", kept_names)
+        self.assertIn("中餐厅 - S10E00 - 中餐厅特别企划.Chinese.Restaurant.Plus.2026.S10SP01.1080p.WEB-DL.H264.AAC-PTerWEB.mp4", kept_names)
+        self.assertNotIn("中餐厅 - S10E00 - 中餐厅.Chinese.Restaurant.2026.S10E00.1080p.WEB-DL.H264.AAC-PTerWEB.mp4", del_names)
+        self.assertNotIn("中餐厅 - S10E00 - 中餐厅特别企划.Chinese.Restaurant.Plus.2026.S10SP01.1080p.WEB-DL.H264.AAC-PTerWEB.mp4", del_names)
+        # 12 个 720p 劣质正片副本被加入待删除清单
+        self.assertEqual(len(plan["to_delete"]), 12)
+
     def test_clean_plan_with_cmctv_complete_version(self):
         """测试当存在 CMCTV 完整版本与劣质残卷时，能够正确生成清理计划淘汰残卷。"""
         files = [

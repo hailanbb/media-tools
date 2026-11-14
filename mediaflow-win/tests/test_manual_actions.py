@@ -97,9 +97,9 @@ class ManualActionsTest(unittest.IsolatedAsyncioTestCase):
         disk.list_files.return_value = []
         with patch("app.api.archive.CloudDrive2Client", return_value=disk):
             r = await self.http.post("/api/archive/delete-source-show", json={"season_record_id": "gap"})
-        self.assertTrue(r.json()["ok"])
-        disk.delete_file.assert_awaited_once_with("/qa/src/Show")
-        self.assertEqual([s["id"] for s in (await self.http.get("/api/tasks/t/seasons")).json()], ["ready"])
+        # 遵循 v2.5.24 安全红线：真缺集待补剧集严禁删除源端整剧
+        self.assertFalse(r.json()["ok"])
+        self.assertIn("真缺集", r.json()["message"])
 
 
 if __name__ == "__main__":

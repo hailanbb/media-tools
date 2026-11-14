@@ -355,11 +355,12 @@ def diagnose_season(
     expected_set = set(range(1, total_episodes + 1))
     missing = sorted(expected_set - recognized_set)
     out_of_range = sorted(recognized_set - expected_set)
+    regular_duplicates = [d for d in (duplicate_episodes or []) if d > 0]
 
     # 1. 连载中剧集（官方尚未完结）：暂留源或复核
     if not season_finished:
-        if has_duplicates:
-            dup_text = f"第 {','.join(str(d) for d in sorted(duplicate_episodes))} 集" if duplicate_episodes else "部分集数"
+        if regular_duplicates:
+            dup_text = f"第 {','.join(str(d) for d in sorted(regular_duplicates))} 集"
             return "review_needed", f"连载中存在重复版本 ({dup_text})，需清理低质冗余"
         return "airing", f"尚未确认本季播毕，当前已识别 {len(recognized_set)}/{total_episodes} 集，留源跟踪"
 
@@ -367,31 +368,33 @@ def diagnose_season(
     if missing:
         missing_text = f"第 {','.join(str(m) for m in missing[:5])} 集" if len(missing) <= 5 else f"{len(missing)} 集"
         out_desc = f"（同时包含超范围集: {out_of_range}）" if out_of_range else ""
-        if has_duplicates:
-            dup_text = f"第 {','.join(str(d) for d in sorted(duplicate_episodes))} 集" if duplicate_episodes else "部分集数"
+        if regular_duplicates:
+            dup_text = f"第 {','.join(str(d) for d in sorted(regular_duplicates))} 集"
             return "download_needed", f"已完结但缺失 {missing_text}{out_desc}（同时存在重复集: {dup_text}，优先补缺，亦可顺带清理冗余）"
         else:
             return "download_needed", f"已完结但缺失 {missing_text}，缺少已播出集：{missing}{out_desc}"
 
     # 3. 超范围集号容错与异常保护 (P1-4):
     if out_of_range:
-        # 先导片/季前特辑智能容错：超范围集号仅为 [0]，正片 1..total 全部就绪且无重复，视为附随先导特辑直接就绪可归档（归档时智能移入 Season 0）
-        if out_of_range == [0] and not has_duplicates:
-            return "archive_ready", f"全 {total_episodes} 集齐全（附带第 0 集先导特辑，归档时智能移入 Season 0），可归档"
+        # 先导片/季前特辑智能容错：超范围集号仅为 [0]，正片 1..total 全部就绪且无正片重复版本，
+        # 视为附随先导特辑直接就绪可归档（即使本地存在多份先导片/特别企划特辑，也沿用特别篇整理流程，归档时智能移入 Season 0）
+        if out_of_range == [0] and not regular_duplicates:
+            spec_note = "附带第 0 集先导特辑/特别篇" if len(duplicate_episodes or []) > 0 else "附带第 0 集先导特辑"
+            return "archive_ready", f"全 {total_episodes} 集齐全（{spec_note}，归档时智能移入 Season 0），可归档"
 
-        # 若允许加更特辑容错且官方总集数正常 (>=6)，超出部分紧邻总集数（<= total + 4 且数量 <= 3），无重复集，视为附随特辑直接就绪可归档
-        if allow_bonus_specials and total_episodes >= 6 and max(out_of_range) <= total_episodes + 4 and len(out_of_range) <= 3 and not has_duplicates:
+        # 若允许加更特辑容错且官方总集数正常 (>=6)，超出部分紧邻总集数（<= total + 4 且数量 <= 3），无正片重复集，视为附随特辑直接就绪可归档
+        if allow_bonus_specials and total_episodes >= 6 and max(out_of_range) <= total_episodes + 4 and len(out_of_range) <= 3 and not regular_duplicates:
             extra_desc = f"（附带 {len(out_of_range)} 集加更/特辑: {out_of_range}）"
             return "archive_ready", f"全 {total_episodes} 集齐全{extra_desc}，可归档"
-        dup_note = f"；第 {','.join(map(str, duplicate_episodes))} 集另有重复版本" if duplicate_episodes else ""
+        dup_note = f"；第 {','.join(map(str, regular_duplicates or duplicate_episodes))} 集另有重复版本" if (regular_duplicates or duplicate_episodes) else ""
         return "review_needed", f"当前资料收录 {total_episodes} 集，本地另有集号 {out_of_range} 待核实{dup_note}。"
 
     # 4. 已完结且全部集数已就绪，但存在同集重复版本：进入复核清理
-    if has_duplicates:
-        dup_text = f"第 {','.join(str(d) for d in sorted(duplicate_episodes))} 集" if duplicate_episodes else "部分集数"
+    if regular_duplicates:
+        dup_text = f"第 {','.join(str(d) for d in sorted(regular_duplicates))} 集"
         return "review_needed", f"全 {total_episodes} 集已齐，但存在重复版本 ({dup_text})，请复核同集文件后再归档"
 
-    # 5. 已完结、无缺集、无重复、无超范围：完美就绪，可归档
+    # 5. 已完结、无缺集、无正片重复、无超范围：完美就绪，可归档
     return "archive_ready", f"全 {total_episodes} 集齐全，可归档"
 
 

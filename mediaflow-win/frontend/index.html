@@ -109,7 +109,7 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.28</span>
+              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.29</span>
             </div>
             <!-- 完善后的命名 -->
             <p class="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">智能媒体库整理与归档工作台</p>
@@ -347,8 +347,8 @@
                 <span>待复核清理</span>
                 <i class="fa-solid fa-broom text-amber-500 text-xs"></i>
               </div>
-              <div class="text-xl sm:text-2xl font-bold text-amber-600 dark:text-amber-400" id="catCountReview">0 <span class="text-xs font-normal">处需清理</span></div>
-              <p class="text-[10px] sm:text-[11px] text-slate-500 dark:text-slate-400 mt-1 truncate">去重/纠偏处置 ➔</p>
+              <div class="text-xl sm:text-2xl font-bold text-amber-600 dark:text-amber-400" id="catCountReview">0 <span class="text-xs font-normal">季</span></div>
+              <p class="text-[10px] sm:text-[11px] text-slate-500 dark:text-slate-400 mt-1 truncate">全季已齐，存在可清理的重复正片</p>
             </div>
 
             <div onclick="filterResultCategory('anomaly')" id="cat-card-anomaly" class="cursor-pointer rounded-xl p-3 sm:p-3.5 border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 hover:border-rose-400 transition relative group flex-shrink-0 w-36 sm:w-auto snap-start shadow-sm">
@@ -677,10 +677,6 @@
 
       <div class="flex justify-end gap-2 pt-3 border-t border-slate-100 dark:border-slate-800">
         <button onclick="closeModal('cleanPreviewModal')" class="px-4 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 text-xs font-medium">关闭</button>
-        <button id="cleanPreviewForceBtn" onclick="confirmCleanFromPreview(true)" class="hidden px-4 py-1.5 rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 text-xs font-bold flex items-center gap-1.5 shadow-sm hover:bg-amber-100 transition" title="忽略集数缺失，仅对已有重复集执行清理">
-          <i class="fa-solid fa-triangle-exclamation text-xs"></i>
-          <span>忽略缺失强制清理</span>
-        </button>
         <button id="cleanPreviewConfirmBtn" onclick="confirmCleanFromPreview()" class="px-4 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm">
           <i class="fa-solid fa-broom text-xs"></i>
           <span>按此计划执行清理</span>
@@ -881,9 +877,10 @@
         </div>
         <button onclick="closeModal('reviewModal')" class="text-slate-400 hover:text-slate-600"><i class="fa-solid fa-xmark"></i></button>
       </div>
-      <div class="text-xs space-y-2 p-3 rounded-lg bg-amber-50/50 dark:bg-amber-950/20 text-slate-600 dark:text-slate-400 font-mono">
-        <div>• 拟清理: 冗余副本视频 (释放约 3.2 GB)</div>
-        <div class="text-emerald-600 dark:text-emerald-400">✓ 严格保护: 外挂字幕 (.srt/.ass) 与公共海报不删除</div>
+      <div class="text-xs space-y-2 p-3.5 rounded-xl bg-amber-50/60 dark:bg-amber-950/20 text-slate-700 dark:text-slate-300 font-mono border border-amber-200/60 dark:border-amber-800/40">
+        <div class="font-bold text-amber-800 dark:text-amber-300">• 拟安全清理所选作品季的低画质/同集冗余副本视频及伴生单集刮削</div>
+        <div class="text-emerald-600 dark:text-emerald-400">✓ 严格保护: 外挂字幕 (.srt/.ass)、剧季公共海报/NFO、季前先导特辑 (E00/SP) 绝对不删</div>
+        <div class="text-slate-500">• 清理完成后强读实物核验，全季已齐无冗余的季将自动流转至「齐全可归档」</div>
       </div>
       <div class="flex justify-end gap-2 pt-2">
         <button onclick="closeModal('reviewModal')" class="px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-xs">取消</button>
@@ -1484,7 +1481,7 @@
       }
 
       document.getElementById('catCountArchive').innerHTML = `${task.counts.archive} <span class="text-xs font-normal">季已齐</span>`;
-      document.getElementById('catCountReview').innerHTML = `${task.counts.review} <span class="text-xs font-normal">处需清理</span>`;
+      document.getElementById('catCountReview').innerHTML = `${task.counts.review} <span class="text-xs font-normal">季</span>`;
       const alreadyEl = document.getElementById('catCountAnomaly');
       const initPendingDg = task.counts.pending_directory_groups || 0;
       if (alreadyEl) {
@@ -1630,7 +1627,7 @@
 
       if (task._seasonsLoaded) {
         const revSeasons = (task.categories && Array.isArray(task.categories.review)) ? task.categories.review.length : 0;
-        document.getElementById('catCountReview').innerHTML = `${revSeasons} <span class="text-xs font-normal">处需清理</span>`;
+        document.getElementById('catCountReview').innerHTML = `${revSeasons} <span class="text-xs font-normal">季</span>`;
         const anomList = (task.categories && Array.isArray(task.categories.anomaly)) ? task.categories.anomaly : [];
         const anomCount = anomList.length || (task.counts.archive_check || 0);
         const cleanableCount = anomList.filter(it => it.actionType === 'clean_redundant' || it.raw?.status === 'already_archived').length;
@@ -2803,13 +2800,13 @@
       if (count > 0) {
         batchBtn.removeAttribute('disabled');
         if (currentCategory === 'archive') batchBtnText.textContent = `批量一键归档所选 (${count} 季)`;
-        else if (currentCategory === 'review') batchBtnText.textContent = `批量一键清理所选冗余 (${count} 处)`;
+        else if (currentCategory === 'review') batchBtnText.textContent = `批量一键清理所选冗余 (${count} 季)`;
         else if (currentCategory === 'anomaly' || currentCategory === 'already_archived') batchBtnText.textContent = `批量清理源端冗余 (${count} 季)`;
         else if (currentCategory === 'download') batchBtnText.textContent = `批量一键推送 MP 补缺 (${count} 季)`;
       } else {
         batchBtn.setAttribute('disabled', 'true');
         if (currentCategory === 'archive') batchBtnText.textContent = '批量一键归档所选 (0)';
-        else if (currentCategory === 'review') batchBtnText.textContent = '批量一键清理所选冗余 (0)';
+        else if (currentCategory === 'review') batchBtnText.textContent = '批量一键清理所选冗余 (0 季)';
         else if (currentCategory === 'anomaly' || currentCategory === 'already_archived') batchBtnText.textContent = '批量清理源端冗余 (0)';
         else if (currentCategory === 'download') batchBtnText.textContent = '批量一键推送 MP 补缺 (0)';
       }
@@ -2852,6 +2849,19 @@
         }
 
         const p = resp.previews[0];
+        const toKeepAll = Array.isArray(p.to_keep) ? p.to_keep : [];
+        const toDeleteAll = Array.isArray(p.to_delete) ? p.to_delete : [];
+
+        const isSpecialFile = f => Boolean(
+          f.episode === 0 ||
+          f.key === 'specials_e00' ||
+          f.key === 'extras' ||
+          (f.reason && (f.reason.includes('特辑') || f.reason.includes('特别篇') || f.reason.includes('先导') || f.reason.includes('花絮') || f.reason.includes('日记') || f.reason.includes('彩蛋')))
+        );
+
+        const regularKeep = toKeepAll.filter(f => !isSpecialFile(f));
+        const specialsKeep = toKeepAll.filter(isSpecialFile);
+
         let html = `
           <div class="p-3.5 rounded-xl bg-indigo-50/70 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800/60 space-y-1">
             <div class="font-bold text-indigo-900 dark:text-indigo-300 flex items-center gap-1.5">
@@ -2861,54 +2871,68 @@
             <div class="text-slate-700 dark:text-slate-200">${escapeHtml(p.version_note || p.reason || '')}</div>
           </div>`;
 
-        // 保留文件
+        // 1. 正片最优保留文件
         html += `
           <div class="space-y-1.5">
             <div class="font-bold text-emerald-700 dark:text-emerald-400 flex items-center justify-between">
-              <span>✓ 将保留的最优版本文件 (${p.to_keep ? p.to_keep.length : 0} 项)</span>
+              <span>✓ 将保留的正片最优版本文件 (${regularKeep.length} 项)</span>
             </div>
-            <div class="max-h-40 overflow-y-auto space-y-1 p-2 rounded-lg bg-emerald-50/30 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-900/40 font-mono text-[11px]">`;
-        if (p.to_keep && p.to_keep.length > 0) {
-          html += p.to_keep.map(f => `
+            <div class="max-h-36 overflow-y-auto space-y-1 p-2 rounded-lg bg-emerald-50/30 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-900/40 font-mono text-[11px]">`;
+        if (regularKeep.length > 0) {
+          html += regularKeep.map(f => `
             <div class="flex items-center justify-between py-0.5 text-slate-700 dark:text-slate-300">
               <span class="truncate flex-1" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>
-              <span class="text-emerald-600 dark:text-emerald-400 font-semibold flex-shrink-0 ml-2">${f.reason || '最佳画质'}</span>
+              <span class="text-emerald-600 dark:text-emerald-400 font-semibold flex-shrink-0 ml-2">${escapeHtml(f.reason || '最佳画质')}</span>
             </div>
           `).join('');
         } else {
-          html += `<div class="text-slate-400">无保留文件</div>`;
+          html += `<div class="text-slate-400">无正片保留文件</div>`;
         }
         html += `</div></div>`;
 
-        // 待删文件
+        // 2. 独立受保护资产（先导特辑、特别企划、花絮等）
+        if (specialsKeep.length > 0) {
+          html += `
+            <div class="space-y-1.5">
+              <div class="font-bold text-sky-700 dark:text-sky-400 flex items-center justify-between">
+                <span class="flex items-center gap-1.5"><i class="fa-solid fa-shield-halved text-sky-500"></i> 受保护先导特辑 / 特别篇资产 (${specialsKeep.length} 项)</span>
+                <span class="text-[10px] text-sky-600/80 dark:text-sky-300/80 font-normal">归档时智能分流至 Season 0</span>
+              </div>
+              <div class="max-h-28 overflow-y-auto space-y-1 p-2 rounded-lg bg-sky-50/40 dark:bg-sky-950/20 border border-sky-200 dark:border-sky-900/40 font-mono text-[11px]">
+                ${specialsKeep.map(f => `
+                  <div class="flex items-center justify-between py-0.5 text-slate-700 dark:text-slate-300">
+                    <span class="truncate flex-1 text-sky-900 dark:text-sky-200" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>
+                    <span class="text-sky-600 dark:text-sky-400 font-medium flex-shrink-0 ml-2">${escapeHtml(f.reason || '特别篇/特辑')}</span>
+                  </div>
+                `).join('')}
+              </div>
+            </div>`;
+        }
+
+        // 3. 待删文件
         html += `
           <div class="space-y-1.5">
             <div class="font-bold text-red-600 dark:text-red-400 flex items-center justify-between">
-              <span>✕ 计划安全清理的冗余/残卷/伴生文件 (${p.to_delete ? p.to_delete.length : 0} 项)</span>
+              <span>✕ 计划安全清理的冗余/残卷/伴生文件 (${toDeleteAll.length} 项)</span>
             </div>
-            <div class="max-h-48 overflow-y-auto space-y-1 p-2 rounded-lg bg-red-50/30 dark:bg-red-950/20 border border-red-200 dark:border-red-900/40 font-mono text-[11px]">`;
-        if (p.to_delete && p.to_delete.length > 0) {
-          html += p.to_delete.map(f => `
+            <div class="max-h-40 overflow-y-auto space-y-1 p-2 rounded-lg bg-red-50/30 dark:bg-red-950/20 border border-red-200 dark:border-red-900/40 font-mono text-[11px]">`;
+        if (toDeleteAll.length > 0) {
+          html += toDeleteAll.map(f => `
             <div class="flex items-center justify-between py-0.5 text-slate-700 dark:text-slate-300">
               <span class="truncate flex-1 text-red-600 dark:text-red-400" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>
               <span class="text-slate-400 flex-shrink-0 ml-2 font-normal">${escapeHtml(f.reason || '淘汰残卷')}</span>
             </div>
           `).join('');
         } else {
-          html += `<div class="text-slate-400">无需清理任何文件</div>`;
+          html += `<div class="p-2 text-center text-slate-500 dark:text-slate-400">✓ 全季正片已齐，且无多余冗余正片副本需清理。若含特别篇特辑，归档时将智能移入 Season 0。</div>`;
         }
         html += `</div></div>`;
 
         bodyEl.innerHTML = html;
 
         const confirmBtn = document.getElementById('cleanPreviewConfirmBtn');
-        const forceBtn = document.getElementById('cleanPreviewForceBtn');
         if (confirmBtn) {
-          confirmBtn.style.display = (p.can_clean && p.to_delete && p.to_delete.length > 0) ? 'flex' : 'none';
-        }
-        if (forceBtn) {
-          // 如果常规决策暂缓清理且包含缺失集，但用户尚未开启 forceClean 时，允许一键切换为强制清理预览
-          forceBtn.classList.toggle('hidden', !(p.can_clean === false && !forceClean));
+          confirmBtn.style.display = (p.can_clean && toDeleteAll.length > 0) ? 'flex' : 'none';
         }
       } catch (err) {
         bodyEl.innerHTML = `<div class="p-4 text-red-500">预览失败: ${err.message}</div>`;
