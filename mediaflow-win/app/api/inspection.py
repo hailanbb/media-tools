@@ -12,6 +12,7 @@ from app.models.task import Task
 from app.schemas.common import StatusResponse
 from app.services.task_service import (
     TASK_PROGRESS,
+    TASK_CANCELLED,
     execute_inspection,
     get_task_progress,
     pause_task,
@@ -45,6 +46,7 @@ async def run_inspection(task_id: str, db: AsyncSession = Depends(get_db)) -> St
         if task.status in ("running", "stopping") or prog.get("status") in ("running", "stopping"):
             return StatusResponse(ok=False, message="任务正在执行或保存中，请等待完成")
 
+        TASK_CANCELLED.discard(task_id)
         # 1. 立即重置内存中的进度状态为初始 running
         TASK_PROGRESS[task_id] = {
             "task_id": task_id,
@@ -104,12 +106,13 @@ async def stop_inspection(task_id: str, db: AsyncSession = Depends(get_db)) -> S
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
 
+    from app.services.task_service import TASK_RUNNING_WORKERS
+    worker = TASK_RUNNING_WORKERS.get(task_id)
+    if not worker or worker.done() or get_task_progress(task_id)["status"] in ("completed", "stopped", "failed"):
+        return StatusResponse(ok=True, message="任务已结束")
+    # 初检会话可能持有 SQLite 写锁。停止信号不与其争写任务行，终态由 worker 提交。
     await stop_task(task_id)
-    if task.status in ("running", "paused"):
-        task.status = "stopping"
-        await db.commit()
-
-    return StatusResponse(ok=True, message="已收到停止请求，正在保存已分析进度...")
+    return StatusResponse(ok=True, message="已收到停止请求，正在结束扫描")
 
 
 @router.get("/{task_id}/progress")

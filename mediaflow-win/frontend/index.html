@@ -109,7 +109,7 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.24</span>
+              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.25</span>
             </div>
             <!-- 完善后的命名 -->
             <p class="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">智能媒体库整理与归档工作台</p>
@@ -1208,7 +1208,7 @@
       const map = {
         pending: 'bg-slate-400',
         running: 'bg-amber-500 animate-pulse',
-        stopping: 'bg-indigo-500 animate-pulse',
+        stopping: 'bg-indigo-500',
         paused: 'bg-orange-500',
         stopped: 'bg-slate-500',
         completed: 'bg-emerald-500',
@@ -1367,7 +1367,7 @@
                 <span class="font-mono font-bold text-indigo-600 dark:text-indigo-400" id="task-card-pct-${task.id}">${task.status === 'stopping' ? '保存中' : (task.status === 'paused' ? '暂停' : '扫描中')}</span>
               </div>
               <div class="w-full bg-slate-100 dark:bg-slate-800 rounded-full h-1.5 overflow-hidden">
-                <div id="task-card-bar-${task.id}" class="bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 h-full rounded-full transition-all duration-300" style="width: ${task.status === 'stopping' ? '90%' : (task.status === 'paused' ? '50%' : '15%')}"></div>
+                <div id="task-card-bar-${task.id}" class="bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 h-full rounded-full transition-all duration-300" style="width: ${task.status === 'stopping' ? '0%' : (task.status === 'paused' ? '50%' : '15%')}"></div>
               </div>
             </div>` : `
             <div class="mt-2 pt-1.5 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between text-[10px]">
@@ -1705,6 +1705,11 @@
     function updateLiveInspectionUI(taskId, p) {
       const pct = Math.max(1, p.percent || 1);
       const isPaused = (p.status === 'paused');
+      if (p.status === 'stopping') {
+        const card = document.getElementById(`task-card-show-${taskId}`);
+        if (card) card.textContent = p.message || '正在结束扫描';
+        return;
+      }
 
       // 1. 更新主面板常驻看板
       const liveBanner = document.getElementById('liveInspectionBanner');
@@ -1753,12 +1758,14 @@
         if (inspectTimer) clearInterval(inspectTimer);
 
         let completedHandled = false;
+        let polling = false;
 
         inspectTimer = setInterval(async () => {
-          if (completedHandled) return;
+          if (completedHandled || polling) return;
+          polling = true;
           try {
             const p = await api(`/api/inspect/${taskId}/progress`);
-            if (!p) return;
+            if (!p || activeInspectTaskId !== taskId) return;
 
             const pPct = document.getElementById('inspectProgressPercent');
             const pBar = document.getElementById('inspectProgressBar');
@@ -1802,7 +1809,7 @@
               if (pauseBtnText) pauseBtnText.textContent = '暂停';
               if (pauseIcon) pauseIcon.className = "fa-solid fa-pause text-xs";
             } else if (p.status === 'stopping') {
-              if (pStep) pStep.textContent = '正在安全写入数据库并归档检查点...';
+              if (pStep) pStep.textContent = '正在停止初检';
               if (pShow) pShow.textContent = p.message || '已收到停止请求，正在保存已分析进度...';
               if (ctrlGroup) ctrlGroup.classList.add('hidden');
               if (closeBtn) closeBtn.classList.remove('hidden');
@@ -1825,7 +1832,6 @@
               setTimeout(async () => {
                 closeInspectProgressModal();
                 await loadTasks();
-                selectTask(taskId);
               }, 800);
 
             } else if (p.status === 'stopped') {
@@ -1842,7 +1848,6 @@
               setTimeout(async () => {
                 closeInspectProgressModal();
                 await loadTasks();
-                selectTask(taskId);
               }, 800);
 
             } else if (p.status === 'failed') {
@@ -1857,7 +1862,7 @@
             }
           } catch (pollErr) {
             console.warn('轮询初检进度异常:', pollErr);
-          }
+          } finally { polling = false; }
         }, 500);
 
       } catch (e) {
@@ -1900,12 +1905,10 @@
         const pStep = document.getElementById('inspectProgressStep');
         if (pShow && activeInspectTaskId === taskId) {
           pShow.textContent = (resp && resp.message) || '已收到停止请求，正在安全保存已分析进度...';
-          if (pStep) pStep.textContent = '正在安全写入数据库并归档检查点...';
+          if (pStep) pStep.textContent = '正在停止初检';
         }
-        await loadTasks();
-        if (currentTaskId === taskId) {
-          selectTask(taskId);
-        }
+        if (!resp.ok) throw new Error(resp.message);
+        startGlobalTaskHeartbeat();
       } catch (e) {
         alert(`停止失败: ${e.message}`);
       }
@@ -1965,16 +1968,7 @@
             }
           }
 
-          if (hasChange) {
-            const oldCurrent = currentTaskId ? taskList.find(x => x.id === currentTaskId) : null;
-            await loadTasks();
-            if (currentTaskId) {
-              const newCurrent = tasks.find(x => x.id === currentTaskId);
-              if (oldCurrent && (oldCurrent.status === 'running' || oldCurrent.status === 'paused') && newCurrent && newCurrent.status === 'completed') {
-                await selectTask(currentTaskId);
-              }
-            }
-          }
+          if (hasChange && !activeInspectTaskId) await loadTasks();
         } catch (e) {
           // 忽略心跳网络瞬断
         }
@@ -2531,8 +2525,8 @@
           emptyMsg = '请在左侧选择一个任务';
           emptyIcon = 'fa-hand-pointer text-indigo-400';
         } else if (isStopping) {
-          emptyMsg = '初检正在停止，正在安全保存已分析进度...';
-          emptyIcon = 'fa-spinner fa-spin text-indigo-500';
+          emptyMsg = '正在结束初检，完成后会显示已保存的条目';
+          emptyIcon = 'fa-hourglass-half text-indigo-500';
         } else if (isPending) {
           emptyMsg = '初检引擎正在扫描分析中，请稍候...';
           emptyIcon = 'fa-spinner fa-spin text-blue-500';

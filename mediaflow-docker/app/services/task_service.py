@@ -30,6 +30,7 @@ import asyncio
 TASK_PROGRESS: dict[str, dict] = {}
 TASK_EVENTS: dict[str, asyncio.Event] = {}
 TASK_CANCELLED: set[str] = set()
+TASK_STOP_EVENTS: dict[str, asyncio.Event] = {}
 TASK_RUNNING_WORKERS: dict[str, asyncio.Task] = {}
 
 
@@ -61,11 +62,13 @@ async def resume_task(task_id: str) -> bool:
 
 async def stop_task(task_id: str) -> bool:
     TASK_CANCELLED.add(task_id)
+    if task_id in TASK_STOP_EVENTS:
+        TASK_STOP_EVENTS[task_id].set()
     evt = get_task_control_event(task_id)
     evt.set()
     if task_id in TASK_PROGRESS:
         TASK_PROGRESS[task_id]["status"] = "stopping"
-        TASK_PROGRESS[task_id]["message"] = "已收到停止请求，正在安全保存已分析进度..."
+        TASK_PROGRESS[task_id]["message"] = "已收到停止请求，正在结束扫描，随后保存已分析结果"
     return True
 
 
@@ -95,6 +98,7 @@ async def start_background_inspection(task_id: str) -> None:
         import logging
         logging.getLogger("mediaflow.task_service").error("后台初检异常: %s", e)
     finally:
+        TASK_STOP_EVENTS.pop(task_id, None)
         TASK_RUNNING_WORKERS.pop(task_id, None)
 
 
@@ -136,10 +140,10 @@ async def execute_inspection(task_id: str, db: AsyncSession) -> InspectionResult
     }
 
     async def _on_progress(current: int, total: int, show_name: str, message: str) -> None:
-        pct = int((current / total) * 100) if total > 0 else 0
         if task_id in TASK_CANCELLED:
-            cur_status = "stopping"
-        elif control_event and not control_event.is_set():
+            return
+        pct = int((current / total) * 100) if total > 0 else 0
+        if control_event and not control_event.is_set():
             cur_status = "paused"
         else:
             cur_status = "running"
@@ -166,7 +170,10 @@ async def execute_inspection(task_id: str, db: AsyncSession) -> InspectionResult
         cd2 = CloudDrive2Client()
         mp = MoviePilotClient()
         tmdb = TMDBClient()
-        TASK_CANCELLED.discard(task_id)
+        stop_event = asyncio.Event()
+        TASK_STOP_EVENTS[task_id] = stop_event
+        if task_id in TASK_CANCELLED:
+            stop_event.set()
         control_event = get_task_control_event(task_id)
         control_event.set()
 
@@ -182,6 +189,7 @@ async def execute_inspection(task_id: str, db: AsyncSession) -> InspectionResult
                 progress_callback=_on_progress,
                 control_event=control_event,
                 cancelled_tasks=TASK_CANCELLED,
+                stop_event=stop_event,
                 concurrency=3,
                 db=db,
             )
@@ -190,6 +198,9 @@ async def execute_inspection(task_id: str, db: AsyncSession) -> InspectionResult
             await mp.close()
             await tmdb.close()
 
+        if task_id in TASK_CANCELLED:
+            TASK_PROGRESS[task_id].update(status="stopping", current_show="",
+                                          message=f"扫描已结束，正在保存 {len(result.seasons)} 季")
         # 人工完成标记按任务和源季路径保留，重扫生成新记录 ID 后仍然有效。
         handled_logs = await db.scalars(select(OperationLog.detail_json).where(
             OperationLog.task_id == task_id, OperationLog.action == "manually_handled"))
