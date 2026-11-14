@@ -113,12 +113,15 @@ async def health_check() -> dict:
 
 @router.get("/config/roots")
 async def get_roots() -> dict:
-    """返回已配置的源路径与归档路径。"""
+    """返回已配置的源路径、归档路径与补缺参数。"""
     settings = get_settings()
     return {
         "source_root": settings.source_root,
         "archive_root": settings.archive_root,
         "library_root": settings.library_root,
+        "gap_fill_min_seeders": settings.gap_fill_min_seeders,
+        "gap_fill_extra_sites": settings.gap_fill_extra_sites,
+        "version": _VERSION,
     }
 
 

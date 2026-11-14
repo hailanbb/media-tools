@@ -1,10 +1,10 @@
-# 🪟 MediaFlow (Windows 原生免环境运行版)
+﻿# 🪟 MediaFlow (Windows 原生免环境运行版)
 
 > **面向 Windows 本地 PC 与工作站的原生运行发行版。无需 Docker 引擎，即下即用。**
 
 [![Windows](https://img.shields.io/badge/Windows-Native-0078d4.svg?style=flat-square&logo=windows)](#)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776ab.svg?style=flat-square&logo=python)](#)
-[![Version](https://img.shields.io/badge/Release-v2.5.29-6366f1.svg?style=flat-square)](#)
+[![Version](https://img.shields.io/badge/Release-v2.5.30-6366f1.svg?style=flat-square)](#)
 
 ---
 
@@ -57,3 +57,4 @@ python tests/run_all_tests.py
 ## 📚 详细功能与架构
 
 关于智能初检、双轨拟合、分段解析与安全门禁的详细设计，请参阅 [项目主 README](../README.md)。
+

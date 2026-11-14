@@ -109,7 +109,7 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.29</span>
+              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.30</span>
             </div>
             <!-- 完善后的命名 -->
             <p class="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">智能媒体库整理与归档工作台</p>
@@ -889,6 +889,29 @@
     </div>
   </div>
 
+  <!-- 弹窗：放弃补缺并删除源端本季确认框 -->
+  <div id="deleteSourceSeasonModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+    <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-lg w-full p-4 sm:p-6 space-y-4 border border-rose-200 dark:border-rose-900/60 shadow-2xl">
+      <div class="flex items-center justify-between pb-2 border-b border-slate-100 dark:border-slate-800">
+        <div class="flex items-center space-x-2">
+          <i class="fa-solid fa-triangle-exclamation text-rose-500 text-base"></i>
+          <h3 class="text-sm font-bold text-slate-900 dark:text-white" id="deleteSourceSeasonTitle">放弃补缺并删除源端（本季）</h3>
+        </div>
+        <button onclick="closeModal('deleteSourceSeasonModal')" class="text-slate-400 hover:text-slate-600"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      <div id="deleteSourceSeasonBody" class="space-y-3 text-xs text-slate-700 dark:text-slate-300">
+        <!-- 动态填充预览信息 -->
+      </div>
+      <div class="flex justify-end gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
+        <button onclick="closeModal('deleteSourceSeasonModal')" class="px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-xs text-slate-600 dark:text-slate-300">取消</button>
+        <button id="confirmDeleteSourceSeasonBtn" onclick="executeDeleteSourceSeason()" class="px-4 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold shadow-md shadow-rose-500/20 transition flex items-center gap-1.5">
+          <i class="fa-solid fa-trash-can"></i>
+          <span>放弃本次补缺并删除此源季</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- 弹窗：补缺/修复确认框 -->
   <div id="downloadModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
     <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-xl w-full p-4 sm:p-6 space-y-4 border border-slate-200 dark:border-slate-800 shadow-2xl">
@@ -903,7 +926,7 @@
         <div class="font-bold text-blue-700 dark:text-blue-400 mb-1 flex items-center gap-1.5">
           <i class="fa-solid fa-arrows-spin"></i> 标准化补缺工作流已就绪：
         </div>
-        <p>1. <b>精准检索</b>：自动从 MoviePilot 索引 PT 站检索健康做种源（做种数≥2，优先 1080p/4K 中字）。</p>
+        <p id="downloadModalSeedersNote">1. <b>精准检索</b>：自动从 MoviePilot 索引 PT 站检索健康做种源（动态门槛校验，优先同档省容量）。</p>
         <p>2. <b>能效评估</b>：根据缺失集分布与资源覆盖，智能决策下载<b>整季全集</b>还是<b>定向补齐散集</b>。</p>
         <p>3. <b>媒体整理前置解绑</b>：自动联动 MoviePilot 媒体整理（<code>/api/v1/history/transfer</code>），执行<b>「仅删除转移记录」</b>（绝对不误删实体文件），避免因历史记录存在而跳过入库！</p>
         <p>4. <b>提交下载</b>：推送入库并持久化审计日志。</p>
@@ -2492,29 +2515,59 @@
             </div>
           </div>`;
       } else if (currentCategory === 'download') {
+        const curGapSub = (typeof currentGapSubFilter !== 'undefined') ? currentGapSubFilter : 'all';
+        const unsearchedGapItems = downloadTodoItems.filter(it => {
+          const lr = it.gapFillState?.last_run;
+          return !lr || !lr.outcome_status;
+        });
+        const noResourceGapItems = downloadTodoItems.filter(it => {
+          const lr = it.gapFillState?.last_run;
+          return lr && ['zero_hits', 'low_seeders', 'rejected'].includes(lr.outcome_status);
+        });
+        const partialGapItems = downloadTodoItems.filter(it => {
+          const g = it.gapFillState;
+          return g && Array.isArray(g.pushed_episodes) && g.pushed_episodes.length > 0 && Array.isArray(g.actionable_missing_episodes) && g.actionable_missing_episodes.length > 0;
+        });
+        const errorGapItems = downloadTodoItems.filter(it => {
+          const lr = it.gapFillState?.last_run;
+          return lr && ['search_error', 'submit_error'].includes(lr.outcome_status);
+        });
+        const minSeeders = (typeof configRoots !== 'undefined' && configRoots && configRoots.gap_fill_min_seeders != null) ? configRoots.gap_fill_min_seeders : 2;
+
         if (selectAll) selectAll.disabled = (activeGapTab === 'pushed_pending');
         if (selectAllLabel) {
           selectAllLabel.textContent = activeGapTab === 'pushed_pending' ? "已推送等待入库（防重复推送）" : "全选待补缺项";
         }
         batchContainer.innerHTML = `
-          <div class="flex flex-wrap items-center gap-2">
-            <div role="tablist" aria-label="补缺状态清单" class="inline-flex items-center gap-1 rounded-xl bg-slate-100 dark:bg-slate-800/80 p-1" onkeydown="handleGapFillTabKeydown(event)">
-              <button type="button" role="tab" data-gap-tab="todo" aria-selected="${activeGapTab === 'todo' ? 'true' : 'false'}" tabindex="${activeGapTab === 'todo' ? '0' : '-1'}" onclick="switchGapFillTab('todo')" class="px-3 py-1 rounded-lg text-xs font-semibold transition ${activeGapTab === 'todo' ? 'bg-white dark:bg-slate-900 text-blue-600 dark:text-blue-400 shadow-sm' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'}">
-                真缺集待补 (${downloadTodoItems.length})
+          <div class="space-y-1.5 w-full">
+            <div class="flex flex-wrap items-center gap-2">
+              <div role="tablist" aria-label="补缺状态清单" class="inline-flex items-center gap-1 rounded-xl bg-slate-100 dark:bg-slate-800/80 p-1" onkeydown="handleGapFillTabKeydown(event)">
+                <button type="button" role="tab" data-gap-tab="todo" aria-selected="${activeGapTab === 'todo' ? 'true' : 'false'}" tabindex="${activeGapTab === 'todo' ? '0' : '-1'}" onclick="switchGapFillTab('todo')" class="px-3 py-1 rounded-lg text-xs font-semibold transition ${activeGapTab === 'todo' ? 'bg-white dark:bg-slate-900 text-blue-600 dark:text-blue-400 shadow-sm' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'}">
+                  真缺集待补 (${downloadTodoItems.length})
+                </button>
+                <button type="button" role="tab" data-gap-tab="pushed_pending" aria-selected="${activeGapTab === 'pushed_pending' ? 'true' : 'false'}" tabindex="${activeGapTab === 'pushed_pending' ? '0' : '-1'}" onclick="switchGapFillTab('pushed_pending')" class="px-3 py-1 rounded-lg text-xs font-semibold transition ${activeGapTab === 'pushed_pending' ? 'bg-white dark:bg-slate-900 text-indigo-600 dark:text-indigo-400 shadow-sm' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'}">
+                  已推送待入库 (${downloadPushedItems.length})
+                </button>
+              </div>
+              <button type="button" onclick="reconcileCurrentTaskGapFill()" class="px-3 py-2 rounded-lg border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 text-xs font-semibold hover:bg-indigo-100 dark:hover:bg-indigo-900/50 transition flex items-center gap-1.5" title="向 MoviePilot 队列、历史与双库核对已推送分集状态">
+                <i class="fa-solid fa-arrows-to-dot text-xs"></i>
+                <span>核对入库</span>
               </button>
-              <button type="button" role="tab" data-gap-tab="pushed_pending" aria-selected="${activeGapTab === 'pushed_pending' ? 'true' : 'false'}" tabindex="${activeGapTab === 'pushed_pending' ? '0' : '-1'}" onclick="switchGapFillTab('pushed_pending')" class="px-3 py-1 rounded-lg text-xs font-semibold transition ${activeGapTab === 'pushed_pending' ? 'bg-white dark:bg-slate-900 text-indigo-600 dark:text-indigo-400 shadow-sm' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'}">
-                已推送待入库 (${downloadPushedItems.length})
-              </button>
+              ${activeGapTab === 'todo' ? `
+              <button id="batchActionButton" onclick="executeBatchDownload()" disabled class="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold shadow-md shadow-blue-600/20 transition flex items-center space-x-1.5">
+                <i class="fa-solid fa-cloud-arrow-down text-xs"></i>
+                <span id="batchActionBtnText">批量一键推送 MP 补缺 (0)</span>
+              </button>` : ''}
             </div>
-            <button type="button" onclick="reconcileCurrentTaskGapFill()" class="px-3 py-2 rounded-lg border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 text-xs font-semibold hover:bg-indigo-100 dark:hover:bg-indigo-900/50 transition flex items-center gap-1.5" title="向 MoviePilot 队列、历史与双库核对已推送分集状态">
-              <i class="fa-solid fa-arrows-to-dot text-xs"></i>
-              <span>核对入库</span>
-            </button>
             ${activeGapTab === 'todo' ? `
-            <button id="batchActionButton" onclick="executeBatchDownload()" disabled class="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold shadow-md shadow-blue-600/20 transition flex items-center space-x-1.5">
-              <i class="fa-solid fa-cloud-arrow-down text-xs"></i>
-              <span id="batchActionBtnText">批量一键推送 MP 补缺 (0)</span>
-            </button>` : ''}
+            <div class="flex flex-wrap items-center gap-1.5 pt-0.5 text-xs">
+              <span class="text-slate-400 text-[11px] mr-0.5">筛选:</span>
+              <button type="button" onclick="switchGapSubFilter('all')" class="px-2 py-0.5 rounded-md text-[11px] transition ${curGapSub === 'all' ? 'bg-blue-600 text-white font-semibold shadow-xs' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'}">全部 (${downloadTodoItems.length})</button>
+              <button type="button" onclick="switchGapSubFilter('unsearched')" class="px-2 py-0.5 rounded-md text-[11px] transition ${curGapSub === 'unsearched' ? 'bg-blue-600 text-white font-semibold shadow-xs' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'}">未搜索 (${unsearchedGapItems.length})</button>
+              <button type="button" onclick="switchGapSubFilter('no_resource')" class="px-2 py-0.5 rounded-md text-[11px] transition ${curGapSub === 'no_resource' ? 'bg-blue-600 text-white font-semibold shadow-xs' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'}">无合格资源/低做种 (${noResourceGapItems.length})</button>
+              <button type="button" onclick="switchGapSubFilter('partial')" class="px-2 py-0.5 rounded-md text-[11px] transition ${curGapSub === 'partial' ? 'bg-blue-600 text-white font-semibold shadow-xs' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'}">部分已推 (${partialGapItems.length})</button>
+              <button type="button" onclick="switchGapSubFilter('error')" class="px-2 py-0.5 rounded-md text-[11px] transition ${curGapSub === 'error' ? 'bg-blue-600 text-white font-semibold shadow-xs' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'}">接口失败 (${errorGapItems.length})</button>
+            </div>` : ''}
           </div>`;
         banner.className = "p-3.5 rounded-xl bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800/60 flex items-start space-x-3 text-xs";
         banner.innerHTML = activeGapTab === 'pushed_pending' ? `
@@ -2526,7 +2579,7 @@
           <i class="fa-solid fa-cloud-arrow-down text-blue-500 text-sm mt-0.5"></i>
           <div class="flex-1 space-y-1">
             <div class="font-bold text-blue-900 dark:text-blue-300">真缺集补缺与整理修复：仅显示尚未推送覆盖的真缺分集</div>
-            <div class="text-slate-600 dark:text-slate-300">严格校验做种数≥2；单季仅部分分集推送成功时，本季保留在待补中并自动扣减已推送集数。</div>
+            <div class="text-slate-600 dark:text-slate-300">动态门槛做种数≥${minSeeders}；单季仅部分分集推送成功时，本季保留在待补中并自动扣减已推送集数；支持随时放弃补缺并安全删除源端。</div>
           </div>`;
       } else {
         if (selectAllLabel) selectAllLabel.textContent = "全选连载项";
@@ -2549,9 +2602,16 @@
       }
 
       // 获取当前分类下的项目
+      const curGapSub = (typeof currentGapSubFilter !== 'undefined') ? currentGapSubFilter : 'all';
       let items = (task && task.categories)
-        ? ((currentCategory === 'download' && activeGapTab === 'pushed_pending')
-            ? downloadPushedItems
+        ? ((currentCategory === 'download')
+            ? (activeGapTab === 'pushed_pending'
+                ? downloadPushedItems
+                : (curGapSub === 'unsearched' ? unsearchedGapItems
+                   : curGapSub === 'no_resource' ? noResourceGapItems
+                   : curGapSub === 'partial' ? partialGapItems
+                   : curGapSub === 'error' ? errorGapItems
+                   : downloadTodoItems))
             : (task.categories[currentCategory] || []))
         : [];
 
@@ -2668,7 +2728,8 @@
               : '');
 
         let gapSummaryLineHtml = '';
-        if (gapState && ((gapState.pushed_episodes && gapState.pushed_episodes.length > 0) || (gapState.episodes && gapState.episodes.length > 0) || gapState.last_outcome || (gapState.unverified_count > 0))) {
+        const lr = gapState ? gapState.last_run : null;
+        if (gapState && ((gapState.pushed_episodes && gapState.pushed_episodes.length > 0) || (gapState.episodes && gapState.episodes.length > 0) || gapState.last_outcome || (gapState.unverified_count > 0) || lr)) {
           const todoEps = (gapState.actionable_missing_episodes || []).map(e => `E${String(e).padStart(2, '0')}`);
           const pushedEps = (gapState.pushed_episodes || []).map(e => `E${String(e).padStart(2, '0')}`);
           const segs = [];
@@ -2676,6 +2737,9 @@
           if (pushedEps.length > 0) segs.push(`已推: ${pushedEps.slice(0, 6).join(',')}${pushedEps.length > 6 ? '...' : ''}`);
           if (gapState.unverified_count > 0) segs.push(`超时待确认 ${gapState.unverified_count} 项`);
           else if (gapState.last_outcome && gapState.last_outcome !== 'accepted') segs.push(`回执: ${gapState.last_outcome}`);
+          if (lr && lr.summary_text) {
+            segs.push(`上次检索: ${lr.summary_text}`);
+          }
           if (segs.length > 0) {
             gapSummaryLineHtml = `<div class="text-[11px] text-indigo-600 dark:text-indigo-300 bg-indigo-50/70 dark:bg-indigo-950/30 border border-indigo-100 dark:border-indigo-900/50 rounded-md px-2 py-0.5 inline-flex items-center gap-1.5 flex-wrap"><i class="fa-solid fa-receipt text-[10px]"></i><span>${escapeHtml(segs.join(' · '))}</span></div>`;
           }
@@ -2741,6 +2805,12 @@
                 <button onclick="promptDeleteSourceShow('${item.id}')" class="px-2.5 py-1.5 rounded-lg border border-rose-200 dark:border-rose-800 bg-rose-50 dark:bg-rose-950/40 text-rose-600 dark:text-rose-400 text-xs font-semibold hover:bg-rose-100 dark:hover:bg-rose-900/40 transition flex items-center gap-1 shadow-sm" title="彻底删除源端整个剧集目录及其所有文件，并在删除后立即强制刷新源目录">
                   <i class="fa-solid fa-trash-can text-xs"></i>
                   <span>删除源端</span>
+                </button>
+              ` : ''}
+              ${(currentCategory === 'download' || ['download_needed', 'period_missing'].includes(rawStatus)) ? `
+                <button onclick="openDeleteSourceSeasonModal('${item.id}')" class="px-2.5 py-1.5 rounded-lg border border-rose-200 dark:border-rose-800 bg-rose-50 dark:bg-rose-950/40 text-rose-600 dark:text-rose-400 text-xs font-semibold hover:bg-rose-100 dark:hover:bg-rose-900/40 transition flex items-center gap-1 shadow-sm" title="放弃本次补缺，彻底删除源端该季目录及其文件，移入回收站并移出待补清单">
+                  <i class="fa-solid fa-trash-can text-xs"></i>
+                  <span>删除源端（本季）</span>
                 </button>
               ` : ''}
               ${(currentCategory === 'review' && !['inspect_info', 'inspect_gap_detail', 'clean_redundant'].includes(item.actionType) && item.duplicates && item.duplicates.length > 0) ? `
@@ -3129,6 +3199,149 @@
       } catch (e) {
         alert(`删除源端失败: ${e.message}`);
       }
+    }
+
+    // ── 放弃补缺并删除源端单季目录 ─────────────────
+    let currentDeleteSourceSeasonRecId = null;
+
+    async function openDeleteSourceSeasonModal(recId) {
+      currentDeleteSourceSeasonRecId = recId;
+      const item = findItemByRecordId(recId);
+      const name = item ? `${item.show} ${item.season}` : '本季';
+      document.getElementById('deleteSourceSeasonTitle').textContent = `放弃补缺并删除源端: ${name}`;
+      const body = document.getElementById('deleteSourceSeasonBody');
+      const confirmBtn = document.getElementById('confirmDeleteSourceSeasonBtn');
+      if (confirmBtn) confirmBtn.disabled = true;
+
+      body.innerHTML = `
+        <div class="py-6 text-center text-slate-500 dark:text-slate-400 space-y-2">
+          <i class="fa-solid fa-spinner fa-spin text-lg text-indigo-500"></i>
+          <div>正在分析源端单季文件与安全影响...</div>
+        </div>
+      `;
+      openModal('deleteSourceSeasonModal');
+
+      try {
+        const res = await api('/api/archive/delete-source-season/preview', {
+          method: 'POST',
+          body: JSON.stringify({ season_record_id: recId })
+        });
+        if (!res.ok) {
+          body.innerHTML = `
+            <div class="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300 space-y-1">
+              <div class="font-bold flex items-center gap-1.5"><i class="fa-solid fa-ban"></i> 安全拦截无法删除</div>
+              <div>${escapeHtml(res.error || res.message || '安全前置校验未通过')}</div>
+            </div>
+          `;
+          return;
+        }
+
+        const data = res.data || {};
+        const stats = data.file_stats || {};
+        const eps = data.episodes || [];
+        const warnings = data.warnings || [];
+        const hasActiveDownloads = Boolean(data.has_active_mp_downloads);
+
+        let warnHtml = '';
+        if (warnings.length > 0) {
+          warnHtml = `
+            <div class="p-2.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-200 space-y-1">
+              <div class="font-bold flex items-center gap-1"><i class="fa-solid fa-triangle-exclamation"></i> 注意事项</div>
+              <ul class="list-disc pl-4 space-y-0.5">${warnings.map(w => `<li>${escapeHtml(w)}</li>`).join('')}</ul>
+            </div>
+          `;
+        }
+
+        body.innerHTML = `
+          <div class="space-y-3">
+            <div class="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 font-mono text-[11px] break-all">
+              <span class="text-slate-400">拟删路径: </span><span class="text-slate-800 dark:text-slate-200 font-bold">${escapeHtml(data.season_path || '')}</span>
+            </div>
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center text-xs">
+              <div class="p-2 rounded-lg bg-slate-100 dark:bg-slate-800">
+                <div class="text-slate-400 text-[10px]">视频文件</div>
+                <div class="font-bold text-slate-800 dark:text-slate-200 text-sm">${stats.video_count || 0}</div>
+              </div>
+              <div class="p-2 rounded-lg bg-slate-100 dark:bg-slate-800">
+                <div class="text-slate-400 text-[10px]">字幕文件</div>
+                <div class="font-bold text-slate-800 dark:text-slate-200 text-sm">${stats.sub_count || 0}</div>
+              </div>
+              <div class="p-2 rounded-lg bg-slate-100 dark:bg-slate-800">
+                <div class="text-slate-400 text-[10px]">其它文件</div>
+                <div class="font-bold text-slate-800 dark:text-slate-200 text-sm">${stats.other_count || 0}</div>
+              </div>
+              <div class="p-2 rounded-lg bg-slate-100 dark:bg-slate-800">
+                <div class="text-slate-400 text-[10px]">占用总容量</div>
+                <div class="font-bold text-slate-800 dark:text-slate-200 text-sm">${escapeHtml(stats.total_size_display || '0 B')}</div>
+              </div>
+            </div>
+            ${eps.length > 0 ? `
+              <div class="text-[11px] text-slate-600 dark:text-slate-400">
+                <span>包含正片分集: </span>
+                <span class="font-mono text-rose-600 dark:text-rose-400 font-semibold">${escapeHtml(eps.slice(0, 15).join(', '))}${eps.length > 15 ? '...' : ''}</span>
+              </div>
+            ` : ''}
+            ${warnHtml}
+            <div class="text-[11px] text-slate-500 dark:text-slate-400 space-y-1">
+              <div>• 执行后本季源文件将移至 CloudDrive2 回收站，并主动触发父级目录云盘刷新。</div>
+              <div>• 对应待补条目将标记为「已放弃补缺并删源」，自动移出真缺集待补清单。</div>
+            </div>
+          </div>
+        `;
+
+        if (confirmBtn) {
+          confirmBtn.disabled = hasActiveDownloads;
+          if (hasActiveDownloads) {
+            confirmBtn.title = 'MoviePilot 尚有该剧活跃下载任务，禁止删除';
+          } else {
+            confirmBtn.title = '';
+          }
+        }
+      } catch (err) {
+        body.innerHTML = `
+          <div class="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300">
+            预检请求异常: ${escapeHtml(err.message || String(err))}
+          </div>
+        `;
+      }
+    }
+
+    async function executeDeleteSourceSeason() {
+      if (!currentDeleteSourceSeasonRecId) return;
+      const confirmBtn = document.getElementById('confirmDeleteSourceSeasonBtn');
+      const origHtml = confirmBtn ? confirmBtn.innerHTML : '';
+      if (confirmBtn) {
+        confirmBtn.disabled = true;
+        confirmBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin text-xs"></i><span>正在删除并刷新目录...</span>';
+      }
+
+      try {
+        const res = await api('/api/archive/delete-source-season', {
+          method: 'POST',
+          body: JSON.stringify({ season_record_id: currentDeleteSourceSeasonRecId })
+        });
+        if (!res.ok) throw new Error(res.error || res.message || '删除失败');
+        closeModal('deleteSourceSeasonModal');
+        alert(res.message || '源端季度目录已成功移至回收站，待补记录已关闭！');
+        const task = taskList.find(t => t.id === currentTaskId);
+        if (task) task._seasonsLoaded = false;
+        await loadTasks();
+        if (currentTaskId) selectTask(currentTaskId);
+      } catch (err) {
+        alert(`删除失败: ${err.message || String(err)}`);
+      } finally {
+        if (confirmBtn && confirmBtn.isConnected) {
+          confirmBtn.disabled = false;
+          confirmBtn.innerHTML = origHtml;
+        }
+      }
+    }
+
+    // ── 真缺集子分类筛选 ─────────────────
+    let currentGapSubFilter = 'all';
+    function switchGapSubFilter(filter) {
+      currentGapSubFilter = ['all', 'unsearched', 'no_resource', 'partial', 'error'].includes(filter) ? filter : 'all';
+      renderEpisodesList();
     }
 
     function handleSingleAction(type, arg2, arg3) {
@@ -3646,6 +3859,21 @@
         `);
       }
 
+      if (['download_needed', 'period_missing'].includes(item.raw?.status) || currentCategory === 'download') {
+        parts.push(`
+          <div class="p-3 rounded-xl bg-rose-50/70 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+            <div class="space-y-0.5">
+              <div class="font-bold text-xs text-rose-900 dark:text-rose-200">放弃补缺并删除源端（本季）</div>
+              <div class="text-[11px] text-slate-600 dark:text-slate-400">若不想继续补全此季，可彻底删除源端本季目录与文件，直接从待补清单中移除。</div>
+            </div>
+            <button type="button" onclick="document.getElementById('gapFillDetailDialog')?.close(); openDeleteSourceSeasonModal('${item.id}')" class="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold transition shadow-xs flex items-center gap-1.5 flex-shrink-0">
+              <i class="fa-solid fa-trash-can text-xs"></i>
+              <span>放弃并删除本季</span>
+            </button>
+          </div>
+        `);
+      }
+
       bodyEl.innerHTML = parts.join('');
       dlg.showModal();
     }
@@ -3905,12 +4133,14 @@
       const poolLimit = Math.max(1, Math.min(concurrency || 1, items.length));
       appendLog(`<span class="text-slate-400">[${getNowTimestamp()}] 🚀 批量流水线启动，共选定 <b>${items.length}</b> 个任务季（工作槽: ${poolLimit}），开始执行...</span>`);
 
-      let successCount = 0;       // 成功季数
-      let skippedCount = 0;       // 暂缓/跳过季数
-      let cancelledCount = 0;     // 已取消季数
-      let failCount = 0;          // 失败季数
-      let submittedTorrents = 0;  // 提交种子任务总数
-      let completedCount = 0;     // 已结算项数
+      let successCount = 0;          // 成功季数
+      let unverifiedSeasonCount = 0; // 仅含在途待核验的季数
+      let skippedCount = 0;          // 暂缓/跳过季数
+      let cancelledCount = 0;        // 已取消季数
+      let failCount = 0;             // 失败季数
+      let submittedTorrents = 0;     // 明确提交成功的种子总数
+      let unverifiedTorrents = 0;    // 在途待核验种子数
+      let completedCount = 0;        // 已结算项数
       let cursor = 0;
       const activeTitles = new Set();
 
@@ -3946,13 +4176,21 @@
             if (!isCurrentBatch()) return;
 
             if (res && (res.ok || res.success)) {
-              successCount++;
-              if (res.submitted_count) {
-                submittedTorrents += res.submitted_count;
-              } else if (res.submitted && Array.isArray(res.submitted)) {
-                submittedTorrents += res.submitted.length;
+              if (res.unverified_count && !res.submitted_count) {
+                unverifiedSeasonCount++;
+                unverifiedTorrents += res.unverified_count;
               } else {
-                submittedTorrents += 1;
+                successCount++;
+                if (res.submitted_count) {
+                  submittedTorrents += res.submitted_count;
+                } else if (res.submitted && Array.isArray(res.submitted)) {
+                  submittedTorrents += res.submitted.length;
+                } else {
+                  submittedTorrents += 1;
+                }
+                if (res.unverified_count) {
+                  unverifiedTorrents += res.unverified_count;
+                }
               }
             } else if (res && res.skipped) {
               skippedCount++;
@@ -3999,9 +4237,12 @@
       }
 
       const cancelText = session.isCancelled ? ' (已提前中止)' : '';
-      const torrentNote = submittedTorrents > 0 ? ` (共提交 <span class="text-indigo-400 font-bold">${submittedTorrents}</span> 个种子)` : '';
+      const torrentNote = (submittedTorrents > 0 || unverifiedTorrents > 0)
+        ? ` (已提交 <span class="text-indigo-400 font-bold">${submittedTorrents}</span> 个种子${unverifiedTorrents > 0 ? `，在途待核验 <span class="text-amber-400 font-bold">${unverifiedTorrents}</span> 个` : ''})`
+        : '';
       appendLog(`<div class="pt-2 border-t border-slate-800 text-xs font-bold text-slate-300">` +
         `[${getNowTimestamp()}] 🏁 流水线执行结束${cancelText}: 成功 <span class="text-emerald-400">${successCount}</span> 季${torrentNote} | ` +
+        (unverifiedSeasonCount > 0 ? `待核验 <span class="text-amber-400">${unverifiedSeasonCount}</span> 季 | ` : '') +
         `暂缓 <span class="text-amber-400">${skippedCount}</span> 季 | ` +
         (cancelledCount > 0 ? `已取消 <span class="text-slate-400">${cancelledCount}</span> 季 | ` : '') +
         `失败 <span class="text-rose-400">${failCount}</span> 季 / 共 ${items.length} 季</div>`);
@@ -4009,12 +4250,12 @@
       if (dlProgressSubtitle) {
         dlProgressSubtitle.textContent = session.isCancelled
           ? `已停止派发，已发出项目结果已确认: 成功 ${successCount} 季${torrentNote}, 失败 ${failCount} 季`
-          : `流水线执行已完结: 成功 ${successCount} 季${torrentNote}, 失败 ${failCount} 季`;
+          : `流水线执行已完结: 成功 ${successCount} 季${unverifiedSeasonCount > 0 ? `(另有 ${unverifiedSeasonCount} 季在途待核验)` : ''}${torrentNote}, 失败 ${failCount} 季`;
       }
       if (currentItemText) {
         currentItemText.textContent = session.isCancelled
-          ? `已中止 (有效完成 ${successCount}/${items.length} 季)`
-          : `全部完成 (${successCount}/${items.length} 季)`;
+          ? `已中止 (有效完成 ${successCount + unverifiedSeasonCount}/${items.length} 季)`
+          : `全部完成 (${successCount + unverifiedSeasonCount}/${items.length} 季)`;
       }
       if (dlProgressFooterHint) {
         dlProgressFooterHint.textContent = session.isCancelled
@@ -4174,34 +4415,35 @@
             }
             if (details && details.length > 0) {
               const unverified = details.filter(d => d.status === 'submitted_unverified' || d.outcome === 'submitted_unverified');
-              const successes = details.filter(d => d.success || d.status === 'success' || d.status === 'submitted_unverified' || d.outcome === 'submitted_unverified');
+              const verifiedSuccesses = details.filter(d => (d.success || d.status === 'success') && d.status !== 'submitted_unverified' && d.outcome !== 'submitted_unverified');
               const failures = details.filter(d => !d.success && d.status !== 'success' && d.status !== 'submitted_unverified' && d.outcome !== 'submitted_unverified');
 
-              if (successes.length > 0) {
+              const allPositive = [...verifiedSuccesses, ...unverified];
+              if (allPositive.length > 0) {
                 let extra = '';
-                const maxSeeds = Math.max(...successes.map(d => Number(d.seeders || d.seeds || 0)));
+                const maxSeeds = Math.max(0, ...allPositive.map(d => Number(d.seeders || d.seeds || 0)));
                 if (maxSeeds > 0) extra += ` (做种: ${maxSeeds})`;
-                const summaries = successes.map(d => {
+                const summaries = allPositive.map(d => {
                   const st = d.site ? `[${d.site}] ` : '';
                   const sz = d.size_display ? ` ${d.size_display}` : '';
                   const rs = d.reason || d.plan_desc || '';
                   return `${st}${rs || sz}`.trim();
                 }).filter(Boolean);
                 if (summaries.length > 0) extra += ` | ${summaries.join('；')}`;
-                const cleanedTotal = successes.reduce((acc, d) => acc + (d.cleaned_transfers_count || d.cleared_transfer_records_count || 0), 0);
+                const cleanedTotal = allPositive.reduce((acc, d) => acc + (d.cleaned_transfers_count || d.cleared_transfer_records_count || 0), 0);
                 if (cleanedTotal > 0) extra += ` | 仅清理 ${cleanedTotal} 条冲突缺号整理记录`;
 
-                if (unverified.length > 0 && failures.length === 0) {
-                  appendLog(`<span class="text-amber-400 font-bold">[${getNowTimestamp()}] ⚠️ 已提交待确认（回执超时）: 【${escapeHtml(item.name)}】${unverified.length} 项待核对入库${escapeHtml(extra)}</span>`);
+                if (verifiedSuccesses.length === 0 && unverified.length > 0) {
+                  appendLog(`<span class="text-amber-400 font-bold">[${getNowTimestamp()}] ⚠️ 已提交待对账确认（下载队列在途）: 【${escapeHtml(item.name)}】共 ${unverified.length} 项（需在「已推待入库」核对）${escapeHtml(extra)}</span>`);
                 } else if (failures.length > 0 || unverified.length > 0) {
-                  appendLog(`<span class="text-amber-400 font-bold">[${getNowTimestamp()}] ⚠️ 部分推送成功: 【${escapeHtml(item.name)}】已提交 ${successes.length} 项（待确认 ${unverified.length} 项），失败 ${failures.length} 项${escapeHtml(extra)}</span>`);
+                  appendLog(`<span class="text-amber-400 font-bold">[${getNowTimestamp()}] ⚠️ 部分推送成功: 【${escapeHtml(item.name)}】已确认 ${verifiedSuccesses.length} 项，在途待核对 ${unverified.length} 项，失败 ${failures.length} 项${escapeHtml(extra)}</span>`);
                 } else {
-                  appendLog(`<span class="text-emerald-400 font-bold">[${getNowTimestamp()}] ✓ 推送成功: 【${escapeHtml(item.name)}】共提交 ${successes.length} 个下载任务${escapeHtml(extra)}</span>`);
+                  appendLog(`<span class="text-emerald-400 font-bold">[${getNowTimestamp()}] ✓ 推送成功: 【${escapeHtml(item.name)}】共提交 ${verifiedSuccesses.length} 个下载任务${escapeHtml(extra)}</span>`);
                 }
                 for (const note of res.skip_reasons || []) {
                   appendLog(`<span class="text-amber-400">${escapeHtml(note)}</span>`);
                 }
-                return { success: true, submitted_count: successes.length };
+                return { success: true, submitted_count: verifiedSuccesses.length, unverified_count: unverified.length };
               } else {
                 const failReason = (failures[0] && (failures[0].reason || failures[0].message)) || res.message || '未找到合适种子';
                 appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] ✗ 推送失败: 【${escapeHtml(item.name)}】(${escapeHtml(failReason)})</span>`);

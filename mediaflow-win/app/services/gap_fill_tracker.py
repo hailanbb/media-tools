@@ -436,7 +436,8 @@ async def compute_season_gap_fill_view(
 
     # 优先采用当前 task_id 的记录，同时兼顾跨任务针对同一季路径+身份的在途推送防重
     ep_by_num: dict[int, GapFillEpisode] = {}
-    for row in sorted(ep_rows, key=lambda r: (r.task_id == rec.task_id, _dt_ts(r.updated_at or r.created_at), r.id)):
+    valid_rows = [r for r in ep_rows if hasattr(r, "episode_number") and r.episode_number is not None]
+    for row in sorted(valid_rows, key=lambda r: (getattr(r, "task_id", None) == rec.task_id, _dt_ts(getattr(r, "updated_at", None) or getattr(r, "created_at", None)), getattr(r, "id", 0))):
         ep_by_num[int(row.episode_number)] = row
 
     run_row = (
@@ -907,11 +908,17 @@ async def reconcile_gap_fill_records(
                     continue
 
                 # 队列、整理队列、转移成功记录均未命中 + 实体缺失：
-                # 当主动触发“核对入库”(force_release_missing) 或为待核实超时请求 -> 安全退回待补
-                if force_release_missing or row.state in ("submitted_unverified", "intent_submitting"):
+                # 针对 submitted_unverified / intent_submitting 保留观察期（300 秒）：
+                # 处于观察期内且未显式指定 force_release_missing 时，不因单次队列抖动误放回待补
+                row_age = now_dt.timestamp() - _dt_ts(row.updated_at or row.created_at)
+                in_observation_window = row.state in ("submitted_unverified", "intent_submitting") and row_age < 300
+                if in_observation_window and not force_release_missing:
+                    row.reason = f"提交回执待确认中（已提交 {int(max(0, row_age))} 秒，对账观察期 300 秒），保持在途锁定防重"
+                    summary["still_pending"] += 1
+                elif force_release_missing or row.state in ("submitted_unverified", "intent_submitting"):
                     row.state = "cancelled_or_failed"
                     row.outcome_code = "mp_cancelled_freed"
-                    row.reason = "MP 队列已无在途下载且双库未见实文件（可能已取消/删种），已自动退回待补"
+                    row.reason = "MP 队列已无在途下载且双库未见实文件（已过观察期或主动释放），已自动退回待补"
                     summary["released_to_todo"] += 1
                 else:
                     summary["still_pending"] += 1

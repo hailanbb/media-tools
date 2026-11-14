@@ -1,6 +1,24 @@
 # MediaFlow 版本管理
 
-当前应用版本为 v2.5.29，发布日期为 2026-11-14。
+当前应用版本为 v2.5.30，发布日期为 2026-11-14。
+
+v2.5.30 重点落实《MediaFlow真缺集待补模块需求与交互方案-v2.5.27.md》核心规范，补齐单季删源安全闭环、对账观察期防抖保护、做种门槛动态展示与待补四态子筛选：
+1. **真缺集单季删源安全闭环（`app/api/archive.py` + `frontend/index.html`）**：
+   - 新增单季放弃补缺预检接口 `POST /api/archive/delete-source-season/preview` 与执行接口 `POST /api/archive/delete-source-season`；
+   - 严格安全拦截：仅允许对「真缺集待补」（`download_needed` / `period_missing`）季度执行，严禁删除归档库路径或共享平铺多季目录；
+   - 安全联动：删除前自动核验 MoviePilot 是否存在活跃下载任务，若有活跃下载则强制阻断删除；删除时严格执行 CD2 移入回收站（`trash=True`）并主动触发父级目录云盘缓存刷新；
+   - 级联注销：删除后自动将季记录置为 `source_absent`，关联待补分集自动更新为 `cancelled_or_failed`（`user_abandoned_deleted`），从真缺集清单自动扣除并刷新任务汇总；
+   - 前端在待补单季卡片与详情弹窗中新增【删除源端（本季）】入口，弹窗完整展示拟删除路径、视频/字幕/文件统计、正片分集列表与影响警告。
+2. **对账观察期与流水线待确认统计隔离（`app/services/gap_fill_tracker.py` + `frontend/index.html`）**：
+   - 修复对账（`reconcile`）机制：针对 `submitted_unverified` 与 `intent_submitting` 状态引入 300 秒观察期保护，防止因 MP/下载器队列瞬时抖动过早退回待补，避免在途防重保护失效；
+   - 修复流水线批量推送统计误将 `submitted_unverified`（已投递待对账）混为 `success` 的问题，在前端日志与进度汇报中精确分离「明确提交成功」、「在途待核验」与「失败」三项数据。
+3. **动态做种门槛与四态二级子筛选（`app/api/system.py` + `frontend/index.html`）**：
+   - 系统配置接口下发 `gap_fill_min_seeders` 与 `gap_fill_extra_sites`，破除前端弹窗硬编码“做种数≥2”文案，动态按配置门槛展示；
+   - 待补清单顶部工具栏新增四态二级子筛选：【全部】、【未搜索】、【无合格资源/低做种】、【部分已推】、【接口失败】，支持快速定位需人工决策的剧季；
+   - 卡片增强展示上次检索诊断摘要（`last_run.summary_text`），一眼看清种子筛选与决策原因。
+4. **全矩阵自动化测试验证（`tests/test_manual_actions.py` + 前端契约审计）**：
+   - 补充单季删源预检、正向执行、非真缺集 409 拦截、活跃下载拦截等单元测试；
+   - 前端静态契约审计（`node tests/audit_frontend.js`）与逻辑测试（`node tests/test_frontend_logic.js`）100% 通过。
 
 v2.5.29 重点落实《MediaFlow待复核清理模块需求与交互方案-v2.5.27.md》核心规范，彻底消除综艺先导特辑多版本误判与复核清理逻辑假死：
 1. **季前先导特辑与特别篇 (E00/SP) 多版本识别解绑（`app/core/inspector.py` + `app/core/season_classifier.py`）**：

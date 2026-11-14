@@ -7,14 +7,16 @@ import json
 import logging
 import os
 import posixpath
+import re
 from datetime import datetime
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clients.clouddrive2 import CloudDrive2Client
+from app.clients.moviepilot import MoviePilotClient
 from app.config import get_settings
 from app.core.directory_governance import find_blocking_group_for_record, normalize_dir_path
 from app.core.episode_parser import is_subtitle_file, is_video_file, parse_episode
@@ -159,8 +161,7 @@ async def _migrate_specials_to_season_0(
     season_number: int,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """检测并迁移季内先导特辑 (E00/SP01) 至目标剧集的 Season 0 (特别篇) 目录。"""
-    from app.core.episode_parser import parse_episode
-    from app.core.file_utils import is_video_file
+    from app.core.episode_parser import parse_episode, is_video_file
 
     special_videos = []
     for f in contents:
@@ -1258,14 +1259,6 @@ async def delete_source_show(
     if not rec:
         return StatusResponse(ok=False, message="剧季记录不存在")
 
-    if rec.status in ("download_needed", "period_missing"):
-        return StatusResponse(ok=False, message="真缺集待补剧集严禁删除源端整剧，仅支持推送补缺")
-    if rec.status != "unknown":
-        return StatusResponse(ok=False, message="仅未收录/元数据未知的异常剧集允许整剧删除源端")
-    c_info = json.loads(rec.conflict_json or "{}") if getattr(rec, "conflict_json", None) else {}
-    if isinstance(c_info, dict) and c_info.get("blocking"):
-        return StatusResponse(ok=False, message="存在作品身份冲突，安全拦截删除源端目录")
-
     show_path = rec.show_path
     if not show_path or len(show_path.strip("/").split("/")) < 2:
         return StatusResponse(ok=False, message=f"非法或不安全的剧集源路径: {show_path}")
@@ -1293,6 +1286,14 @@ async def delete_source_show(
     if norm_archive_root:
         if norm_show_path == norm_archive_root or norm_show_path.startswith(norm_archive_root + "/"):
             return StatusResponse(ok=False, message=f"严重危险拦截：目标路径属于归档库根目录或其子路径，严禁删除: {show_path}")
+
+    if rec.status in ("download_needed", "period_missing"):
+        return StatusResponse(ok=False, message="真缺集待补剧集严禁删除源端整剧，仅支持推送补缺")
+    if rec.status != "unknown":
+        return StatusResponse(ok=False, message="仅未收录/元数据未知的异常剧集允许整剧删除源端")
+    c_info = json.loads(rec.conflict_json or "{}") if getattr(rec, "conflict_json", None) else {}
+    if isinstance(c_info, dict) and c_info.get("blocking"):
+        return StatusResponse(ok=False, message="存在作品身份冲突，安全拦截删除源端目录")
 
     cd2 = CloudDrive2Client()
     try:
@@ -1355,5 +1356,284 @@ async def delete_source_show(
     except Exception as e:
         log.error("删除源端剧集失败 %s: %s", show_path, e)
         return StatusResponse(ok=False, message=f"删除源端失败: {str(e)[:200]}")
+    finally:
+        await cd2.close()
+
+
+def _fmt_bytes(size_bytes: int | None) -> str:
+    if not size_bytes or size_bytes <= 0:
+        return "0 B"
+    gb = 1024 ** 3
+    mb = 1024 ** 2
+    if size_bytes >= gb:
+        return f"{size_bytes / gb:.2f} GiB"
+    return f"{size_bytes / mb:.1f} MiB"
+
+
+class DeleteSourceSeasonPreviewRequest(BaseModel):
+    season_record_id: str
+
+
+class DeleteSourceSeasonRequest(BaseModel):
+    season_record_id: str
+    confirm_abandon: bool = True
+
+
+@router.post("/delete-source-season/preview")
+async def preview_delete_source_season(
+    body: DeleteSourceSeasonPreviewRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """预览单季源端删除影响 — 用于放弃补缺时，展示将失去的正片、附件及活跃任务状态。"""
+    rec = await db.get(SeasonRecord, body.season_record_id)
+    if not rec:
+        return {"ok": False, "message": "剧季记录不存在"}
+
+    if rec.status not in ("download_needed", "period_missing"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"仅允许对「真缺集待补」状态的季度执行放弃补缺预检，当前状态为: {rec.status}"
+        )
+
+    season_path = rec.season_path
+    if not season_path or len(season_path.strip("/").split("/")) < 2:
+        return {"ok": False, "message": f"非法或不安全的剧季源路径: {season_path}"}
+
+    settings = get_settings()
+    norm_season_path = posixpath.normpath(season_path)
+    source_root = settings.source_root.rstrip("/")
+    norm_source_root = posixpath.normpath(source_root) if source_root else ""
+    archive_root = settings.archive_root.rstrip("/")
+    norm_archive_root = posixpath.normpath(archive_root) if archive_root else ""
+
+    if not norm_source_root or not (norm_season_path.startswith(norm_source_root + "/") and norm_season_path != norm_source_root):
+        return {"ok": False, "message": f"目标路径不在受控源目录下或属于根目录: {season_path}"}
+    if norm_archive_root and (norm_season_path == norm_archive_root or norm_season_path.startswith(norm_archive_root + "/")):
+        return {"ok": False, "message": f"严重危险拦截：目标路径属于归档库根目录或其子路径: {season_path}"}
+
+    stmt_shared = select(SeasonRecord).where(
+        SeasonRecord.task_id == rec.task_id,
+        SeasonRecord.season_path == rec.season_path,
+        SeasonRecord.id != rec.id,
+    )
+    shared_recs = list((await db.scalars(stmt_shared)).all())
+    if shared_recs:
+        other_seasons = [f"S{s.season_number:02d}" for s in shared_recs]
+        return {
+            "ok": False,
+            "message": f"该路径被多个季度共享 ({', '.join(other_seasons)})，为平铺整剧目录，禁止按季单独删除目录以防误伤其他季正片！",
+        }
+
+    cd2 = CloudDrive2Client()
+    files_list: list[dict] = []
+    total_size = 0
+    video_files: list[dict] = []
+    sub_files: list[dict] = []
+    extra_files: list[dict] = []
+    present_eps: set[int] = set()
+
+    try:
+        raw_files = await cd2.list_files(season_path, force_refresh=True)
+        for f in raw_files:
+            if f.get("isDirectory"):
+                continue
+            fname = str(f.get("name") or "")
+            fsize = int(f.get("size") or 0)
+            total_size += fsize
+            fitem = {"name": fname, "size": fsize, "size_display": _fmt_bytes(fsize)}
+            files_list.append(fitem)
+            if is_video_file(fname):
+                video_files.append(fitem)
+                ep_obj = parse_episode(fname, f.get("path", ""), fsize)
+                if _verified_video(ep_obj, rec.season_number):
+                    present_eps.update(ep_obj.episode_numbers)
+            elif is_subtitle_file(fname):
+                sub_files.append(fitem)
+            else:
+                extra_files.append(fitem)
+    except Exception as list_err:
+        log.warning("读取源端季文件清单异常: %s", list_err)
+    finally:
+        await cd2.close()
+
+    active_downloads: list[dict] = []
+    if settings.mp_url and settings.mp_token:
+        try:
+            from app.clients.moviepilot import MoviePilotClient
+            mp = MoviePilotClient()
+            try:
+                dls = await mp.get_active_downloads()
+                if isinstance(dls, list):
+                    for dl in dls:
+                        dl_title = str(dl.get("title") or dl.get("name") or "")
+                        dl_tid = str(dl.get("tmdb_id") or dl.get("tmdbid") or "")
+                        if rec.tmdb_id and dl_tid and str(rec.tmdb_id) == dl_tid:
+                            active_downloads.append({"title": dl_title, "id": dl.get("id") or dl.get("download_id")})
+                        elif rec.show_name and rec.show_name in dl_title:
+                            active_downloads.append({"title": dl_title, "id": dl.get("id") or dl.get("download_id")})
+            finally:
+                await mp.close()
+        except Exception:
+            pass
+
+    sorted_present = sorted(present_eps)
+    loss_msg = (
+        f"源端本季现有 {len(sorted_present)} 集正片（{', '.join(f'E{e:02d}' for e in sorted_present[:10])}{'...' if len(sorted_present) > 10 else ''}），"
+        f"删除后将彻底失去这 {len(sorted_present)} 集文件！"
+        if sorted_present else "源端本季未发现有效正片文件（仅有残余非视频或空目录）"
+    )
+
+    payload = {
+        "season_record_id": rec.id,
+        "show_name": rec.show_name,
+        "season_number": rec.season_number,
+        "season_path": rec.season_path,
+        "archive_target_path": rec.archive_target_path or "",
+        "total_files": len(files_list),
+        "total_size_bytes": total_size,
+        "total_size_display": _fmt_bytes(total_size),
+        "video_count": len(video_files),
+        "sub_count": len(sub_files),
+        "extra_count": len(extra_files),
+        "file_stats": {
+            "video_count": len(video_files),
+            "sub_count": len(sub_files),
+            "other_count": len(extra_files),
+            "total_size_bytes": total_size,
+            "total_size_display": _fmt_bytes(total_size),
+        },
+        "present_episodes": sorted_present,
+        "episodes": [f"S{rec.season_number:02d}E{ep:02d}" for ep in sorted_present],
+        "missing_episodes": json.loads(rec.missing_episodes_json or "[]"),
+        "has_active_downloads": len(active_downloads) > 0,
+        "has_active_mp_downloads": len(active_downloads) > 0,
+        "active_downloads": active_downloads,
+        "loss_warning": loss_msg,
+        "warnings": [loss_msg] if loss_msg else [],
+    }
+
+    return {
+        "ok": True,
+        **payload,
+        "data": payload,
+    }
+
+
+@router.post("/delete-source-season", response_model=StatusResponse)
+async def delete_source_season(
+    body: DeleteSourceSeasonRequest,
+    db: AsyncSession = Depends(get_db),
+) -> StatusResponse:
+    """彻底删除源端本季目录及其所有文件，放弃补缺并结案。"""
+    rec = await db.get(SeasonRecord, body.season_record_id)
+    if not rec:
+        return StatusResponse(ok=False, message="剧季记录不存在")
+
+    if rec.status not in ("download_needed", "period_missing"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"仅允许对「真缺集待补」状态的季度执行放弃补缺并删源，当前状态为: {rec.status}"
+        )
+
+    if not body.confirm_abandon:
+        return StatusResponse(ok=False, message="未确认放弃补缺")
+
+    season_path = rec.season_path
+    if not season_path or len(season_path.strip("/").split("/")) < 2:
+        return StatusResponse(ok=False, message=f"非法或不安全的剧季源路径: {season_path}")
+
+    settings = get_settings()
+    norm_season_path = posixpath.normpath(season_path)
+    source_root = settings.source_root.rstrip("/")
+    norm_source_root = posixpath.normpath(source_root) if source_root else ""
+    archive_root = settings.archive_root.rstrip("/")
+    norm_archive_root = posixpath.normpath(archive_root) if archive_root else ""
+
+    if not norm_source_root or not (norm_season_path.startswith(norm_source_root + "/") and norm_season_path != norm_source_root):
+        return StatusResponse(ok=False, message=f"目标路径不在受控源目录下或属于根目录: {season_path}")
+    if norm_archive_root and (norm_season_path == norm_archive_root or norm_season_path.startswith(norm_archive_root + "/")):
+        return StatusResponse(ok=False, message=f"严重危险拦截：目标路径属于归档库根目录或其子路径: {season_path}")
+
+    stmt_shared = select(SeasonRecord).where(
+        SeasonRecord.task_id == rec.task_id,
+        SeasonRecord.season_path == rec.season_path,
+        SeasonRecord.id != rec.id,
+    )
+    shared_recs = list((await db.scalars(stmt_shared)).all())
+    if shared_recs:
+        other_seasons = [f"S{s.season_number:02d}" for s in shared_recs]
+        return StatusResponse(
+            ok=False,
+            message=f"该路径被多个季度共享 ({', '.join(other_seasons)})，为平铺整剧目录，严禁按季删除整剧目录！",
+        )
+
+    cd2 = CloudDrive2Client()
+    try:
+        blocked_group = await find_blocking_group_for_record(
+            db, rec, cd2_client=cd2, operation="delete_source_season"
+        )
+        if blocked_group is not None:
+            await db.commit()
+            return StatusResponse(
+                ok=False,
+                message=(
+                    f"存在未确认的{blocked_group.title or '同 ID 多目录组'}（TMDB {blocked_group.tmdb_id}），"
+                    f"安全拦截删除源端目录：{blocked_group.invalidated_reason or '请先确认归档目标或标记有意共存'}"
+                ),
+            )
+
+        log.warning("用户主动放弃补缺，删除源端本季目录: %s (关联记录: %s)", season_path, rec.id)
+        await cd2.delete_file(season_path)
+
+        parent_dir = posixpath.dirname(season_path)
+        try:
+            await cd2.list_files(parent_dir, force_refresh=True)
+            log.info("已成功强制刷新源端父级目录: %s", parent_dir)
+        except Exception as ref_err:
+            log.warning("强制刷新源端父级目录失败: %s - %s", parent_dir, ref_err)
+
+        rec.status = "source_absent"
+        rec.status_detail = f"用户主动放弃补缺，已删除源端本季目录 ({season_path})"
+
+        from app.models.gap_fill import GapFillEpisode
+        ep_rows = list((await db.scalars(
+            select(GapFillEpisode).where(
+                GapFillEpisode.task_id == rec.task_id,
+                GapFillEpisode.season_path == season_path.rstrip("/"),
+            )
+        )).all())
+        for ep in ep_rows:
+            ep.state = "cancelled_or_failed"
+            ep.outcome_code = "user_abandoned_deleted"
+            ep.reason = "用户主动放弃补缺并删除源端本季目录"
+
+        task_id = rec.task_id
+        await _refresh_task_summary(task_id, db)
+        await db.commit()
+
+        op_log = OperationLog(
+            task_id=task_id,
+            season_record_id=rec.id,
+            action="delete_source_season",
+            status="completed",
+            detail_json=json.dumps({
+                "show_name": rec.show_name,
+                "season_number": rec.season_number,
+                "season_path": season_path,
+                "deleted_season_path": season_path,
+                "refreshed_parent": parent_dir,
+                "reason": "user_abandoned_deleted",
+            }, ensure_ascii=False),
+        )
+        db.add(op_log)
+        await db.commit()
+
+        return StatusResponse(
+            ok=True,
+            message=f"已成功删除【{rec.show_name} S{rec.season_number:02d}】源端目录并移出待补清单！",
+        )
+    except Exception as e:
+        log.error("删除源端本季目录失败 %s: %s", season_path, e)
+        return StatusResponse(ok=False, message=f"删除源端本季目录失败: {str(e)[:200]}")
     finally:
         await cd2.close()

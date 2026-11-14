@@ -1,3 +1,7 @@
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import unittest
 from app.core.review_engine import episodes_from_name, generate_review_clean_plan
 from app.core.inspector import diagnose_season
