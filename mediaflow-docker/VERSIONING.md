@@ -1,6 +1,21 @@
 # MediaFlow 版本管理
 
-当前应用版本为 v2.5.30，发布日期为 2026-11-14。
+当前应用版本为 v2.5.31，发布日期为 2026-11-15。
+
+v2.5.31 重点修复自动化测试任务残留无法关闭缺陷、提供全生命周期自愈与强制停止容错，并从渲染底层消除初检运行时的页面抖动（Jank / Layout Thrashing）：
+1. **清理孤儿测试残留与测试闭环保护（`tests/full_system_test.py` + `tests/test_orphan_and_task_lifecycle.py`）**：
+   - 彻底从数据库中清理历史残留的 `自动化测试_韩国剧集` 任务及关联记录；
+   - 在 `tests/full_system_test.py` 的端到端测试流程中引入 `try...finally` 强保障结构，无论断言成功、超时还是意外中断，均确保在 `finally` 阶段安全调用 `DELETE /api/tasks/{task_id}`，从源头杜绝自动化测试脏任务残留；
+   - 新增 `tests/test_orphan_and_task_lifecycle.py` 专项回归套件，覆盖孤儿任务启动自愈、无 worker 停止接口容错、以及运行态任务强制删除场景。
+2. **后端服务自愈与任务生命周期容错（`app/main.py` + `app/api/inspection.py` + `app/api/tasks.py`）**：
+   - **服务启动自愈**：在 `app.main` 的 `lifespan` 启动钩子中引入孤儿任务探测与自愈逻辑，检测数据库中因历史意外中断或重启而滞留在 `running` / `stopping` / `paused` 的孤儿任务，自动收敛状态并持久化落库为 `stopped` 终态；
+   - **停止端点（`POST /api/inspect/{task_id}/stop`）容错**：当后端不存在活跃 worker 协程或任务已结束时，若数据库状态仍为非终态，强制将其原子落库更新为 `stopped` 并提交，彻底消除“点击停止无 worker 响应导致状态永远卡死在 running”的死锁缺陷；
+   - **删除端点（`DELETE /api/tasks/{task_id}`）增强**：无论任务处于何种状态（包括运行中），均可安全调用删除接口，自动取消活跃 worker 协程、释放 `TASK_CANCELLED`、`TASK_PROGRESS` 内存状态并级联物理删除关联记录。
+3. **前端渲染防抖与抗抖动重构（`frontend/index.html`）**：
+   - **消除 DOM 级联重绘暴击**：重构 `loadTasks()` 与 `selectTask()` 协作机制。当任务列表因心跳或操作刷新时，若当前任务依然有效，仅平滑更新任务头部基本信息（`updateTaskDetailHeader`），严禁无脑重复调用 `selectTask`，杜绝右侧剧集表格不断白屏闪烁；
+   - **消除容器坍塌抖动**：移除 `filterResultCategory()` 与 `renderEpisodesList()` 开头多余的 `container.innerHTML = ''`。在内容计算组装完毕后一次性平滑写入 DOM，杜绝容器高度从 0 突变到展开造成的滚动条闪烁与页面剧烈跳动；
+   - **任务卡片与横幅脏值检测**：卡片底部信息区统一采用 `h-[36px]` 固定高度，杜绝不同状态切换时卡片高度微调引起的左栏上下震颤；`updateLiveInspectionUI()` 增加状态与进度脏值比对，仅在数值和状态实质改变时才写入 DOM，杜绝 500ms 高频无谓触碰渲染树；
+   - **解除关闭死锁交互**：在任务卡片上针对 `running`、`stopping`、`paused` 状态均显式提供【强制删除与关闭】按钮，保障用户在任何异常或卡死场景下均能一键直接关闭或移除任务。
 
 v2.5.30 重点落实《MediaFlow真缺集待补模块需求与交互方案-v2.5.27.md》核心规范，补齐单季删源安全闭环、对账观察期防抖保护、做种门槛动态展示与待补四态子筛选：
 1. **真缺集单季删源安全闭环（`app/api/archive.py` + `frontend/index.html`）**：

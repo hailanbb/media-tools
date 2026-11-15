@@ -122,6 +122,18 @@ async def delete_task(
     task = await db.get(Task, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
+    from app.services.task_service import (
+        TASK_RUNNING_WORKERS,
+        TASK_PROGRESS,
+        TASK_CANCELLED,
+        TASK_STOP_EVENTS,
+    )
+    worker = TASK_RUNNING_WORKERS.pop(task_id, None)
+    if worker and not worker.done():
+        worker.cancel()
+    TASK_STOP_EVENTS.pop(task_id, None)
+    TASK_CANCELLED.discard(task_id)
+    TASK_PROGRESS.pop(task_id, None)
     await db.delete(task)
     await db.commit()
     return StatusResponse(ok=True, message="任务已删除")

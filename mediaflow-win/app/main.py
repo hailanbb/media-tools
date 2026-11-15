@@ -58,8 +58,32 @@ logging.getLogger("sqlalchemy.engine").setLevel(logging.INFO if settings.debug e
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """应用生命周期：启动时初始化数据库。"""
+    """应用生命周期：启动时初始化数据库与自愈孤儿任务。"""
     await init_db()
+    try:
+        from app.database import async_session
+        from app.models.task import Task
+        from sqlalchemy import select, update
+        async with async_session() as db:
+            result = await db.execute(
+                select(Task).where(Task.status.in_(["running", "stopping", "paused"]))
+            )
+            orphan_tasks = result.scalars().all()
+            if orphan_tasks:
+                orphan_ids = [t.id for t in orphan_tasks]
+                logging.getLogger("mediaflow.startup").warning(
+                    "检测到服务重启前遗留的孤儿运行任务 %d 个 (%s)，正在自动自愈并标记为 stopped...",
+                    len(orphan_ids),
+                    orphan_ids,
+                )
+                await db.execute(
+                    update(Task)
+                    .where(Task.id.in_(orphan_ids))
+                    .values(status="stopped")
+                )
+                await db.commit()
+    except Exception as e:
+        logging.getLogger("mediaflow.startup").error("启动自愈孤儿任务异常: %s", e)
     yield
 
 

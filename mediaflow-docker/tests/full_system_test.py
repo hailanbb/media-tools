@@ -37,76 +37,80 @@ def test_task_lifecycle_and_controls():
     task_id = task["id"]
     print(f"✓ 成功创建初检任务: ID={task_id}, Name={task['name']}, Status={task['status']}")
 
-    # B. 启动初检（并发加速）
-    r = requests.post(f"{BASE_URL}/api/inspect/{task_id}/run", timeout=10)
-    assert r.status_code == 200, f"Run inspection failed: {r.text}"
-    print(f"✓ 初检已成功触发后台并发扫描: {r.json()}")
+    try:
+        # B. 启动初检（并发加速）
+        r = requests.post(f"{BASE_URL}/api/inspect/{task_id}/run", timeout=10)
+        assert r.status_code == 200, f"Run inspection failed: {r.text}"
+        print(f"✓ 初检已成功触发后台并发扫描: {r.json()}")
 
-    # 稍微等 0.5s 让 worker 启动
-    time.sleep(0.5)
+        # 稍微等 0.5s 让 worker 启动
+        time.sleep(0.5)
 
-    # C. 测试暂停控制
-    r = requests.post(f"{BASE_URL}/api/inspect/{task_id}/pause", timeout=10)
-    assert r.status_code == 200, f"Pause failed: {r.text}"
-    print(f"✓ 暂停指令下发成功: {r.json()}")
+        # C. 测试暂停控制
+        r = requests.post(f"{BASE_URL}/api/inspect/{task_id}/pause", timeout=10)
+        assert r.status_code == 200, f"Pause failed: {r.text}"
+        print(f"✓ 暂停指令下发成功: {r.json()}")
 
-    # 验证任务当前状态是否为 paused
-    r = requests.get(f"{BASE_URL}/api/tasks/{task_id}", timeout=10)
-    task_info = r.json()
-    print(f"  -> 当前任务状态检查: {task_info['status']}")
-
-    # D. 测试继续控制
-    r = requests.post(f"{BASE_URL}/api/inspect/{task_id}/resume", timeout=10)
-    assert r.status_code == 200, f"Resume failed: {r.text}"
-    print(f"✓ 继续指令下发成功: {r.json()}")
-
-    # E. 轮询等待初检完成（最高等待 210s，兼容在线 115/TMDB/豆瓣实时请求抖动）
-    print("  -> 等待并发初检完成中...")
-    completed = False
-    for i in range(210):
-        time.sleep(1)
+        # 验证任务当前状态是否为 paused
         r = requests.get(f"{BASE_URL}/api/tasks/{task_id}", timeout=10)
         task_info = r.json()
-        status = task_info.get("status")
-        if status == "completed":
-            completed = True
-            print(f"✓ 初检任务于第 {i+1} 秒成功完成！Summary: {task_info.get('summary')}")
-            break
-        elif status == "failed":
-            raise AssertionError(f"初检失败: {task_info}")
-    
-    assert completed, f"初检任务超时未完成，当前状态: {task_info.get('status')}"
+        print(f"  -> 当前任务状态检查: {task_info['status']}")
 
-    # F. 加载并验证剧季明细
-    r = requests.get(f"{BASE_URL}/api/tasks/{task_id}/seasons", timeout=10)
-    assert r.status_code == 200, f"Get seasons failed: {r.text}"
-    seasons = r.json()
-    print(f"✓ 成功获取初检产出的剧季记录，共 {len(seasons)} 季")
-    assert len(seasons) > 0, "初检未产出任何剧季记录！"
+        # D. 测试继续控制
+        r = requests.post(f"{BASE_URL}/api/inspect/{task_id}/resume", timeout=10)
+        assert r.status_code == 200, f"Resume failed: {r.text}"
+        print(f"✓ 继续指令下发成功: {r.json()}")
 
-    # G. 测试人工集数校准接口
-    target_season = seasons[0]
-    cal_payload = {
-        "season_record_id": target_season["id"],
-        "total_episodes": 16
-    }
-    r = requests.post(f"{BASE_URL}/api/archive/calibrate-episodes", json=cal_payload, timeout=10)
-    assert r.status_code == 200, f"Calibrate failed: {r.text}"
-    print(f"✓ 人工集数校准接口测试成功: {r.json()}")
+        # E. 轮询等待初检完成（最高等待 210s，兼容在线 115/TMDB/豆瓣实时请求抖动）
+        print("  -> 等待并发初检完成中...")
+        completed = False
+        for i in range(210):
+            time.sleep(1)
+            r = requests.get(f"{BASE_URL}/api/tasks/{task_id}", timeout=10)
+            task_info = r.json()
+            status = task_info.get("status")
+            if status == "completed":
+                completed = True
+                print(f"✓ 初检任务于第 {i+1} 秒成功完成！Summary: {task_info.get('summary')}")
+                break
+            elif status == "failed":
+                raise AssertionError(f"初检失败: {task_info}")
+        
+        assert completed, f"初检任务超时未完成，当前状态: {task_info.get('status')}"
 
-    # H. 测试复核清理预览接口
-    preview_payload = {
-        "season_record_ids": [target_season["id"]],
-        "force_clean": False
-    }
-    r = requests.post(f"{BASE_URL}/api/archive/clean-preview", json=preview_payload, timeout=10)
-    assert r.status_code == 200, f"Clean preview failed: {r.text}"
-    print(f"✓ 复核清理预览接口测试成功: {r.json().get('message')}")
+        # F. 加载并验证剧季明细
+        r = requests.get(f"{BASE_URL}/api/tasks/{task_id}/seasons", timeout=10)
+        assert r.status_code == 200, f"Get seasons failed: {r.text}"
+        seasons = r.json()
+        print(f"✓ 成功获取初检产出的剧季记录，共 {len(seasons)} 季")
+        assert len(seasons) > 0, "初检未产出任何剧季记录！"
 
-    # I. 清理测试产生的任务
-    r = requests.delete(f"{BASE_URL}/api/tasks/{task_id}", timeout=10)
-    assert r.status_code == 200, f"Delete task failed: {r.text}"
-    print(f"✓ 自动化测试任务 ID={task_id} 已安全删除并清理关联记录")
+        # G. 测试人工集数校准接口
+        target_season = seasons[0]
+        cal_payload = {
+            "season_record_id": target_season["id"],
+            "total_episodes": 16
+        }
+        r = requests.post(f"{BASE_URL}/api/archive/calibrate-episodes", json=cal_payload, timeout=10)
+        assert r.status_code == 200, f"Calibrate failed: {r.text}"
+        print(f"✓ 人工集数校准接口测试成功: {r.json()}")
+
+        # H. 测试复核清理预览接口
+        preview_payload = {
+            "season_record_ids": [target_season["id"]],
+            "force_clean": False
+        }
+        r = requests.post(f"{BASE_URL}/api/archive/clean-preview", json=preview_payload, timeout=10)
+        assert r.status_code == 200, f"Clean preview failed: {r.text}"
+        print(f"✓ 复核清理预览接口测试成功: {r.json().get('message')}")
+
+    finally:
+        # I. 确保始终清理测试产生的任务，防止残留
+        try:
+            r = requests.delete(f"{BASE_URL}/api/tasks/{task_id}", timeout=10)
+            print(f"✓ 自动化测试任务 ID={task_id} 已安全删除清理")
+        except Exception as del_err:
+            print(f"! 清理测试任务异常: {del_err}")
 
 def test_moviepilot_governance():
     print("\n" + "=" * 60)

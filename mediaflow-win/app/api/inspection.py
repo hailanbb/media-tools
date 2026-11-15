@@ -106,11 +106,21 @@ async def stop_inspection(task_id: str, db: AsyncSession = Depends(get_db)) -> S
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
 
-    from app.services.task_service import TASK_RUNNING_WORKERS
+    from app.services.task_service import TASK_RUNNING_WORKERS, TASK_PROGRESS, TASK_CANCELLED
     worker = TASK_RUNNING_WORKERS.get(task_id)
-    if not worker or worker.done() or get_task_progress(task_id)["status"] in ("completed", "stopped", "failed"):
-        return StatusResponse(ok=True, message="任务已结束")
-    # 初检会话可能持有 SQLite 写锁。停止信号不与其争写任务行，终态由 worker 提交。
+    # 若无活跃协程 worker，直接将持久化状态更新为 stopped，防止孤儿任务卡在 running
+    if not worker or worker.done():
+        if task.status in ("running", "paused", "stopping"):
+            task.status = "stopped"
+            await db.commit()
+            await db.refresh(task)
+        TASK_CANCELLED.discard(task_id)
+        if task_id in TASK_PROGRESS:
+            TASK_PROGRESS[task_id]["status"] = "stopped"
+            TASK_PROGRESS[task_id]["message"] = "初检已手动停止"
+        return StatusResponse(ok=True, message="初检任务已结束并保存")
+
+    # 存在活跃扫描 worker 时下发停止事件
     await stop_task(task_id)
     return StatusResponse(ok=True, message="已收到停止请求，正在结束扫描")
 

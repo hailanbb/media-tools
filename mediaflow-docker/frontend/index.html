@@ -109,7 +109,7 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.30</span>
+              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.31</span>
             </div>
             <!-- 完善后的命名 -->
             <p class="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">智能媒体库整理与归档工作台</p>
@@ -1265,6 +1265,30 @@
       return task.media_type || '剧集';
     }
 
+    function updateTaskCardActiveState(activeId) {
+      document.querySelectorAll('#taskMenuList .app-card').forEach(el => {
+        if (el.id === `task-card-${activeId}`) {
+          el.classList.add('app-card-active');
+        } else {
+          el.classList.remove('app-card-active');
+        }
+      });
+    }
+
+    function updateTaskDetailHeader(taskId) {
+      const task = taskList.find(t => t.id === taskId);
+      if (!task) return;
+      const titleEl = document.getElementById('currentTaskTitle');
+      if (titleEl && titleEl.textContent !== task.title) titleEl.textContent = task.title;
+      const pathEl = document.getElementById('currentTaskPath');
+      if (pathEl && pathEl.textContent !== task.path) pathEl.textContent = task.path;
+      const checkTimeEl = document.getElementById('currentTaskCheckTime');
+      if (checkTimeEl) {
+        const text = task.time ? `• 检查时间: ${task.time}` : '';
+        if (checkTimeEl.textContent !== text) checkTimeEl.textContent = text;
+      }
+    }
+
     async function loadTasks() {
       try {
         const tasks = await api('/api/tasks/');
@@ -1297,7 +1321,12 @@
           const targetId = (currentTaskId && taskList.some(t => t.id === currentTaskId)) ? currentTaskId :
                            (savedId && taskList.some(t => t.id === savedId)) ? savedId :
                            taskList[0].id;
-          await selectTask(targetId);
+          if (currentTaskId !== targetId) {
+            await selectTask(targetId);
+          } else {
+            // 当前选中的任务依然有效，仅平滑更新顶部概览，不打扰右侧剧集列表，杜绝白屏重绘抖动
+            updateTaskDetailHeader(targetId);
+          }
         } else {
           clearTaskDetailView();
         }
@@ -1331,6 +1360,9 @@
               <button onclick="event.stopPropagation(); triggerStopTask('${task.id}')" class="w-5 h-5 rounded bg-red-100 dark:bg-red-950/80 hover:bg-red-200 text-red-600 dark:text-red-400 flex items-center justify-center text-[10px]" title="停止此初检">
                 <i class="fa-solid fa-stop"></i>
               </button>
+              <button onclick="event.stopPropagation(); triggerDeleteTask('${task.id}')" class="w-5 h-5 rounded hover:bg-red-100 dark:hover:bg-red-950 text-red-500 flex items-center justify-center text-[10px]" title="强制关闭并删除此任务">
+                <i class="fa-solid fa-trash-can"></i>
+              </button>
             </div>`;
         } else if (task.status === 'stopping') {
           actionButtons = `
@@ -1338,6 +1370,9 @@
               <span class="text-[10px] text-indigo-600 dark:text-indigo-400 font-medium flex items-center gap-1">
                 <i class="fa-solid fa-spinner fa-spin text-[9px]"></i> 保存中
               </span>
+              <button onclick="event.stopPropagation(); triggerDeleteTask('${task.id}')" class="w-5 h-5 rounded hover:bg-red-100 dark:hover:bg-red-950 text-red-500 flex items-center justify-center text-[10px]" title="强制关闭并删除此任务">
+                <i class="fa-solid fa-trash-can"></i>
+              </button>
             </div>`;
         } else if (task.status === 'paused') {
           actionButtons = `
@@ -1347,6 +1382,9 @@
               </button>
               <button onclick="event.stopPropagation(); triggerStopTask('${task.id}')" class="w-5 h-5 rounded bg-red-100 dark:bg-red-950/80 hover:bg-red-200 text-red-600 dark:text-red-400 flex items-center justify-center text-[10px]" title="停止此初检">
                 <i class="fa-solid fa-stop"></i>
+              </button>
+              <button onclick="event.stopPropagation(); triggerDeleteTask('${task.id}')" class="w-5 h-5 rounded hover:bg-red-100 dark:hover:bg-red-950 text-red-500 flex items-center justify-center text-[10px]" title="强制关闭并删除此任务">
+                <i class="fa-solid fa-trash-can"></i>
               </button>
             </div>`;
         } else {
@@ -1378,21 +1416,21 @@
               </div>
             </div>
             ${(task.status === 'running' || task.status === 'paused' || task.status === 'stopping') ? `
-            <div class="mt-2 pt-1.5 border-t border-slate-100 dark:border-slate-800 space-y-1">
-              <div class="flex items-center justify-between text-[10px]">
+            <div class="mt-2 pt-1.5 border-t border-slate-100 dark:border-slate-800 space-y-1 h-[36px] flex flex-col justify-between">
+              <div class="flex items-center justify-between text-[10px] leading-4">
                 <span class="text-indigo-600 dark:text-indigo-400 font-semibold truncate max-w-[130px] flex items-center gap-1">
                   <i class="fa-solid fa-satellite-dish text-[8px] animate-pulse"></i>
-                  <span id="task-card-show-${task.id}">${task.status === 'stopping' ? '正在安全保存进度...' : (task.status === 'paused' ? '初检已暂停' : '并发分析中...')}</span>
+                  <span id="task-card-show-${task.id}" class="truncate inline-block max-w-[110px]">${task.status === 'stopping' ? '正在安全保存进度...' : (task.status === 'paused' ? '初检已暂停' : '并发分析中...')}</span>
                 </span>
-                <span class="font-mono font-bold text-indigo-600 dark:text-indigo-400" id="task-card-pct-${task.id}">${task.status === 'stopping' ? '保存中' : (task.status === 'paused' ? '暂停' : '扫描中')}</span>
+                <span class="font-mono font-bold text-indigo-600 dark:text-indigo-400 shrink-0 ml-1" id="task-card-pct-${task.id}">${task.status === 'stopping' ? '保存中' : (task.status === 'paused' ? '暂停' : '扫描中')}</span>
               </div>
               <div class="w-full bg-slate-100 dark:bg-slate-800 rounded-full h-1.5 overflow-hidden">
                 <div id="task-card-bar-${task.id}" class="bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 h-full rounded-full transition-all duration-300" style="width: ${task.status === 'stopping' ? '0%' : (task.status === 'paused' ? '50%' : '15%')}"></div>
               </div>
             </div>` : `
-            <div class="mt-2 pt-1.5 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between text-[10px]">
-              <span class="text-slate-400">已扫描事实记录</span>
-              <span class="text-slate-600 dark:text-slate-300 font-medium">${task.summaryText}</span>
+            <div class="mt-2 pt-1.5 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between text-[10px] h-[36px]">
+              <span class="text-slate-400 shrink-0">已扫描事实记录</span>
+              <span class="text-slate-600 dark:text-slate-300 font-medium truncate ml-2 text-right">${task.summaryText}</span>
             </div>`
             }
           </div>
@@ -1480,7 +1518,7 @@
       currentTaskId = taskId;
       try { localStorage.setItem('mediaflow_selected_task_id', taskId); } catch(e) {}
       showTaskDetailView();
-      renderTaskList();
+      updateTaskCardActiveState(taskId);
 
       const task = taskList.find(t => t.id === taskId);
       if (!task) return;
@@ -1741,12 +1779,18 @@
       if (modal) modal.classList.add('hidden');
     }
 
+    let _lastLiveIsPaused = null;
+    let _lastLiveShowText = '';
+    let _lastLivePct = -1;
+
     function updateLiveInspectionUI(taskId, p) {
       const pct = Math.max(1, p.percent || 1);
       const isPaused = (p.status === 'paused');
       if (p.status === 'stopping') {
         const card = document.getElementById(`task-card-show-${taskId}`);
-        if (card) card.textContent = p.message || '正在结束扫描';
+        if (card && card.textContent !== (p.message || '正在结束扫描')) {
+          card.textContent = p.message || '正在结束扫描';
+        }
         return;
       }
 
@@ -1754,37 +1798,59 @@
       const liveBanner = document.getElementById('liveInspectionBanner');
       if (liveBanner && currentTaskId === taskId) {
         if (p.status === 'running' || p.status === 'paused') {
-          liveBanner.classList.remove('hidden');
-          const bannerPct = document.getElementById('liveBannerPercent');
-          if (bannerPct) bannerPct.textContent = `${pct}%`;
-          const bannerBar = document.getElementById('liveBannerProgressBar');
-          if (bannerBar) bannerBar.style.width = `${pct}%`;
-          const bannerShow = document.getElementById('liveBannerCurrentShow');
-          if (bannerShow) bannerShow.textContent = p.current_show || p.message || '正在分析中...';
-          const bannerCnt = document.getElementById('liveBannerCountText');
-          if (bannerCnt) bannerCnt.textContent = p.total > 0 ? `[${p.current}/${p.total}季]` : '[探测中]';
-          const bannerStatus = document.getElementById('liveBannerStatusText');
-          if (bannerStatus) {
-            bannerStatus.innerHTML = isPaused
-              ? '<i class="fa-solid fa-pause text-orange-500 text-xs"></i><span>初检任务已暂停 (随时可点击继续)</span>'
-              : '<i class="fa-solid fa-satellite-dish text-indigo-500 text-xs"></i><span>初检多任务并行加速分析中...</span>';
+          if (liveBanner.classList.contains('hidden')) {
+            liveBanner.classList.remove('hidden');
           }
-          const bannerPauseText = document.getElementById('liveBannerPauseText');
-          if (bannerPauseText) bannerPauseText.textContent = isPaused ? '继续' : '暂停';
-          const bannerPauseIcon = document.getElementById('liveBannerPauseIcon');
-          if (bannerPauseIcon) bannerPauseIcon.className = isPaused ? "fa-solid fa-play text-[10px]" : "fa-solid fa-pause text-[10px]";
+          if (_lastLivePct !== pct) {
+            _lastLivePct = pct;
+            const bannerPct = document.getElementById('liveBannerPercent');
+            if (bannerPct) bannerPct.textContent = `${pct}%`;
+            const bannerBar = document.getElementById('liveBannerProgressBar');
+            if (bannerBar) bannerBar.style.width = `${pct}%`;
+          }
+          const showText = p.current_show || p.message || '正在分析中...';
+          if (_lastLiveShowText !== showText) {
+            _lastLiveShowText = showText;
+            const bannerShow = document.getElementById('liveBannerCurrentShow');
+            if (bannerShow) bannerShow.textContent = showText;
+          }
+          const bannerCnt = document.getElementById('liveBannerCountText');
+          if (bannerCnt) {
+            const cntText = p.total > 0 ? `[${p.current}/${p.total}季]` : '[探测中]';
+            if (bannerCnt.textContent !== cntText) bannerCnt.textContent = cntText;
+          }
+          if (_lastLiveIsPaused !== isPaused) {
+            _lastLiveIsPaused = isPaused;
+            const bannerStatus = document.getElementById('liveBannerStatusText');
+            if (bannerStatus) {
+              bannerStatus.innerHTML = isPaused
+                ? '<i class="fa-solid fa-pause text-orange-500 text-xs"></i><span>初检任务已暂停 (随时可点击继续)</span>'
+                : '<i class="fa-solid fa-satellite-dish text-indigo-500 text-xs"></i><span>初检多任务并行加速分析中...</span>';
+            }
+            const bannerPauseText = document.getElementById('liveBannerPauseText');
+            if (bannerPauseText) bannerPauseText.textContent = isPaused ? '继续' : '暂停';
+            const bannerPauseIcon = document.getElementById('liveBannerPauseIcon');
+            if (bannerPauseIcon) bannerPauseIcon.className = isPaused ? "fa-solid fa-play text-[10px]" : "fa-solid fa-pause text-[10px]";
+          }
         } else {
-          liveBanner.classList.add('hidden');
+          if (!liveBanner.classList.contains('hidden')) {
+            liveBanner.classList.add('hidden');
+          }
         }
       }
 
-      // 2. 更新左侧任务卡片微型进度条
+      // 2. 更新左侧任务卡片微型进度条（脏值更新，不引起重排抖动）
       const cardPct = document.getElementById(`task-card-pct-${taskId}`);
-      if (cardPct) cardPct.textContent = isPaused ? '已暂停' : `${pct}%`;
+      const pctText = isPaused ? '已暂停' : `${pct}%`;
+      if (cardPct && cardPct.textContent !== pctText) cardPct.textContent = pctText;
+
       const cardBar = document.getElementById(`task-card-bar-${taskId}`);
-      if (cardBar) cardBar.style.width = `${pct}%`;
+      const widthVal = `${pct}%`;
+      if (cardBar && cardBar.style.width !== widthVal) cardBar.style.width = widthVal;
+
       const cardShow = document.getElementById(`task-card-show-${taskId}`);
-      if (cardShow) cardShow.textContent = isPaused ? '初检已暂停' : (p.current_show ? p.current_show.slice(0, 15) : '分析中...');
+      const showShort = isPaused ? '初检已暂停' : (p.current_show ? p.current_show.slice(0, 15) : '分析中...');
+      if (cardShow && cardShow.textContent !== showShort) cardShow.textContent = showShort;
     }
 
     async function startInspectionWithProgress(taskId, taskTitle) {
@@ -2011,7 +2077,7 @@
         } catch (e) {
           // 忽略心跳网络瞬断
         }
-      }, 1500);
+      }, 2000);
     }
 
     function clearCompletedTasks() {
@@ -2182,8 +2248,6 @@
 
     function filterResultCategory(cat) {
       currentCategory = cat === 'archive_check' ? 'anomaly' : cat;
-      const container = document.getElementById('episodeItemContainer');
-      if (container) container.innerHTML = '';
       ['archive', 'review', 'archive_check', 'anomaly', 'download', 'airing'].forEach(c => {
         const card = document.getElementById(`cat-card-${c}`);
         if (!card) return;
@@ -2442,7 +2506,6 @@
       const selectAll = document.getElementById('selectAllCheckbox');
       const selectAllLabel = document.getElementById('selectAllLabel');
       if (selectAll) selectAll.checked = false;
-      if (container) container.innerHTML = '';
       if (typeof renderDirectoryGroupsPanel === 'function') renderDirectoryGroupsPanel(task);
 
       if (selectAll) selectAll.disabled = false;

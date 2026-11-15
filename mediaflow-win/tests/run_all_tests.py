@@ -23,6 +23,7 @@ SUITES = [
     {"name": "作品归属冲突、跨条目映射与缓存状态验收", "cmd": [sys.executable, "tests/test_identity_and_mapping.py"], "type": "python"},
     {"name": "补缺持久化回执、部分扣减、对账与中止验收", "cmd": [sys.executable, "tests/test_gap_fill_persistence.py"], "type": "python"},
     {"name": "手动处理隐藏与缺集源端删除", "cmd": [sys.executable, "tests/test_manual_actions.py"], "type": "python"},
+    {"name": "孤儿任务自愈与生命周期容错", "cmd": [sys.executable, "tests/test_orphan_and_task_lifecycle.py"], "type": "python"},
     {"name": "1. 前端静态契约与 DOM 事件审计", "cmd": ["node", "tests/audit_frontend.js"], "type": "node"},
     {"name": "2. 前端分类决策与卡片渲染契约测试", "cmd": ["node", "tests/test_frontend_logic.js"], "type": "node"},
     {"name": "3. 业务领域核心不变量与用户心智回归测试", "cmd": [sys.executable, "tests/test_domain_invariants.py"], "type": "python"},
