@@ -1,60 +1,60 @@
-# ?? MediaFlow (Windows Ô­ÉúÃâ»·¾³ÔËÐÐ°æ)
+ï»¿# ðŸªŸ MediaFlow (Windows åŽŸç”Ÿå…çŽ¯å¢ƒè¿è¡Œç‰ˆ)
 
-> **ÃæÏò Windows ±¾µØ PC Óë¹¤×÷Õ¾µÄÔ­ÉúÔËÐÐ·¢ÐÐ°æ¡£ÎÞÐè Docker ÒýÇæ£¬¼´ÏÂ¼´ÓÃ¡£**
+> **é¢å‘ Windows æœ¬åœ° PC ä¸Žå·¥ä½œç«™çš„åŽŸç”Ÿè¿è¡Œå‘è¡Œç‰ˆã€‚æ— éœ€ Docker å¼•æ“Žï¼Œå³ä¸‹å³ç”¨ã€‚**
 
 [![Windows](https://img.shields.io/badge/Windows-Native-0078d4.svg?style=flat-square&logo=windows)](#)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776ab.svg?style=flat-square&logo=python)](#)
-[![Version](https://img.shields.io/badge/Release-v2.5.31-6366f1.svg?style=flat-square)](#)
+[![Version](https://img.shields.io/badge/Release-v2.5.32-6366f1.svg?style=flat-square)](#)
 
 ---
 
-## ?? ±¾µØ¼«ËÙÆô¶¯Ö¸ÄÏ
+## ðŸš€ æœ¬åœ°æžé€Ÿå¯åŠ¨æŒ‡å—
 
-### 1. ×¼±¸ÔËÐÐ»·¾³
-ÍÆ¼öÊ¹ÓÃ Python 3.11 »ò 3.12 ÐéÄâ»·¾³£º
+### 1. å‡†å¤‡è¿è¡ŒçŽ¯å¢ƒ
+æŽ¨èä½¿ç”¨ Python 3.11 æˆ– 3.12 è™šæ‹ŸçŽ¯å¢ƒï¼š
 ```powershell
 cd media-tools\mediaflow-win
 
-# ´´½¨²¢¼¤»îÐéÄâ»·¾³ (¿ÉÑ¡µ«ÍÆ¼ö)
+# åˆ›å»ºå¹¶æ¿€æ´»è™šæ‹ŸçŽ¯å¢ƒ (å¯é€‰ä½†æŽ¨è)
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 
-# °²×°ÒÀÀµ
+# å®‰è£…ä¾èµ–
 pip install -r requirements.txt
 ```
 
-### 2. ÅäÖÃ»·¾³±äÁ¿
-¸´ÖÆ `.env.example` Îª `.env`£º
+### 2. é…ç½®çŽ¯å¢ƒå˜é‡
+å¤åˆ¶ `.env.example` ä¸º `.env`ï¼š
 ```powershell
 copy .env.example .env
 ```
-ÓÃ VS Code »ò¼ÇÊÂ±¾´ò¿ª `.env` ÌîÈëÅäÖÃ£º
-* `MF_CD2_URL`: CloudDrive2 ±¾µØ·þÎñµØÖ·£¬Èç `http://localhost:19798`
-* `MF_CD2_TOKEN`: CD2 ÈÏÖ¤ Token
-* `MF_MP_URL`: MoviePilot ·þÎñµØÖ·£¬Èç `http://localhost:3001`
+ç”¨ VS Code æˆ–è®°äº‹æœ¬æ‰“å¼€ `.env` å¡«å…¥é…ç½®ï¼š
+* `MF_CD2_URL`: CloudDrive2 æœ¬åœ°æœåŠ¡åœ°å€ï¼Œå¦‚ `http://localhost:19798`
+* `MF_CD2_TOKEN`: CD2 è®¤è¯ Token
+* `MF_MP_URL`: MoviePilot æœåŠ¡åœ°å€ï¼Œå¦‚ `http://localhost:3001`
 * `MF_MP_TOKEN`: MoviePilot API Key
-* `MF_SOURCE_ROOT`: ±¾µØ¹ÒÔØÅÌÂ·¾¶£¨»òÓ³ÉäµÄÍøÂçÇý¶¯Æ÷Â·¾¶£©
-* `MF_ARCHIVE_ROOT`: ¹éµµÄ¿±êÂ·¾¶
+* `MF_SOURCE_ROOT`: æœ¬åœ°æŒ‚è½½ç›˜è·¯å¾„ï¼ˆæˆ–æ˜ å°„çš„ç½‘ç»œé©±åŠ¨å™¨è·¯å¾„ï¼‰
+* `MF_ARCHIVE_ROOT`: å½’æ¡£ç›®æ ‡è·¯å¾„
 
-### 3. Ò»¼üÆô¶¯·þÎñ
+### 3. ä¸€é”®å¯åŠ¨æœåŠ¡
 ```powershell
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload
 ```
-´ò¿ªä¯ÀÀÆ÷·ÃÎÊ£º`http://localhost:8080`
+æ‰“å¼€æµè§ˆå™¨è®¿é—®ï¼š`http://localhost:8080`
 
 ---
 
-## ?? ×Ô¶¯»¯»Ø¹é²âÊÔÁ÷Ë®Ïß
+## ðŸ§ª è‡ªåŠ¨åŒ–å›žå½’æµ‹è¯•æµæ°´çº¿
 
-Windows °æ°üº¬ÍêÕûµÄ±¾µØÈ«¾ØÕó×Ô¶¯»¯²âÊÔÌ×¼þ£º
+Windows ç‰ˆåŒ…å«å®Œæ•´çš„æœ¬åœ°å…¨çŸ©é˜µè‡ªåŠ¨åŒ–æµ‹è¯•å¥—ä»¶ï¼š
 ```powershell
 python tests/run_all_tests.py
 ```
-Ò»¼üÑéÖ¤°üÀ¨ P0 ÎïÀí°²È«Ì½Õë¡¢¶à¼¯Ê¶±ð¡¢Ë«¹ìÄâºÏ¡¢·Ö¶ÎÖÎÀíÔÚÄÚµÄÈ«Ì×²âÊÔÁ÷Ë®Ïß¡£
+ä¸€é”®éªŒè¯åŒ…æ‹¬ P0 ç‰©ç†å®‰å…¨æŽ¢é’ˆã€å¤šé›†è¯†åˆ«ã€åŒè½¨æ‹Ÿåˆã€åˆ†æ®µæ²»ç†åœ¨å†…çš„å…¨å¥—æµ‹è¯•æµæ°´çº¿ã€‚
 
 ---
 
-## ?? ÏêÏ¸¹¦ÄÜÓë¼Ü¹¹
+## ðŸ“š è¯¦ç»†åŠŸèƒ½ä¸Žæž¶æž„
 
-¹ØÓÚÖÇÄÜ³õ¼ì¡¢Ë«¹ìÄâºÏ¡¢·Ö¶Î½âÎöÓë°²È«ÃÅ½ûµÄÏêÏ¸Éè¼Æ£¬Çë²ÎÔÄ [ÏîÄ¿Ö÷ README](../README.md)¡£
+å…³äºŽæ™ºèƒ½åˆæ£€ã€åŒè½¨æ‹Ÿåˆã€åˆ†æ®µè§£æžä¸Žå®‰å…¨é—¨ç¦çš„è¯¦ç»†è®¾è®¡ï¼Œè¯·å‚é˜… [é¡¹ç›®ä¸» README](../README.md)ã€‚
 

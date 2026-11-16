@@ -26,7 +26,12 @@
   </script>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap');
+    html {
+      overflow-y: scroll;
+      scrollbar-gutter: stable;
+    }
     body {
+      overflow-x: hidden;
       font-family: 'Plus Jakarta Sans', 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
       transition: background-color 0.25s ease, color 0.25s ease;
     }
@@ -109,7 +114,7 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.31</span>
+              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.32</span>
             </div>
             <!-- 完善后的命名 -->
             <p class="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">智能媒体库整理与归档工作台</p>
@@ -1292,28 +1297,36 @@
     async function loadTasks() {
       try {
         const tasks = await api('/api/tasks/');
-        taskList = tasks.map(t => ({
-          id: t.id,
-          title: t.name,
-          path: t.source_path,
-          tag: taskTag(t),
-          time: relativeTime(t.created_at),
-          statusDot: statusDotClass(t.status),
-          summaryText: formatSummaryText(t),
-          status: t.status,
-          raw: t,
-          counts: t.summary ? {
-            archive: t.summary.archive_ready || 0,
-            review: t.summary.review_needed || 0,
-            download: t.summary.download_needed || 0,
-            download_pushed: t.summary.download_pushed || 0,
-            airing: t.summary.airing || 0,
-            archive_check: t.summary.archive_check || 0,
-            already_archived: t.summary.already_archived || 0,
-            pending_directory_groups: t.summary.pending_directory_groups || 0,
-          } : { archive: 0, review: 0, download: 0, download_pushed: 0, airing: 0, archive_check: 0, already_archived: 0, pending_directory_groups: 0 },
-          categories: { archive: [], review: [], download: [], airing: [], anomaly: [], archive_check: [] },
-        }));
+        const oldMap = new Map((taskList || []).map(t => [t.id, t]));
+        taskList = tasks.map(t => {
+          const old = oldMap.get(t.id);
+          const isSameStatus = old && old.status === t.status;
+          return {
+            id: t.id,
+            title: t.name,
+            path: t.source_path,
+            tag: taskTag(t),
+            time: relativeTime(t.created_at),
+            statusDot: statusDotClass(t.status),
+            summaryText: formatSummaryText(t),
+            status: t.status,
+            raw: t,
+            counts: t.summary ? {
+              archive: t.summary.archive_ready || 0,
+              review: t.summary.review_needed || 0,
+              download: t.summary.download_needed || 0,
+              download_pushed: t.summary.download_pushed || 0,
+              airing: t.summary.airing || 0,
+              archive_check: t.summary.archive_check || 0,
+              already_archived: t.summary.already_archived || 0,
+              pending_directory_groups: t.summary.pending_directory_groups || 0,
+            } : { archive: 0, review: 0, download: 0, download_pushed: 0, airing: 0, archive_check: 0, already_archived: 0, pending_directory_groups: 0 },
+            _seasonsLoaded: isSameStatus ? (old._seasonsLoaded || false) : false,
+            _seasonsLoadError: isSameStatus ? (old._seasonsLoadError || false) : false,
+            categories: isSameStatus && old.categories ? old.categories : { archive: [], review: [], download: [], download_pushed: [], airing: [], anomaly: [], archive_check: [] },
+            directoryGroups: isSameStatus && old.directoryGroups ? old.directoryGroups : [],
+          };
+        });
         renderTaskList();
         if (taskList.length > 0) {
           let savedId = null;
@@ -1321,10 +1334,11 @@
           const targetId = (currentTaskId && taskList.some(t => t.id === currentTaskId)) ? currentTaskId :
                            (savedId && taskList.some(t => t.id === savedId)) ? savedId :
                            taskList[0].id;
-          if (currentTaskId !== targetId) {
+          const targetTask = taskList.find(t => t.id === targetId);
+          if (currentTaskId !== targetId || !targetTask || !targetTask._seasonsLoaded) {
             await selectTask(targetId);
           } else {
-            // 当前选中的任务依然有效，仅平滑更新顶部概览，不打扰右侧剧集列表，杜绝白屏重绘抖动
+            // 当前选中的任务依然有效且已加载明细，仅平滑更新顶部概览，不打扰右侧剧集列表，杜绝白屏重绘抖动
             updateTaskDetailHeader(targetId);
           }
         } else {
@@ -1936,8 +1950,13 @@
 
               setTimeout(async () => {
                 closeInspectProgressModal();
+                const cur = taskList.find(t => t.id === taskId);
+                if (cur) cur._seasonsLoaded = false;
                 await loadTasks();
-              }, 800);
+                if (currentTaskId === taskId) {
+                  await selectTask(taskId);
+                }
+              }, 500);
 
             } else if (p.status === 'stopped') {
               completedHandled = true;
@@ -1952,8 +1971,13 @@
 
               setTimeout(async () => {
                 closeInspectProgressModal();
+                const cur = taskList.find(t => t.id === taskId);
+                if (cur) cur._seasonsLoaded = false;
                 await loadTasks();
-              }, 800);
+                if (currentTaskId === taskId) {
+                  await selectTask(taskId);
+                }
+              }, 500);
 
             } else if (p.status === 'failed') {
               clearInterval(inspectTimer);
