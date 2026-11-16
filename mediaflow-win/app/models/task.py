@@ -31,5 +31,5 @@ class Task(Base):
 
     # ── 关系 ──────────────────────────────────────────────
     seasons = relationship(
-        "SeasonRecord", back_populates="task", cascade="all, delete-orphan"
+        "SeasonRecord", back_populates="task", cascade="all, delete-orphan", passive_deletes=True
     )

@@ -118,7 +118,13 @@ async def get_task(task_id: str, db: AsyncSession = Depends(get_db)) -> TaskOut:
 async def delete_task(
     task_id: str, db: AsyncSession = Depends(get_db)
 ) -> StatusResponse:
-    """删除任务及其所有关联剧季记录."""
+    """删除任务及其所有关联剧季记录与目录组."""
+    from sqlalchemy import delete
+    from app.models.season import SeasonRecord
+    from app.models.directory_group import DirectoryGroup
+    from app.models.operation import OperationLog
+    from app.models.gap_fill import GapFillEpisode, GapFillSeasonRun
+
     task = await db.get(Task, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
@@ -134,7 +140,14 @@ async def delete_task(
     TASK_STOP_EVENTS.pop(task_id, None)
     TASK_CANCELLED.discard(task_id)
     TASK_PROGRESS.pop(task_id, None)
-    await db.delete(task)
+
+    # 显式执行原子批量删除，避免级联触发 ORM 单条反序列化开销与数据格式瑕疵导致的阻断
+    await db.execute(delete(SeasonRecord).where(SeasonRecord.task_id == task_id))
+    await db.execute(delete(DirectoryGroup).where(DirectoryGroup.task_id == task_id))
+    await db.execute(delete(OperationLog).where(OperationLog.task_id == task_id))
+    await db.execute(delete(GapFillEpisode).where(GapFillEpisode.task_id == task_id))
+    await db.execute(delete(GapFillSeasonRun).where(GapFillSeasonRun.task_id == task_id))
+    await db.execute(delete(Task).where(Task.id == task_id))
     await db.commit()
     return StatusResponse(ok=True, message="任务已删除")
 
