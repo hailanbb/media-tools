@@ -1236,9 +1236,17 @@ def select_best_candidates(
     )
     covered_by_standalone = {ep for ev in plan_evals for ep in ev.covered_missing}
 
+    # 缺集数量大于 3 集：优先选择整季包下载（整季包不可用时平滑回退散集）
+    if len(missing_set) > 3 and allow_season_pack and dedup_packs:
+        best_sp, _ = _pick_best_season_pack(dedup_packs, tier_ratio=tier_ratio, min_slack=min_slack)
+        if best_sp:
+            return [(best_sp.cand, list(best_sp.covered_all), True)]
+
+    # 缺集 <= 3 集或无整季包：散集补全优先
     if missing_set.issubset(covered_by_standalone) and plan_evals:
         return [(ev.cand, list(ev.covered_missing), False) for ev in plan_evals]
 
+    # 散集补不全时，若允许整季包且存在整季包候选，回退整季包
     if allow_season_pack and dedup_packs:
         best_sp, _ = _pick_best_season_pack(dedup_packs, tier_ratio=tier_ratio, min_slack=min_slack)
         if best_sp:
@@ -2004,12 +2012,11 @@ async def execute_gap_fill_download(
             selected_evals: list[CandidateEval] = []
             plan_summary_note = ""
             deferred_sp_reason = ""
+            prefer_season_pack = (len(search_missing_eps) > 3)
 
-            if all_covered_by_standalone:
-                selected_evals = standalone_plan
-                plan_summary_note = standalone_note
-            else:
-                # 决策步骤 2：散集补不全时先查首轮整季包；仍无合格整包且尚未做标题搜索时，执行一次原名/别名+季号整季补搜
+            # 缺集大于 3 集：优先整季包策略
+            if prefer_season_pack:
+                # 若首轮未命中合格整季包且尚未尝试标题搜索，主动进行一次整季补搜
                 if not pack_evals and not title_fallback_done:
                     try:
                         search_title = mapped_keywords[0] if (is_mapped and mapped_keywords) else clean_name
@@ -2087,14 +2094,11 @@ async def execute_gap_fill_download(
                     except Exception as fb_err:
                         log.warning("[%s S%02d] 整季补搜未完成: %s", clean_name, season_num, fb_err)
 
-                if all_covered_by_standalone:
-                    selected_evals = standalone_plan
-                    plan_summary_note = standalone_note
-                elif pack_evals:
+                if pack_evals:
                     if has_season_active_overlap:
                         deferred_sp_reason = (
-                            f"{clean_name} S{season_num:02d}：目标季已有活跃下载/已推送集 {sorted(in_progress_eps)}，"
-                            "整季包与在途文件存在重叠，暂缓整包待队列变化后再评估"
+                            f"{clean_name} S{season_num:02d}：缺集 {len(search_missing_eps)} 集虽优先整季包，但目标季已有活跃下载/已推送集 {sorted(in_progress_eps)}，"
+                            "整季包与在途文件存在重叠，暂缓整包回退散集下载"
                         )
                         if standalone_plan:
                             selected_evals = standalone_plan
@@ -2106,14 +2110,128 @@ async def execute_gap_fill_download(
                             already_owned = max(0, len(best_sp.covered_all) - len(search_missing_eps))
                             miss_label = ",".join(f"E{ep:02d}" for ep in missing_eps)
                             sp_warn = (
-                                f"为补 {miss_label}，下载整季 {len(best_sp.covered_all)} 集，"
+                                f"缺集大于3集（共 {len(search_missing_eps)} 集），优先选择整季包下载：为补 {miss_label}，下载整季 {len(best_sp.covered_all)} 集，"
                                 f"预计 {_format_bytes(best_sp.size_bytes)}，其中 {already_owned} 集已有"
                             )
                             plan_summary_note = f"{sp_warn} ({sp_cmp_note})"
                             log.info("[%s S%02d] %s", clean_name, season_num, plan_summary_note)
-                elif standalone_plan:
+
+                # 若缺集大于 3 集但无合格整季包，回退到散集拼包
+                if not selected_evals and standalone_plan:
+                    selected_evals = standalone_plan
+                    plan_summary_note = f"缺集 {len(search_missing_eps)} 集未找到可用整季包，回退散集方案: {standalone_note}"
+
+            # 缺集 <= 3 集（或缺集 > 3 且未选出整包时已回退处理）：保持散集省容量优先
+            if not selected_evals:
+                if all_covered_by_standalone:
                     selected_evals = standalone_plan
                     plan_summary_note = standalone_note
+                else:
+                    # 决策步骤 2：散集补不全时先查首轮整季包；仍无合格整包且尚未做标题搜索时，执行一次原名/别名+季号整季补搜
+                    if not pack_evals and not title_fallback_done:
+                        try:
+                            search_title = mapped_keywords[0] if (is_mapped and mapped_keywords) else clean_name
+                            if search_tmdb_id:
+                                try:
+                                    media_fb = await mp.get_media_info(search_tmdb_id)
+                                    if isinstance(media_fb, dict):
+                                        search_title = media_fb.get("original_title") or media_fb.get("en_title") or media_fb.get("title") or search_title
+                                except Exception:
+                                    pass
+                            fb_raw = await mp.search_resources(title=search_title, season=search_season, **search_kwargs)
+                            title_fallback_done = True
+                            fb_list = fb_raw if isinstance(fb_raw, list) else []
+                            fb_sites = _collect_returned_sites(fb_list, id_to_name)
+                            for s in fb_sites:
+                                if s not in returned_sites_all:
+                                    returned_sites_all.append(s)
+                            search_receipts.append({
+                                "stage": "season_pack_fallback",
+                                "query": search_title,
+                                "search_season": search_season,
+                                "requested_sites": site_plan.get("requested_ids") or "all_active",
+                                "returned_sites": fb_sites,
+                                "api_responded": True,
+                                "count": len(fb_list),
+                            })
+                            if fb_list:
+                                raw_count += len(fb_list)
+                                max_seeders_seen = max(max_seeders_seen, max((_candidate_seeders(c) for c in fb_list), default=0))
+                                all_returned_sites = list({s for rc in search_receipts for s in rc.get("returned_sites", [])})
+                                fb_st, fb_sp, fb_rej = _evaluate_raw_candidates(
+                                    fb_list,
+                                    tmdb_id_num=search_tmdb_id,
+                                    season_num=search_season,
+                                    total_eps=search_total_eps,
+                                    missing_eps=search_missing_eps,
+                                    by_period=by_period,
+                                    parts_mode=parts_mode,
+                                    part_episode_mapping=part_mapping,
+                                    keyword_fallback=True,
+                                    min_seeders=min_seeders,
+                                    min_resolution=min_resolution,
+                                    require_chinese=require_chinese,
+                                    source_tmdb_id=tmdb_id_num,
+                                    source_season=season_num,
+                                    allowed_titles=mapped_keywords if is_mapped else None,
+                                )
+                                reject_reasons.extend(fb_rej)
+                                standalone_evals = _dedup_evaluations(standalone_evals + [
+                                    ev for ev in fb_st
+                                    if not _is_torrent_already_queued(
+                                        ev, active_downloads, _recently_submitted_tasks,
+                                        primary_query_title, str(search_tmdb_id) if search_tmdb_id else tmdb_id_str,
+                                        search_season, search_missing_eps,
+                                        extra_titles=match_names, alt_tmdb_id=tmdb_id_str, alt_season=season_num,
+                                    )
+                                ])
+                                pack_evals = _dedup_evaluations(pack_evals + [
+                                    ev for ev in fb_sp
+                                    if not _is_torrent_already_queued(
+                                        ev, active_downloads, _recently_submitted_tasks,
+                                        primary_query_title, str(search_tmdb_id) if search_tmdb_id else tmdb_id_str,
+                                        search_season, search_missing_eps,
+                                        extra_titles=match_names, alt_tmdb_id=tmdb_id_str, alt_season=season_num,
+                                    )
+                                ])
+                                standalone_plan, standalone_note = _plan_standalone_downloads(
+                                    standalone_evals,
+                                    search_missing_eps,
+                                    tier_ratio=tier_ratio,
+                                    min_slack=min_slack,
+                                )
+                                standalone_covered = {ep for ev in standalone_plan for ep in ev.covered_missing}
+                                all_covered_by_standalone = bool(standalone_plan) and search_missing_set.issubset(standalone_covered)
+                        except Exception as fb_err:
+                            log.warning("[%s S%02d] 整季补搜未完成: %s", clean_name, season_num, fb_err)
+
+                    if all_covered_by_standalone:
+                        selected_evals = standalone_plan
+                        plan_summary_note = standalone_note
+                    elif pack_evals:
+                        if has_season_active_overlap:
+                            deferred_sp_reason = (
+                                f"{clean_name} S{season_num:02d}：目标季已有活跃下载/已推送集 {sorted(in_progress_eps)}，"
+                                "整季包与在途文件存在重叠，暂缓整包待队列变化后再评估"
+                            )
+                            if standalone_plan:
+                                selected_evals = standalone_plan
+                                plan_summary_note = standalone_note
+                        else:
+                            best_sp, sp_cmp_note = _pick_best_season_pack(pack_evals, tier_ratio=tier_ratio, min_slack=min_slack)
+                            if best_sp:
+                                selected_evals = [best_sp]
+                                already_owned = max(0, len(best_sp.covered_all) - len(search_missing_eps))
+                                miss_label = ",".join(f"E{ep:02d}" for ep in missing_eps)
+                                sp_warn = (
+                                    f"为补 {miss_label}，下载整季 {len(best_sp.covered_all)} 集，"
+                                    f"预计 {_format_bytes(best_sp.size_bytes)}，其中 {already_owned} 集已有"
+                                )
+                                plan_summary_note = f"{sp_warn} ({sp_cmp_note})"
+                                log.info("[%s S%02d] %s", clean_name, season_num, plan_summary_note)
+                    elif standalone_plan:
+                        selected_evals = standalone_plan
+                        plan_summary_note = standalone_note
 
             if deferred_sp_reason:
                 skipped.append(deferred_sp_reason)

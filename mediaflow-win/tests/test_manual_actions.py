@@ -133,9 +133,9 @@ class ManualActionsTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(del_data["ok"])
             self.assertIn("已成功删除", del_data["message"])
 
-            # 验证 CD2 删除与父级刷新
+            # 验证 CD2 删除与初检目录强制刷新 (v2.5.32)
             disk.delete_file.assert_called_once_with("/qa/src/Show/Season 2")
-            disk.list_files.assert_called_with("/qa/src/Show", force_refresh=True)
+            disk.list_files.assert_called_with("/qa/src", force_refresh=True)
 
         # 验证数据库状态已转为 source_absent，不出现在待补
         async with async_session() as db:

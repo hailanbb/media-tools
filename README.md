@@ -1,4 +1,4 @@
-﻿# 🪟 MediaFlow (Windows 原生免环境运行版)
+# 🪟 MediaFlow (Windows 原生免环境运行版)
 
 > **面向 Windows 本地 PC 与工作站的原生运行发行版。无需 Docker 引擎，即下即用。**
 
@@ -57,4 +57,3 @@ python tests/run_all_tests.py
 ## 📚 详细功能与架构
 
 关于智能初检、双轨拟合、分段解析与安全门禁的详细设计，请参阅 [项目主 README](../README.md)。
-

@@ -1424,6 +1424,40 @@ async def preview_delete_source_season(
             "message": f"该路径被多个季度共享 ({', '.join(other_seasons)})，为平铺整剧目录，禁止按季单独删除目录以防误伤其他季正片！",
         }
 
+    # 检查当前任务或数据库中该剧目是否已无其他有效剧季记录
+    stmt_other = (
+        select(SeasonRecord).where(
+            SeasonRecord.show_path == rec.show_path,
+            SeasonRecord.id != rec.id,
+        )
+        if rec.show_path
+        else select(SeasonRecord).where(
+            SeasonRecord.task_id == rec.task_id,
+            SeasonRecord.show_name == rec.show_name,
+            SeasonRecord.id != rec.id,
+        )
+    )
+    other_recs = list((await db.scalars(stmt_other)).all())
+    active_other_seasons = [s for s in other_recs if s.status != "source_absent"]
+
+    task = await db.get(Task, rec.task_id)
+    task_source_path = posixpath.normpath(task.source_path) if (task and task.source_path) else ""
+
+    will_delete_show_dir = False
+    target_delete_path = norm_season_path
+    if len(active_other_seasons) == 0 and rec.show_path:
+        norm_show_path = posixpath.normpath(rec.show_path)
+        if (
+            norm_source_root
+            and norm_show_path.startswith(norm_source_root + "/")
+            and norm_show_path != norm_source_root
+            and norm_show_path != task_source_path
+            and not (norm_archive_root and (norm_show_path == norm_archive_root or norm_show_path.startswith(norm_archive_root + "/")))
+            and len(norm_show_path.strip("/").split("/")) >= 2
+        ):
+            will_delete_show_dir = True
+            target_delete_path = norm_show_path
+
     cd2 = CloudDrive2Client()
     files_list: list[dict] = []
     total_size = 0
@@ -1483,11 +1517,23 @@ async def preview_delete_source_season(
         if sorted_present else "源端本季未发现有效正片文件（仅有残余非视频或空目录）"
     )
 
+    warnings_list = [loss_msg] if loss_msg else []
+    if will_delete_show_dir:
+        warnings_list.append(
+            f"检测到该剧目在当前任务/数据库中已无其他有效剧季，本次将直接删除整剧目录【{target_delete_path}】"
+            f"（彻底清除海报、nfo等刮削伴生文件），删除后将在初检目录【{task_source_path or posixpath.dirname(target_delete_path)}】中执行 CloudDrive2 强制刷新。"
+        )
+
     payload = {
         "season_record_id": rec.id,
         "show_name": rec.show_name,
         "season_number": rec.season_number,
         "season_path": rec.season_path,
+        "show_path": rec.show_path or "",
+        "task_source_path": task_source_path,
+        "will_delete_show_dir": will_delete_show_dir,
+        "target_delete_path": target_delete_path,
+        "active_other_seasons_count": len(active_other_seasons),
         "archive_target_path": rec.archive_target_path or "",
         "total_files": len(files_list),
         "total_size_bytes": total_size,
@@ -1509,7 +1555,7 @@ async def preview_delete_source_season(
         "has_active_mp_downloads": len(active_downloads) > 0,
         "active_downloads": active_downloads,
         "loss_warning": loss_msg,
-        "warnings": [loss_msg] if loss_msg else [],
+        "warnings": warnings_list,
     }
 
     return {
@@ -1567,6 +1613,43 @@ async def delete_source_season(
             message=f"该路径被多个季度共享 ({', '.join(other_seasons)})，为平铺整剧目录，严禁按季删除整剧目录！",
         )
 
+    # 检查当前任务或数据库中该剧目是否已无其他有效剧季记录
+    stmt_other = (
+        select(SeasonRecord).where(
+            SeasonRecord.show_path == rec.show_path,
+            SeasonRecord.id != rec.id,
+        )
+        if rec.show_path
+        else select(SeasonRecord).where(
+            SeasonRecord.task_id == rec.task_id,
+            SeasonRecord.show_name == rec.show_name,
+            SeasonRecord.id != rec.id,
+        )
+    )
+    other_recs = list((await db.scalars(stmt_other)).all())
+    active_other_seasons = [s for s in other_recs if s.status != "source_absent"]
+
+    task = await db.get(Task, rec.task_id)
+    task_source_path = posixpath.normpath(task.source_path) if (task and task.source_path) else ""
+
+    will_delete_show_dir = False
+    target_delete_path = norm_season_path
+    delete_type = "season_dir"
+
+    if len(active_other_seasons) == 0 and rec.show_path:
+        norm_show_path = posixpath.normpath(rec.show_path)
+        if (
+            norm_source_root
+            and norm_show_path.startswith(norm_source_root + "/")
+            and norm_show_path != norm_source_root
+            and norm_show_path != task_source_path
+            and not (norm_archive_root and (norm_show_path == norm_archive_root or norm_show_path.startswith(norm_archive_root + "/")))
+            and len(norm_show_path.strip("/").split("/")) >= 2
+        ):
+            will_delete_show_dir = True
+            target_delete_path = norm_show_path
+            delete_type = "show_dir"
+
     cd2 = CloudDrive2Client()
     try:
         blocked_group = await find_blocking_group_for_record(
@@ -1582,18 +1665,28 @@ async def delete_source_season(
                 ),
             )
 
-        log.warning("用户主动放弃补缺，删除源端本季目录: %s (关联记录: %s)", season_path, rec.id)
-        await cd2.delete_file(season_path)
+        log.warning(
+            "用户主动放弃补缺，删除%s: %s (关联记录: %s, 无其他有效季=%s)",
+            "整剧目录" if delete_type == "show_dir" else "源端本季目录",
+            target_delete_path,
+            rec.id,
+            will_delete_show_dir,
+        )
+        await cd2.delete_file(target_delete_path)
 
-        parent_dir = posixpath.dirname(season_path)
+        # 删除后在该任务的初检目录中执行CloudDrive2的刷新操作
+        refresh_dir = task_source_path or posixpath.dirname(target_delete_path)
         try:
-            await cd2.list_files(parent_dir, force_refresh=True)
-            log.info("已成功强制刷新源端父级目录: %s", parent_dir)
+            await cd2.list_files(refresh_dir, force_refresh=True)
+            log.info("已成功在初检目录强制刷新 CloudDrive2 缓存: %s", refresh_dir)
         except Exception as ref_err:
-            log.warning("强制刷新源端父级目录失败: %s - %s", parent_dir, ref_err)
+            log.warning("强制刷新初检目录缓存失败: %s - %s", refresh_dir, ref_err)
 
         rec.status = "source_absent"
-        rec.status_detail = f"用户主动放弃补缺，已删除源端本季目录 ({season_path})"
+        if delete_type == "show_dir":
+            rec.status_detail = f"用户主动放弃补缺，该剧目已无其他有效季，已直接删除整剧目录 ({target_delete_path})"
+        else:
+            rec.status_detail = f"用户主动放弃补缺，已删除源端本季目录 ({target_delete_path})"
 
         from app.models.gap_fill import GapFillEpisode
         ep_rows = list((await db.scalars(
@@ -1605,7 +1698,7 @@ async def delete_source_season(
         for ep in ep_rows:
             ep.state = "cancelled_or_failed"
             ep.outcome_code = "user_abandoned_deleted"
-            ep.reason = "用户主动放弃补缺并删除源端本季目录"
+            ep.reason = "用户主动放弃补缺并删除源端目录"
 
         task_id = rec.task_id
         await _refresh_task_summary(task_id, db)
@@ -1620,17 +1713,25 @@ async def delete_source_season(
                 "show_name": rec.show_name,
                 "season_number": rec.season_number,
                 "season_path": season_path,
-                "deleted_season_path": season_path,
-                "refreshed_parent": parent_dir,
+                "deleted_path": target_delete_path,
+                "delete_type": delete_type,
+                "will_delete_show_dir": will_delete_show_dir,
+                "refreshed_dir": refresh_dir,
+                "task_source_path": task_source_path,
                 "reason": "user_abandoned_deleted",
             }, ensure_ascii=False),
         )
         db.add(op_log)
         await db.commit()
 
+        success_msg = (
+            f"已成功删除【{rec.show_name}】整剧目录并在初检目录刷新云盘缓存！"
+            if delete_type == "show_dir"
+            else f"已成功删除【{rec.show_name} S{rec.season_number:02d}】源端目录并在初检目录刷新云盘缓存！"
+        )
         return StatusResponse(
             ok=True,
-            message=f"已成功删除【{rec.show_name} S{rec.season_number:02d}】源端目录并移出待补清单！",
+            message=success_msg,
         )
     except Exception as e:
         log.error("删除源端本季目录失败 %s: %s", season_path, e)

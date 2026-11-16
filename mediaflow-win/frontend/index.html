@@ -3339,10 +3339,13 @@
           `;
         }
 
+        const willDeleteShowDir = Boolean(data.will_delete_show_dir);
+        const displayDeletePath = willDeleteShowDir ? (data.target_delete_path || data.show_path || data.season_path || '') : (data.season_path || '');
+
         body.innerHTML = `
           <div class="space-y-3">
-            <div class="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 font-mono text-[11px] break-all">
-              <span class="text-slate-400">拟删路径: </span><span class="text-slate-800 dark:text-slate-200 font-bold">${escapeHtml(data.season_path || '')}</span>
+            <div class="p-2.5 rounded-xl ${willDeleteShowDir ? 'bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800' : 'bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700'} font-mono text-[11px] break-all">
+              <span class="${willDeleteShowDir ? 'text-rose-600 dark:text-rose-400 font-bold' : 'text-slate-400'}">${willDeleteShowDir ? '拟删整剧目录（已无其他季）: ' : '拟删路径: '}</span><span class="${willDeleteShowDir ? 'text-rose-700 dark:text-rose-300 font-black' : 'text-slate-800 dark:text-slate-200 font-bold'}">${escapeHtml(displayDeletePath)}</span>
             </div>
             <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center text-xs">
               <div class="p-2 rounded-lg bg-slate-100 dark:bg-slate-800">
@@ -3370,7 +3373,12 @@
             ` : ''}
             ${warnHtml}
             <div class="text-[11px] text-slate-500 dark:text-slate-400 space-y-1">
-              <div>• 执行后本季源文件将移至 CloudDrive2 回收站，并主动触发父级目录云盘刷新。</div>
+              ${willDeleteShowDir ? `
+                <div class="text-rose-600 dark:text-rose-400 font-semibold">• 检测到该剧目已无其他有效季，将直接删除整剧根目录（彻底清除海报与nfo等伴生文件）。</div>
+                <div>• 删除后将在任务初检目录【${escapeHtml(data.task_source_path || '源目录')}】中强制刷新 CloudDrive2 云盘缓存。</div>
+              ` : `
+                <div>• 执行后本季源文件将移至 CloudDrive2 回收站，并在初检目录【${escapeHtml(data.task_source_path || '源目录')}】刷新云盘缓存。</div>
+              `}
               <div>• 对应待补条目将标记为「已放弃补缺并删源」，自动移出真缺集待补清单。</div>
             </div>
           </div>
