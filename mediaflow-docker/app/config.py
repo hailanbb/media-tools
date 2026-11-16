@@ -7,7 +7,7 @@ from functools import lru_cache
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-VERSION = "2.5.32"
+VERSION = "2.5.33"
 
 
 
