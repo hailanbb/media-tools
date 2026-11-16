@@ -204,7 +204,7 @@ async def get_task_seasons(
 
     stmt = select(SeasonRecord).where(
         SeasonRecord.task_id == task_id,
-        SeasonRecord.status.not_in(("manually_handled", "verified_complete", "cleaned_redundant", "source_absent")),
+        SeasonRecord.status.not_in(("manually_handled", "verified_complete", "cleaned_redundant", "source_absent", "archived")),
     )
     if status:
         groups = {
@@ -255,7 +255,7 @@ async def _apply_in_place_recalculate(
     fetch_remote: bool = False,
 ) -> bool:
     """只读重算单季状态（保留 record.id、不删除源/归档端文件、不修改 manually_handled）。"""
-    if rec.status in ("manually_handled", "verified_complete", "cleaned_redundant", "source_absent"):
+    if rec.status in ("manually_handled", "verified_complete", "cleaned_redundant", "source_absent", "archived"):
         return False
 
     recognized = [int(x) for x in _safe_json(rec.recognized_episodes_json, []) if str(x).isdigit()]
@@ -495,7 +495,7 @@ async def _rebuild_offline_directory_groups(
     # 2. 按当前任务下激活的 SeasonRecord 重建源端物理剧集目录与季集覆盖
     by_show: dict[str, list[SeasonRecord]] = {}
     for rec in rows:
-        if rec.status in ("source_absent", "cleaned_redundant"):
+        if rec.status in ("source_absent", "cleaned_redundant", "archived"):
             continue
         by_show.setdefault(normalize_dir_path(rec.show_path), []).append(rec)
 
@@ -568,7 +568,7 @@ async def _run_task_reevaluate_impl(
     all_rows = list((await db.execute(stmt)).scalars().all())
     target_set = set(req.record_ids) if req.record_ids else None
 
-    preserved_statuses = ("manually_handled", "verified_complete", "cleaned_redundant", "source_absent")
+    preserved_statuses = ("manually_handled", "verified_complete", "cleaned_redundant", "source_absent", "archived")
     active_before = [r for r in all_rows if r.status not in preserved_statuses]
     before_counts = dict(Counter(r.status for r in active_before))
 

@@ -97,7 +97,8 @@ for (const [status, category] of Object.entries({
   archive_check: 'anomaly', unknown: 'anomaly',
   period_missing: 'download', download_needed: 'download',
   period_ready: 'archive', archive_ready: 'archive',
-  review_needed: 'review', airing: 'airing', source_absent: ''
+  review_needed: 'review', airing: 'airing', source_absent: '',
+  archived: '', cleaned_redundant: '', manually_handled: ''
 })) assert.strictEqual(seasonCategory(status), category);
 
 // --- 测试用例 3: 真实集数失真/拆分冲突（本地 24 集超出官方 12 集） ---

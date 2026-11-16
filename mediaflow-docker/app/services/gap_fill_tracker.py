@@ -739,7 +739,7 @@ async def reconcile_gap_fill_records(
         now_dt = datetime.now(timezone.utc)
 
         for rec in seasons:
-            if rec.status in ("manually_handled", "verified_complete", "cleaned_redundant", "source_absent"):
+            if rec.status in ("manually_handled", "verified_complete", "cleaned_redundant", "source_absent", "archived"):
                 continue
 
             mapping = _parse_json_safe(rec.mapping_json, None) or None
@@ -941,7 +941,7 @@ async def refresh_task_summary(task_id: str, db: AsyncSession) -> dict[str, Any]
     all_seasons = [
         s
         for s in res.scalars().all()
-        if s.status not in ("manually_handled", "verified_complete", "cleaned_redundant", "source_absent")
+        if s.status not in ("manually_handled", "verified_complete", "cleaned_redundant", "source_absent", "archived")
     ]
 
     import inspect as _inspect

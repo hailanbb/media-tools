@@ -1,6 +1,20 @@
 # MediaFlow 版本管理
 
-当前应用版本为 v2.5.33，发布日期为 2026-11-16。
+当前应用版本为 v2.5.34，发布日期为 2026-11-16。
+
+v2.5.34 重点修复齐全可归档模块单季一键归档与批量一键归档执行成功后条目残留缺陷：
+1. **终态状态集收敛与持久化过滤（`app/api/tasks.py` + `app/services/task_service.py` + `app/services/gap_fill_tracker.py`）**：
+   - 将 `archived`（已归档）正式纳入终态集合 `TERMINAL_STATUSES`（与 `manually_handled`, `verified_complete`, `cleaned_redundant`, `source_absent` 对齐）；
+   - 在任务季度拉取 `get_task_seasons`、单季只读重算 `recheck_single_season`、任务全量重算 `recheck_task_seasons` 以及入库对账 `reconcile_missing_episodes` 中，全面补充 `archived` 状态排除条件；
+   - 在任务汇总统计重算 `refresh_task_summary` 中严格过滤 `archived` 状态，确保归档完成后任务待办总季数与齐全可归档季数正确自减，杜绝数字与条目残留。
+2. **互斥分流与主待办归并防线加固（`app/core/season_classifier.py`）**：
+   - 在 `classify_single_record` 中增加终态状态判定，针对 `archived` 等已完成剧季直接返回空分类，严禁回退落入 `archive` 待办；
+   - 在 `consolidate_seasons_to_work_records` 中，过滤组内仅包含已终态记录的剧集组，不再生成主待办卡片。
+3. **前端交互与即时清理闭环（`frontend/index.html`）**：
+   - 同步 `seasonCategory` 终态白名单，将 `archived` 判定为非待办空状态；
+   - 优化 `confirmArchiveDone` 归档回调机制：在流水线单项执行成功时，即时收集成功归档的记录 ID；
+   - 在流水线 `onFinish` 回调中，毫秒级乐观移除本地 `task.categories.archive` 中已成功归档条目，并在重新拉取后端数据后刷新界面；
+   - 彻底解决单条“一键归档”与“批量一键归档所选”执行成功后仍停留在“齐全可归档”列表的问题，归档完成后自动清空勾选并更新“批量一键归档所选 (0)”按钮状态。
 
 v2.5.33 重点优化真缺集待补删源整剧级联清理、初检目录云盘强制刷新、缺集大于3集优先整季包下载：
 1. **删除源端（本季）空壳剧集目录级联清理与初检目录强制刷新（`app/api/archive.py` + `frontend/index.html`）**：

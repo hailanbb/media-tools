@@ -114,7 +114,7 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.33</span>
+              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.34</span>
             </div>
             <!-- 完善后的命名 -->
             <p class="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">智能媒体库整理与归档工作台</p>
@@ -1518,6 +1518,7 @@
     }
 
     function seasonCategory(status, legacyCheck = false) {
+      if (['manually_handled', 'verified_complete', 'cleaned_redundant', 'source_absent', 'archived'].includes(status)) return '';
       if (legacyCheck || ['archive_check', 'unknown', 'identity_review', 'period_review', 'already_archived'].includes(status)) return 'anomaly';
       if (['archive_ready', 'period_ready'].includes(status)) return 'archive';
       if (status === 'review_needed') return 'review';
@@ -1571,7 +1572,7 @@
       document.getElementById('catCountAiring').innerHTML = `${task.counts.airing} <span class="text-xs font-normal">季连载</span>`;
 
       // 从后端加载季度明细数据：只要存在已发布的结果或已手动停止，均可按已发布明细加载
-      const hasPublishedResults = task.status === 'completed' || task.status === 'stopped' || (task.counts && (task.counts.total > 0 || (task.summary && task.summary.total_seasons > 0)));
+      const hasPublishedResults = task.status === 'completed' || task.status === 'stopped' || Boolean(task.summary) || Boolean(task.counts);
       if (hasPublishedResults && !task._seasonsLoaded) {
         const fetchSeq = ++_selectTaskSeq;
         try {
@@ -1701,6 +1702,8 @@
       }
 
       if (task._seasonsLoaded) {
+        const archSeasons = (task.categories && Array.isArray(task.categories.archive)) ? task.categories.archive.length : (task.counts.archive || 0);
+        document.getElementById('catCountArchive').innerHTML = `${archSeasons} <span class="text-xs font-normal">季已齐</span>`;
         const revSeasons = (task.categories && Array.isArray(task.categories.review)) ? task.categories.review.length : 0;
         document.getElementById('catCountReview').innerHTML = `${revSeasons} <span class="text-xs font-normal">季</span>`;
         const anomList = (task.categories && Array.isArray(task.categories.anomaly)) ? task.categories.anomaly : [];
@@ -4371,13 +4374,16 @@
 
     async function confirmArchiveDone() {
       closeModal('archiveModal');
-      const ids = currentActionRecordId ? [currentActionRecordId] : [...document.querySelectorAll('input[name="itemCheck"]:checked')].map(cb => cb.value);
+      const targetActionId = currentActionRecordId;
+      currentActionRecordId = null;
+      const ids = targetActionId ? [targetActionId] : [...document.querySelectorAll('input[name="itemCheck"]:checked')].map(cb => cb.value);
       if (ids.length === 0) { alert('未选择任何剧季'); return; }
 
       const items = ids.map(id => ({ id, name: findShowDisplayName(id) }));
+      const successArchivedIds = new Set();
 
       await runBatchPipeline({
-        title: `批量一键归档所选剧季 (${items.length} 项)`,
+        title: targetActionId ? `一键归档剧季: ${items[0]?.name || ''}` : `批量一键归档所选剧季 (${items.length} 项)`,
         subtitle: '正在按季将媒体文件移入目标归档库并清理源端空壳...',
         iconClass: 'fa-box-archive',
         iconWrapClass: 'bg-emerald-100 dark:bg-emerald-950/70 text-emerald-600 dark:text-emerald-400',
@@ -4392,6 +4398,7 @@
               signal: abortSignal
             });
             if (res.ok) {
+              successArchivedIds.add(item.id);
               if (res.message && (res.message.includes('待核实') || res.message.includes('残留') || res.message.includes('附件') || res.message.includes('留存'))) {
                 appendLog(`<span class="text-amber-400 font-bold">[${getNowTimestamp()}] ⚠️ 归档待核实: 【${item.name}】${res.message}</span>`);
               } else {
@@ -4413,9 +4420,14 @@
         },
         onFinish: async () => {
           const task = taskList.find(t => t.id === currentTaskId);
-          if (task) task._seasonsLoaded = false;
+          if (task) {
+            task._seasonsLoaded = false;
+            if (task.categories && Array.isArray(task.categories.archive)) {
+              task.categories.archive = task.categories.archive.filter(it => !successArchivedIds.has(it.id) && !it.associatedRecords?.some(ar => successArchivedIds.has(ar.id)));
+            }
+          }
           await loadTasks();
-          if (currentTaskId) selectTask(currentTaskId);
+          if (currentTaskId) await selectTask(currentTaskId);
         }
       });
     }

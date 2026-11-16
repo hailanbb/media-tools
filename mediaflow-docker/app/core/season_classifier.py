@@ -41,6 +41,15 @@ ANOMALY_STATUSES = {
     "unknown",
 }
 
+# 属于已完结/终态的状态集合，不落入五大待办模块中的任何一类
+TERMINAL_STATUSES = {
+    "manually_handled",
+    "verified_complete",
+    "cleaned_redundant",
+    "source_absent",
+    "archived",
+}
+
 # 属于元数据异常的 meta_status
 ANOMALY_META_STATUSES = {
     "fetch_failed",
@@ -80,6 +89,8 @@ def classify_single_record(
     category in ('anomaly', 'airing', 'download', 'review', 'archive')
     """
     status = str(get_record_field(rec, "status") or "")
+    if status in TERMINAL_STATUSES:
+        return "", ""
     evidence = _safe_json(
         get_record_field(rec, "evidence_json", None) or get_record_field(rec, "evidence", None), {}
     )
@@ -230,11 +241,16 @@ def consolidate_seasons_to_work_records(
 
     # 2. 逐组裁定唯一主待办
     for work_key, items in groups.items():
+        # 过滤已终态/无待办分类的物理记录
+        active_items = [item for item in items if item[1] in CATEGORY_PRIORITY]
+        if not active_items:
+            continue
+
         # 取组内最优先的分类 (priority 数值最小)
-        best_cat = min(items, key=lambda x: CATEGORY_PRIORITY.get(x[1], 99))[1]
+        best_cat = min(active_items, key=lambda x: CATEGORY_PRIORITY.get(x[1], 99))[1]
 
         # 从该分类中选出最具有代表性的记录作为主记录
-        candidates = [item for item in items if item[1] == best_cat]
+        candidates = [item for item in active_items if item[1] == best_cat]
         # 优先选本地正片数更多、或有路径更明确的记录
         def _rank_candidate(cand: tuple[Any, str, str]) -> int:
             rec = cand[0]

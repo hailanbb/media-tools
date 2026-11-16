@@ -95,6 +95,34 @@ class TestArchiverEngine(unittest.TestCase):
         should_delete_show_dir = (not rem_seasons and not rem_videos)
         self.assertFalse(should_delete_show_dir)
 
+    def test_05_archived_season_excluded_from_todo_and_summary(self):
+        """测试已归档(status='archived')条目严格从五大待办清单及统计中剔除."""
+        from app.core.season_classifier import classify_single_record, consolidate_seasons_to_work_records
+
+        archived_rec = {
+            "id": "rec_archived_01",
+            "show_name": "你的心事映在我的眉间 (2026) [tmdbid=316795]",
+            "tmdb_id": 316795,
+            "season_number": 1,
+            "season_path": "/115/Library_incs/nas/电视剧/香港剧集/你的心事映在我的眉间 (2026) [tmdbid=316795]/Season 1",
+            "total_episodes": 1,
+            "recognized_episodes": [1],
+            "missing_episodes": [],
+            "duplicate_episodes": [],
+            "status": "archived",
+            "status_detail": "已成功归档至 /115/Library_incs/nas.finish/电视剧/香港剧集/你的心事映在我的眉间 (2026) [tmdbid=316795]/Season 1",
+        }
+
+        cat, act = classify_single_record(archived_rec)
+        self.assertEqual(cat, "", "已归档记录不得落入任何待办分类！")
+        self.assertEqual(act, "", "已归档记录动作类型应为空！")
+
+        # 归并为作品季工作项时，全组均为 archived 的剧集组应自动跳过
+        work_records, counts = consolidate_seasons_to_work_records([archived_rec])
+        self.assertEqual(len(work_records), 0, "已归档剧集不得出现在待办工作项中！")
+        self.assertEqual(counts["archive"], 0, "齐全可归档计数必须为 0！")
+        self.assertEqual(counts["total_work_seasons"], 0, "总待办季数必须为 0！")
+
 
 if __name__ == "__main__":
     unittest.main()

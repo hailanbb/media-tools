@@ -1,6 +1,30 @@
 # MediaFlow 版本管理
 
-当前应用版本为 v2.5.32，发布日期为 2026-11-16。
+当前应用版本为 v2.5.34，发布日期为 2026-11-16。
+
+v2.5.34 重点修复齐全可归档模块单季一键归档与批量一键归档执行成功后条目残留缺陷：
+1. **终态状态集收敛与持久化过滤（`app/api/tasks.py` + `app/services/task_service.py` + `app/services/gap_fill_tracker.py`）**：
+   - 将 `archived`（已归档）正式纳入终态集合 `TERMINAL_STATUSES`（与 `manually_handled`, `verified_complete`, `cleaned_redundant`, `source_absent` 对齐）；
+   - 在任务季度拉取 `get_task_seasons`、单季只读重算 `recheck_single_season`、任务全量重算 `recheck_task_seasons` 以及入库对账 `reconcile_missing_episodes` 中，全面补充 `archived` 状态排除条件；
+   - 在任务汇总统计重算 `refresh_task_summary` 中严格过滤 `archived` 状态，确保归档完成后任务待办总季数与齐全可归档季数正确自减，杜绝数字与条目残留。
+2. **互斥分流与主待办归并防线加固（`app/core/season_classifier.py`）**：
+   - 在 `classify_single_record` 中增加终态状态判定，针对 `archived` 等已完成剧季直接返回空分类，严禁回退落入 `archive` 待办；
+   - 在 `consolidate_seasons_to_work_records` 中，过滤组内仅包含已终态记录的剧集组，不再生成主待办卡片。
+3. **前端交互与即时清理闭环（`frontend/index.html`）**：
+   - 同步 `seasonCategory` 终态白名单，将 `archived` 判定为非待办空状态；
+   - 优化 `confirmArchiveDone` 归档回调机制：在流水线单项执行成功时，即时收集成功归档的记录 ID；
+   - 在流水线 `onFinish` 回调中，毫秒级乐观移除本地 `task.categories.archive` 中已成功归档条目，并在重新拉取后端数据后刷新界面；
+   - 彻底解决单条“一键归档”与“批量一键归档所选”执行成功后仍停留在“齐全可归档”列表的问题，归档完成后自动清空勾选并更新“批量一键归档所选 (0)”按钮状态。
+
+v2.5.33 重点优化真缺集待补删源整剧级联清理、初检目录云盘强制刷新、缺集大于3集优先整季包下载：
+1. **删除源端（本季）空壳剧集目录级联清理与初检目录强制刷新（`app/api/archive.py` + `frontend/index.html`）**：
+   - 级联清理空壳剧集根目录：检查当前任务或数据库中该剧目是否已无其他有效剧季记录（过滤 `status != 'source_absent'`）。若已无其他有效季，直接删除该剧集目录（`show_path`），连同 `poster.jpg`、`tvshow.nfo` 等刮削伴生文件一并彻底清理，避免源端残留空文件夹；若仍有其他季，严格保护整剧目录并仅安全删除该季目录（`season_path`）；
+   - 初检目录强制刷新：删除完成后，自动在当前任务的初检目录（`task.source_path`，如 `/115/Library_incs/nas/电视剧/香港剧集`）中执行 CloudDrive2 强制刷新操作（`force_refresh=True`），确保网盘目录树即时同步，彻底消除“删除后仍能在上层目录看到该剧”的缓存残留问题；
+   - 交互提示增强：预检弹窗针对无其他有效季的剧目醒目展示“拟删整剧目录（已无其他季）”，并明确告知将在初检目录执行云盘刷新。
+2. **推送补缺缺集大于 3 集优先整季包下载（`app/services/download_service.py`）**：
+   - 智能整季包优先策略：如果要补集的数量大于 3 集（`len(missing) > 3`），优先选择整季包（Season Pack）下载；
+   - 自动整季补搜联动：若首轮未命中整季包且尚未进行标题搜索，系统主动触发别名/原名+季号整季补搜；只要检索到合格整季包且与在途队列无重叠冲突，直接选用整季包；
+   - 平滑回退机制：若整季包不可用或缺集 $\le 3$ 集时，平滑回退至省容量散集拼包逻辑，兼顾效率与容量占用。
 
 v2.5.32 重点修复初检 100% 后停留在扫描分析中且无数据缺陷、彻底消除页面横向抖动：
 1. **彻底解决初检完成 100% 页面卡死在“扫描分析中”与五大模块无数据缺陷（`frontend/index.html`）**：

@@ -353,7 +353,10 @@ async def get_task_seasons(
     Returns:
         SeasonRecord 列表
     """
-    stmt = select(SeasonRecord).where(SeasonRecord.task_id == task_id, SeasonRecord.status.not_in(("manually_handled", "verified_complete")))
+    stmt = select(SeasonRecord).where(
+        SeasonRecord.task_id == task_id,
+        SeasonRecord.status.not_in(("manually_handled", "verified_complete", "cleaned_redundant", "source_absent", "archived")),
+    )
     if status:
         stmt = stmt.where(SeasonRecord.status == status)
     stmt = stmt.order_by(SeasonRecord.show_name, SeasonRecord.season_number)
