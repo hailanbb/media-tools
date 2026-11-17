@@ -966,7 +966,7 @@ async def refresh_task_summary(task_id: str, db: AsyncSession) -> dict[str, Any]
     records_with_gap_view: list[dict[str, Any]] = []
     for s in all_seasons:
         gap_view = None
-        if s.status in ("download_needed", "period_missing") or s.missing_episodes_json:
+        if s.status in ("download_needed", "period_missing", "airing") or s.missing_episodes_json:
             gap_view = await compute_season_gap_fill_view(db, s)
         records_with_gap_view.append({
             "id": s.id,
@@ -993,6 +993,7 @@ async def refresh_task_summary(task_id: str, db: AsyncSession) -> dict[str, Any]
 
     _, counts = consolidate_seasons_to_work_records(records_with_gap_view, pending_dir_group_ids)
 
+    prev_summary = _parse_json_safe(getattr(task, "summary_json", None), {}) if task else {}
     summary = {
         "archive_ready": counts["archive"],
         "review_needed": counts["review"],
@@ -1004,6 +1005,9 @@ async def refresh_task_summary(task_id: str, db: AsyncSession) -> dict[str, Any]
         "total_seasons": counts["total_work_seasons"],
         "pending_directory_groups": len(pending_dir_group_ids),
     }
+    if isinstance(prev_summary, dict) and prev_summary.get("last_airing_transitions"):
+        summary["last_airing_transitions"] = prev_summary["last_airing_transitions"]
+        summary["still_airing_count"] = counts["airing"]
     if task:
         task.summary_json = json.dumps(summary, ensure_ascii=False)  # type: ignore[assignment]
     return summary

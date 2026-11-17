@@ -1624,7 +1624,13 @@ async def execute_gap_fill_download(
         sites_param = site_plan.get("sites_param")
         id_to_name: dict[int, str] = site_plan.get("id_to_name") or {}
 
+        from app.core.season_classifier import get_record_work_main_category
+
         for rec in records:
+            work_cat = await get_record_work_main_category(db, rec)
+            if work_cat == "airing" or rec.status == "airing":
+                skipped.append(f"{rec.show_name} S{rec.season_number:02d}：当前作品季处于「连载留源」状态，连载期暂不开放补缺推送")
+                continue
             if rec.status not in ("download_needed", "period_missing"):
                 skipped.append(f"{rec.show_name}：当前清单没有已确认的补缺任务")
                 continue

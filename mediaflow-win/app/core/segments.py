@@ -128,12 +128,14 @@ def diagnose_periods(files, season, mapping, ordinals, total, finished, archive_
                 part_files.add((number, 0))
                 regular_episode_files[number].append(item["name"])
             else:
-                explicit.add(number)
-                if 3 in norm_mapping.get(number, []) and re.search(r"第\s*\d+\s*[期集]下", item["name"]):
+                m_per = re.search(r"第\s*(\d+)\s*期", item["name"])
+                p_num = int(m_per[1]) if m_per else norm_ordinals.get(number, number)
+                explicit.add(p_num)
+                if 3 in norm_mapping.get(p_num, []) and re.search(r"第\s*\d+\s*[期集]下", item["name"]):
                     part = 3
-                part_files.add((number, part))
-                explicit_parts_by_period[number].add(part)
-                regular_episode_files[number].append(item["name"])
+                part_files.add((p_num, part))
+                explicit_parts_by_period[p_num].add(part)
+                regular_episode_files[p_num].append(item["name"])
 
     if not (numbered or explicit) and not derivative_files:
         return None
@@ -141,7 +143,20 @@ def diagnose_periods(files, season, mapping, ordinals, total, finished, archive_
     expected = set(range(1, total + 1))
     detail = f"本季共 {total} 期。"
     if not finished:
-        return "airing", detail + f"当前分段资料列出 {len(mapping)} 期，尚未确认全季播毕，后续期数留源跟踪。", [], sorted((numbered | explicit) & expected)
+        partial_period_nums: set[int] = set()
+        partial_notes: list[str] = []
+        for p_no in sorted(explicit_parts_by_period):
+            got_p = explicit_parts_by_period[p_no]
+            if 1 in got_p and 2 not in got_p and p_no not in numbered:
+                partial_period_nums.add(p_no)
+                partial_notes.append(f"第 {p_no} 期上段已收，下段播期待确认")
+        complete_recognized = sorted(((numbered | explicit) & expected) - partial_period_nums)
+        airing_detail = detail + f"当前分段资料列出 {len(mapping)} 期，尚未确认全季播毕，后续期数留源跟踪。"
+        if partial_notes:
+            airing_detail += " " + "；".join(partial_notes) + "。"
+        if derivative_files:
+            airing_detail += f" 纯享/先导等 {len(derivative_files)} 个非正片文件已单列，不补足正片下段。"
+        return "airing", airing_detail, [], complete_recognized
 
     # 1. 整期编号解释覆盖
     direct_covered = {num for num in numbered if num in expected}

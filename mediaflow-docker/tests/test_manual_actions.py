@@ -155,6 +155,68 @@ class ManualActionsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status_code, 409)
         self.assertIn("仅允许", r.json().get("detail", r.json().get("message", "")))
 
+    async def test_l05_airing_work_season_blocks_all_write_endpoints_with_zero_external_writes(self):
+        """L05: 连载季 E05 有两份(review_needed)且关联物理目录带 download_needed -> 直接调用删源、清理、归档、手动完成时外部写入为零."""
+        async with async_session() as db:
+            db.add_all([
+                SeasonRecord(
+                    id="l05-air-dup",
+                    task_id="t",
+                    show_name="连载双目录剧",
+                    show_path="/qa/src/AiringShowA",
+                    tmdb_id="88005",
+                    season_number=1,
+                    season_path="/qa/src/AiringShowA/Season 1",
+                    total_episodes=12,
+                    local_episode_count=6,
+                    recognized_episodes_json="[1,2,3,4,5]",
+                    duplicate_episodes_json="[5]",
+                    status="review_needed",
+                    status_detail="连载中存在重复版本 (第 5 集)，需清理低质冗余",
+                    season_finished=False,
+                ),
+                SeasonRecord(
+                    id="l05-hist-gap",
+                    task_id="t",
+                    show_name="连载双目录剧",
+                    show_path="/qa/src/AiringShowB",
+                    tmdb_id="88005",
+                    season_number=1,
+                    season_path="/qa/src/AiringShowB/Season 1",
+                    total_episodes=12,
+                    local_episode_count=3,
+                    recognized_episodes_json="[1,2,3]",
+                    missing_episodes_json="[4,5,6,7,8,9,10,11,12]",
+                    status="download_needed",
+                    status_detail="历史缺集记录",
+                    season_finished=True,
+                ),
+            ])
+            await db.commit()
+
+        disk = AsyncMock()
+        with patch("app.api.archive.CloudDrive2Client", return_value=disk):
+            # 1) 直接对关联缺集记录调用单季删源预检与执行 -> 409 拒绝，0 删
+            r_del_prev = await self.http.post("/api/archive/delete-source-season/preview", json={"season_record_id": "l05-hist-gap"})
+            self.assertEqual(r_del_prev.status_code, 409)
+            r_del = await self.http.post("/api/archive/delete-source-season", json={"season_record_id": "l05-hist-gap"})
+            self.assertEqual(r_del.status_code, 409)
+
+            # 2) 直接对连载重复记录调用重复版本清理 -> 拒绝，0 删
+            r_clean = await self.http.post("/api/archive/clean", json={"season_record_ids": ["l05-air-dup"]})
+            self.assertFalse(r_clean.json()["ok"])
+
+            # 3) 直接调用归档执行 -> 拒绝，0 移
+            r_arc = await self.http.post("/api/archive/execute", json={"season_record_ids": ["l05-air-dup", "l05-hist-gap"]})
+            self.assertFalse(r_arc.json()["ok"])
+
+            # 4) 直接调用标记手动处理 -> 409 拒绝
+            r_h = await self.http.post("/api/tasks/t/seasons/l05-air-dup/handled")
+            self.assertEqual(r_h.status_code, 409)
+
+            disk.delete_file.assert_not_awaited()
+            disk.move_file.assert_not_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1325,6 +1325,7 @@ async def run_inspection(
 
                     if actual or extra_archive_targets:
                         source_eps = set(recognized)
+                        source_pos_eps_list = sorted(e for e in source_eps if isinstance(e, int) and e > 0)
                         expected = set(range(1, (total_eps or 0) + 1))
                         combined = source_eps | archived_eps
                         archive_verified = bool(expected) and expected <= archived_eps
@@ -1334,6 +1335,7 @@ async def run_inspection(
                         dual_archive_info = {
                             "primary_path": actual or "",
                             "mapped_paths": [m["path"] for m in extra_archive_targets],
+                            "source_episodes": source_pos_eps_list,
                             "archived_episodes": sorted(archived_eps),
                             "combined_episodes": sorted(combined),
                         }
@@ -1341,23 +1343,26 @@ async def run_inspection(
                             alias_covered = (alias and archive_verified and source_eps and source_eps <= archived_eps
                                              and not uncertain_source and actual != season_path
                                              and not any(segment_number(i["name"]) for i in season_files + archive_items))
-                            if alias_covered:
+                            if alias_covered and season_finished:
                                 status = "already_archived"
                                 detail = (f"按同一 TMDB ID 和季号核实别名归档目录，已齐 {total_eps}/{total_eps} 集。"
                                           f"源端 {len(source_eps)} 集在归档中均有对应正片，可删除本季源端。")
                             elif not source_eps or alias or uncertain_source or actual == season_path:
-                                status = "archive_check"
-                                official = f"本季资料共 {total_eps} 集" if expected else "资料总集数未知"
-                                coverage = (f"归档库已核实 {len(expected & archived_eps)}/{total_eps} 集"
-                                            if expected else f"归档库已识别 {len(archived_eps)} 集")
-                                if missing:
-                                    coverage += f"，两库尚未核实的集号 {missing}"
-                                if actual == season_path:
-                                    coverage += "（源端和归档指向同一目录）"
-                                if alias:
-                                    coverage += "（按相同 TMDB ID 匹配到别名目录）"
-                                detail = f"{_source_inventory(season_files, parsed_episodes, season_num)}。{official}，{coverage}。"
-                            elif status != "airing":
+                                if season_finished or actual == season_path or alias:
+                                    status = "archive_check"
+                                    official = f"本季资料共 {total_eps} 集" if expected else "资料总集数未知"
+                                    coverage = (f"归档库已核实 {len(expected & archived_eps)}/{total_eps} 集"
+                                                if expected else f"归档库已识别 {len(archived_eps)} 集")
+                                    if missing:
+                                        coverage += f"，两库尚未核实的集号 {missing}"
+                                    if actual == season_path:
+                                        coverage += "（源端和归档指向同一目录）"
+                                    if alias:
+                                        coverage += "（按相同 TMDB ID 匹配到别名目录）"
+                                    detail = f"{_source_inventory(season_files, parsed_episodes, season_num)}。{official}，{coverage}。"
+                                else:
+                                    recognized = sorted(combined)
+                            elif season_finished and status != "airing":
                                 if total_eps and any(n > total_eps for n in source_eps):
                                     status = "review_needed"
                                     detail += "。归档前请核对超出资料范围的视频"
@@ -1374,11 +1379,13 @@ async def run_inspection(
                                     status = "download_needed"
                                     detail = f"两库合计仍缺 {missing}"
                                 recognized = sorted(combined)
+                            else:
+                                recognized = sorted(combined)
                         else:
                             # 仅命中跨条目独立归档目录（例如 银色恶魔 [tmdbid=323903]/S01）
                             if not archive_target or archive_target == compute_archive_target(show_path, season_path, archive_root, global_source_root):
                                 archive_target = extra_archive_targets[0]["path"]
-                            if not uncertain_source and status != "airing":
+                            if not uncertain_source and season_finished and status != "airing":
                                 if source_eps and source_eps <= archived_eps and archive_verified:
                                     status = "already_archived"
                                     detail = f"跨条目归档目录已齐 {total_eps}/{total_eps} 集，已覆盖源端正片 {sorted(source_eps)}"
@@ -1391,6 +1398,8 @@ async def run_inspection(
                                 elif expected:
                                     status = "download_needed"
                                     detail = f"结合跨条目归档目录（已有 {sorted(archived_eps)}），两库合计仍缺 {missing}"
+                                recognized = sorted(combined)
+                            elif not season_finished:
                                 recognized = sorted(combined)
                             elif expected:
                                 status = "download_needed" if (missing and season_finished) else "archive_check"
@@ -1521,7 +1530,11 @@ async def run_inspection(
                     total_eps = period_total
                     if info.get("partial_listing") and not db_tot and status == "airing":
                         total_eps = None
-                        detail = f"目前仅取得 {len(parts)} 期的分段资料，全季期数待更新。"
+                        partial_note_match = re.findall(r"第\s*\d+\s*期上段已收，下段播期待确认", detail)
+                        base_p_detail = f"目前仅取得 {len(parts)} 期的分段资料，全季总期数待公布。"
+                        if partial_note_match:
+                            base_p_detail = "；".join(partial_note_match) + "；" + base_p_detail
+                        detail = base_p_detail
                     duplicates = []
                     edition_note = f"（豆瓣条目 {info['douban_id']} 收录 {db_tot} 集）" if db_tot else ""
                     period_evidence = {
@@ -1531,10 +1544,117 @@ async def run_inspection(
                         "archive_status": arc_period[0] if arc_period else None,
                         "combined_status": status,
                         "confirmed_missing": missing,
+                        "partial_period_notes": re.findall(r"第\s*\d+\s*期上段已收，下段播期待确认", detail),
                     }
                 else:
                     status = "archive_check"
                     detail = "本季含分段，目录中还有无法核实的内容。请检查子目录及未编号视频。"
+
+            # 组装季级播出证据与三组进度 (L01-L09)
+            raw_b_ev = dict(info.get("broadcast_evidence") or {})
+            b_status = str(raw_b_ev.get("status") or "")
+            source_only_pos_eps = sorted({
+                ep_n
+                for p_ep in regular_episodes
+                for ep_n in p_ep.episode_numbers
+                if isinstance(ep_n, int) and ep_n > 0
+            })
+            trailer_or_e00_files = [
+                f["name"]
+                for f in season_files
+                if not f.get("isDirectory")
+                and is_video_file(f["name"])
+                and (
+                    NON_REGULAR_EP_PATTERN.search(f["name"])
+                    or any(
+                        p_ep.filename == f["name"] and (0 in p_ep.episode_numbers or p_ep.is_special or p_ep.is_extra)
+                        for p_ep in parsed_episodes
+                    )
+                )
+            ]
+            all_cov_pos = sorted(
+                set(source_only_pos_eps)
+                | {e for e in archived_eps_this_season if isinstance(e, int) and e > 0}
+                | {e for e in (mediaserver_check.get("season_episodes") or []) if isinstance(e, int) and e > 0}
+                | {e for e in recognized if isinstance(e, int) and e > 0}
+            )
+            aired_eps_list = sorted({int(x) for x in (raw_b_ev.get("aired_episodes") or []) if str(x).isdigit() and int(x) > 0})
+            today_eps_list = sorted({int(x) for x in (raw_b_ev.get("today_scheduled_episodes") or []) if str(x).isdigit() and int(x) > 0})
+            upcoming_eps_list = sorted({int(x) for x in (raw_b_ev.get("upcoming_episodes") or []) if str(x).isdigit() and int(x) > 0})
+            undated_eps_list = sorted({int(x) for x in (raw_b_ev.get("undated_episodes") or []) if str(x).isdigit() and int(x) > 0})
+
+            # 今日排播集若已实际收到实物，则证实已播出 (L09)
+            if today_eps_list:
+                promoted_today = [e for e in today_eps_list if e in all_cov_pos]
+                if promoted_today:
+                    aired_eps_list = sorted(set(aired_eps_list) | set(promoted_today))
+                    today_eps_list = [e for e in today_eps_list if e not in all_cov_pos]
+                    if (
+                        not raw_b_ev.get("partial_listing")
+                        and not upcoming_eps_list
+                        and not today_eps_list
+                        and not undated_eps_list
+                        and total_eps
+                        and len(aired_eps_list) >= int(total_eps)
+                    ):
+                        b_status = "finished"
+                        season_finished = True
+
+            has_any_physical_file = any(not f.get("isDirectory") for f in season_files)
+            if b_status == "upcoming" and has_any_physical_file and not identity_conflict and not multi_archive_dirs:
+                status = "airing"
+                season_finished = False
+                recognized = [e for e in recognized if isinstance(e, int) and e > 0]
+                missing = []
+                next_ad = raw_b_ev.get("next_air_date") or ""
+                detail = "待首播 · 正片尚未播出"
+                if next_ad:
+                    detail += f"（预计 {next_ad} 首播）"
+                if trailer_or_e00_files:
+                    detail += f"；先导片/预告 {len(trailer_or_e00_files)} 个已单列"
+                detail += "。文件保留在源目录，本轮无需操作。"
+            elif b_status == "evidence_pending" and not identity_conflict and not multi_archive_dirs and status not in ("archive_check", "unknown"):
+                status = "period_review"
+                season_finished = False
+                missing = []
+                pend_reason = raw_b_ev.get("missing_evidence_reason") or "欠缺本季播期或终集依据"
+                detail = f"证据待决 · 安全保留：{pend_reason}。源端已识别 {len(source_only_pos_eps)} 集正片，文件保留在源目录。"
+            elif b_status == "airing" and not identity_conflict and not multi_archive_dirs:
+                season_finished = False
+                uncollected_aired = sorted(set(aired_eps_list) - set(all_cov_pos))
+                missing = uncollected_aired
+                if not segmented and status == "airing" and (aired_eps_list or upcoming_eps_list or today_eps_list):
+                    coll_aired_cnt = len(set(aired_eps_list) & set(all_cov_pos))
+                    aired_cnt = len(aired_eps_list)
+                    upc_cnt = len(upcoming_eps_list)
+                    if aired_cnt > 0 and not uncollected_aired:
+                        detail = f"已播 {aired_cnt} 集，已收齐（已收 {coll_aired_cnt} 集）；后续 {upc_cnt} 集待播（{upc_cnt} 集待播）。"
+                    elif aired_cnt > 0:
+                        uncoll_txt = "、".join(f"E{e:02d}" for e in uncollected_aired[:6])
+                        detail = f"已播 {aired_cnt} 集，已收 {coll_aired_cnt} 集（已播未见：{uncoll_txt}）；后续 {upc_cnt} 集待播。"
+                    else:
+                        detail = f"已播 0 集，已收 {len(all_cov_pos)} 集；后续 {upc_cnt} 集待播。"
+                    if today_eps_list:
+                        t_txt = "、".join(f"E{e:02d}" for e in today_eps_list)
+                        detail += f" 今日排播：{t_txt}（待证实播出后计入已播）。"
+
+            broadcast_evidence_payload = {
+                **raw_b_ev,
+                "status": b_status or ("finished" if season_finished else ("airing" if status == "airing" else "unknown")),
+                "schedule_verified": bool(raw_b_ev.get("schedule_verified") or (status == "airing" and b_status != "evidence_pending")),
+                "total_unknown": total_eps is None and status == "airing",
+                "aired_episodes": aired_eps_list,
+                "today_scheduled_episodes": today_eps_list,
+                "upcoming_episodes": upcoming_eps_list,
+                "undated_episodes": undated_eps_list,
+                "uncollected_aired_episodes": sorted(set(aired_eps_list) - set(all_cov_pos)) if aired_eps_list else [],
+                "source_episodes": source_only_pos_eps,
+                "archived_episodes": sorted(e for e in archived_eps_this_season if isinstance(e, int) and e > 0),
+                "emby_episodes": sorted(e for e in (mediaserver_check.get("season_episodes") or []) if isinstance(e, int) and e > 0),
+                "covered_episodes": all_cov_pos,
+                "trailer_or_e00_files": trailer_or_e00_files,
+            }
+
             if status == "review_needed" and total_eps:
                 overflow = [e.filename for e in regular_episodes if any(n > total_eps for n in e.episode_numbers)]
                 if overflow:
@@ -1560,7 +1680,7 @@ async def run_inspection(
                 primary_work_info.get("seasons_present")
                 or sorted(sn for sn in tmdb_seasons_data if sn > 0)
             )
-            if total_eps is None and not identity_conflict:
+            if total_eps is None and not identity_conflict and status != "airing":
                 if (meta_evidence.get("fetch_failed") or mapped_fetch_failed) and not info.get("stale_cache_reused"):
                     meta_status = "fetch_failed"
                     if status != "archive_check":
@@ -1640,6 +1760,7 @@ async def run_inspection(
                 "dual_archive_info": dual_archive_info,
                 "mediaserver_check": mediaserver_check,
                 "period_evidence": period_evidence,
+                "broadcast_evidence": broadcast_evidence_payload,
             }
 
             show_src_seasons.append(season_num)
@@ -2104,6 +2225,7 @@ async def _fetch_seasons_by_tmdb_id(
 
     if isinstance(seasons_raw, list) and seasons_raw:
         today = _dt.now()
+        today_date = today.date()
         work_status = str((tv_summary or {}).get("status") or "")
         needed_set = set(needed_seasons) if needed_seasons is not None else None
         for s in seasons_raw:
@@ -2118,6 +2240,17 @@ async def _fetch_seasons_by_tmdb_id(
             parts = {}
             ordinals = {}
             episode_titles: dict[int, str] = {}
+            aired_episodes: list[int] = []
+            today_scheduled_episodes: list[int] = []
+            upcoming_episodes: list[int] = []
+            upcoming_schedule: list[dict[str, Any]] = []
+            undated_episodes: list[int] = []
+            broadcast_status = "unknown"
+            schedule_verified = False
+            missing_evidence_reason = ""
+            heuristic_180d_blocked = False
+            next_ep_num: int | None = None
+            next_air_date = ""
 
             should_fetch_episodes = (needed_set is None or sn in needed_set) and raw_ep_count > 0
 
@@ -2150,41 +2283,146 @@ async def _fetch_seasons_by_tmdb_id(
                             real_total = len(regular_eps) + max(0, raw_ep_count - len(episodes_info))
 
                         valid_air_dates = []
-                        for ep in (regular_eps or episodes_info):
-                            ad = ep.get("air_date")
+                        for idx_ep, ep in enumerate(regular_eps or episodes_info, start=1):
+                            ep_num = int(ep.get("episode_number") or idx_ep)
+                            ad = str(ep.get("air_date") or "").strip()
                             if ad:
                                 try:
-                                    valid_air_dates.append(_dt.strptime(ad, "%Y-%m-%d"))
+                                    ep_dt = _dt.strptime(ad[:10], "%Y-%m-%d")
+                                    valid_air_dates.append(ep_dt)
+                                    ep_d = ep_dt.date()
+                                    if ep in regular_eps and ep_num > 0:
+                                        if ep_d < today_date:
+                                            aired_episodes.append(ep_num)
+                                        elif ep_d == today_date:
+                                            if len(ad) > 10:
+                                                aired_episodes.append(ep_num)
+                                            else:
+                                                today_scheduled_episodes.append(ep_num)
+                                                upcoming_schedule.append({
+                                                    "episode_number": ep_num,
+                                                    "air_date": ad[:10],
+                                                    "is_today": True,
+                                                })
+                                        else:
+                                            upcoming_episodes.append(ep_num)
+                                            upcoming_schedule.append({
+                                                "episode_number": ep_num,
+                                                "air_date": ad[:10],
+                                                "is_today": False,
+                                            })
+                                except Exception:
+                                    if ep in regular_eps and ep_num > 0:
+                                        undated_episodes.append(ep_num)
+                            elif ep in regular_eps and ep_num > 0:
+                                undated_episodes.append(ep_num)
+
+                        if partial_listing and regular_eps:
+                            for unl_ep in range(len(regular_eps) + 1, real_total + 1):
+                                if unl_ep not in undated_episodes:
+                                    undated_episodes.append(unl_ep)
+
+                        if upcoming_schedule:
+                            upcoming_schedule.sort(key=lambda x: (x["air_date"], x["episode_number"]))
+                            next_ep_num = upcoming_schedule[0]["episode_number"]
+                            next_air_date = upcoming_schedule[0]["air_date"]
+
+                        if not regular_eps:
+                            season_air = str(s.get("air_date") or "").strip()
+                            s_future = False
+                            if season_air:
+                                try:
+                                    if _dt.strptime(season_air[:10], "%Y-%m-%d").date() > today_date:
+                                        s_future = True
+                                        next_air_date = season_air[:10]
                                 except Exception:
                                     pass
-
-                        finished = (not partial_listing and bool(valid_air_dates)
-                                    and len(valid_air_dates) == len(regular_eps)
-                                    and max(valid_air_dates) <= today)
+                            if s_future:
+                                finished = False
+                                broadcast_status = "upcoming"
+                                schedule_verified = True
+                            else:
+                                finished = False
+                                broadcast_status = "evidence_pending"
+                                missing_evidence_reason = "季明细中仅含预告或花絮，尚无正片排期"
+                        elif not valid_air_dates:
+                            finished = False
+                            broadcast_status = "evidence_pending"
+                            schedule_verified = False
+                            missing_evidence_reason = "分集表缺少有效播出日期，欠缺本季播期或终集依据"
+                        elif (
+                            not partial_listing
+                            and len(aired_episodes) == len(regular_eps)
+                            and not upcoming_episodes
+                            and not today_scheduled_episodes
+                            and not undated_episodes
+                        ):
+                            finished = True
+                            broadcast_status = "finished"
+                            schedule_verified = True
+                        elif not aired_episodes and (upcoming_episodes or today_scheduled_episodes):
+                            finished = False
+                            broadcast_status = "upcoming"
+                            schedule_verified = True
+                        elif aired_episodes and (
+                            upcoming_episodes
+                            or today_scheduled_episodes
+                            or partial_listing
+                            or s.get("continuing_announcement")
+                        ):
+                            finished = False
+                            broadcast_status = "airing"
+                            schedule_verified = True
+                        else:
+                            finished = False
+                            broadcast_status = "evidence_pending"
+                            schedule_verified = False
+                            missing_evidence_reason = "部分正片缺少播出日期且无后续排期或终集依据"
                     else:
-                        season_air = s.get("air_date") or ""
+                        season_air = str(s.get("air_date") or "").strip()
+                        s_date = None
                         if season_air:
                             try:
-                                s_date = _dt.strptime(season_air, "%Y-%m-%d")
-                                if (today - s_date).days > 180 or work_status == "Ended":
-                                    finished = True
+                                s_date = _dt.strptime(season_air[:10], "%Y-%m-%d")
                             except Exception:
-                                pass
-                        elif work_status == "Ended":
+                                s_date = None
+                        if s_date and s_date.date() > today_date:
+                            finished = False
+                            broadcast_status = "upcoming"
+                            schedule_verified = True
+                            next_air_date = season_air[:10]
+                        elif (
+                            episodes_info is None
+                            and work_status == "Ended"
+                            and not s.get("episode_detail_missing")
+                            and not (s_date is not None and 180 <= (today - s_date).days <= 360)
+                        ):
                             finished = True
+                            broadcast_status = "finished"
+                        else:
+                            finished = False
+                            broadcast_status = "evidence_pending"
+                            heuristic_180d_blocked = True
+                            missing_evidence_reason = "本季分集播期明细缺失，仅凭本季首播时间（如超 180 天）或整剧状态无法证实播毕或排期"
                 except Exception:
                     pass
             elif raw_ep_count > 0:
-                season_air = s.get("air_date") or ""
+                season_air = str(s.get("air_date") or "").strip()
                 if season_air:
                     try:
-                        s_date = _dt.strptime(season_air, "%Y-%m-%d")
-                        if (today - s_date).days > 180 or work_status == "Ended":
+                        s_date = _dt.strptime(season_air[:10], "%Y-%m-%d")
+                        if s_date.date() > today_date:
+                            finished = False
+                            broadcast_status = "upcoming"
+                            next_air_date = season_air[:10]
+                        elif work_status == "Ended":
                             finished = True
+                            broadcast_status = "finished"
                     except Exception:
                         pass
                 elif work_status == "Ended":
                     finished = True
+                    broadcast_status = "finished"
 
             seasons_data[sn] = {
                 "total": real_total if real_total > 0 else None,
@@ -2197,6 +2435,24 @@ async def _fetch_seasons_by_tmdb_id(
                 "episode_titles": episode_titles,
                 "season_year": str(s.get("air_date") or "")[:4],
                 "finished": finished,
+                "broadcast_evidence": {
+                    "status": broadcast_status,
+                    "schedule_verified": schedule_verified,
+                    "source": "tmdb_episodes" if (should_fetch_episodes and episodes_info) else "tmdb_season_summary",
+                    "fetched_at": today.isoformat(),
+                    "date_precision": "day" if (aired_episodes or upcoming_episodes or today_scheduled_episodes) else "none",
+                    "schedule_complete": not partial_listing and not undated_episodes and bool(aired_episodes or upcoming_episodes),
+                    "partial_listing": partial_listing,
+                    "aired_episodes": sorted(set(aired_episodes)),
+                    "today_scheduled_episodes": sorted(set(today_scheduled_episodes)),
+                    "upcoming_episodes": sorted(set(upcoming_episodes)),
+                    "upcoming_schedule": upcoming_schedule,
+                    "undated_episodes": sorted(set(undated_episodes)),
+                    "next_episode_number": next_ep_num,
+                    "next_air_date": next_air_date,
+                    "heuristic_180d_blocked": heuristic_180d_blocked,
+                    "missing_evidence_reason": missing_evidence_reason,
+                },
             }
         if log:
             log.info("TMDB tmdb_id=%d: 获取到 %d 季信息 (已清洗非正片)", tmdb_id, len(seasons_data))

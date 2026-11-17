@@ -126,6 +126,9 @@ def classify_single_record(
         dir_grp_requires_confirm = True
 
     meta_status = str(evidence.get("meta_status") or evidence.get("metadata_status") or "")
+    b_ev = (evidence.get("broadcast_evidence") or {}) if isinstance(evidence, dict) else {}
+    b_status = str(b_ev.get("status") or "")
+    status_detail_str = str(get_record_field(rec, "status_detail") or "")
 
     # 1. 异常剧集 (anomaly) 判定
     is_anomaly = False
@@ -150,6 +153,9 @@ def classify_single_record(
     elif meta_status in ANOMALY_META_STATUSES:
         is_anomaly = True
         action_type = "inspect_info"
+    elif b_status == "evidence_pending" or evidence.get("schedule_evidence_pending") or b_ev.get("heuristic_180d_blocked"):
+        is_anomaly = True
+        action_type = "system_tracking"
     elif total_eps and rec_eps and max(rec_eps) > total_eps and status not in ("archive_ready", "airing"):
         is_anomaly = True
         action_type = "inspect_info"
@@ -158,8 +164,15 @@ def classify_single_record(
         return "anomaly", action_type
 
     # 2. 连载留源 (airing) 判定
-    if status == "airing" or (season_finished is False and status not in ("archive_ready", "period_ready")):
+    # L04/L05: 须有明确在播/待播状态或连载期重复诊断；旧记录仅存 season_finished=false 且无状态/无依据时归入证据待决
+    if status == "airing" or b_status in ("airing", "upcoming"):
         return "airing", "skip"
+    if season_finished is False and status == "review_needed" and (
+        "连载中" in status_detail_str or b_ev.get("schedule_verified")
+    ):
+        return "airing", "skip"
+    if season_finished is False and not status:
+        return "anomaly", "system_tracking"
 
     # 3. 真缺集待补 (download) 判定（含缺集兼重复，缺集优先补齐；历史状态与缺集证据矛盾时以缺集为准）
     if status in ("download_needed", "period_missing") or missing:
@@ -388,16 +401,34 @@ def consolidate_seasons_to_work_records(
                 "season_path": getattr(primary_rec, "season_path", None),
                 "total_episodes": getattr(primary_rec, "total_episodes", None),
                 "local_episode_count": getattr(primary_rec, "local_episode_count", 0),
-                "recognized_episodes": _safe_json(getattr(primary_rec, "recognized_episodes_json", None), []),
-                "missing_episodes": _safe_json(getattr(primary_rec, "missing_episodes_json", None), []),
-                "duplicate_episodes": _safe_json(getattr(primary_rec, "duplicate_episodes_json", None), []),
+                "recognized_episodes": _safe_json(
+                    getattr(primary_rec, "recognized_episodes_json", None)
+                    or getattr(primary_rec, "recognized_episodes", None),
+                    [],
+                ),
+                "missing_episodes": _safe_json(
+                    getattr(primary_rec, "missing_episodes_json", None)
+                    or getattr(primary_rec, "missing_episodes", None),
+                    [],
+                ),
+                "duplicate_episodes": _safe_json(
+                    getattr(primary_rec, "duplicate_episodes_json", None)
+                    or getattr(primary_rec, "duplicate_episodes", None),
+                    [],
+                ),
                 "status": getattr(primary_rec, "status", None),
                 "status_detail": getattr(primary_rec, "status_detail", None),
                 "archive_target_path": getattr(primary_rec, "archive_target_path", None),
                 "season_finished": getattr(primary_rec, "season_finished", None),
-                "evidence": _safe_json(getattr(primary_rec, "evidence_json", None), {}),
-                "conflict": _safe_json(getattr(primary_rec, "conflict_json", None), {}),
-                "mapping": _safe_json(getattr(primary_rec, "mapping_json", None), {}),
+                "evidence": _safe_json(
+                    getattr(primary_rec, "evidence_json", None) or getattr(primary_rec, "evidence", None), {}
+                ),
+                "conflict": _safe_json(
+                    getattr(primary_rec, "conflict_json", None) or getattr(primary_rec, "conflict", None), {}
+                ),
+                "mapping": _safe_json(
+                    getattr(primary_rec, "mapping_json", None) or getattr(primary_rec, "mapping", None), {}
+                ),
                 "last_checked_at": (
                     primary_rec.last_checked_at.isoformat() if getattr(primary_rec, "last_checked_at", None) else None
                 ),
@@ -419,6 +450,20 @@ def consolidate_seasons_to_work_records(
             base_dict["status_detail"] = (
                 f"多源互补目录合计全 {len(union_pos_eps)} 集已齐（涉及 {len(active_items)} 个源目录），可归档"
             )
+        elif best_cat == "airing":
+            airing_view = _build_airing_view(active_items, base_dict)
+            base_dict["airing_view"] = airing_view
+            base_dict["action_type"] = "skip"
+            base_dict["recognized_episodes"] = airing_view["covered_episodes"]
+            base_dict["missing_episodes"] = []
+            if airing_view.get("card_summary"):
+                base_dict["status_detail"] = airing_view["card_summary"]
+            ev_dict = dict(base_dict.get("evidence") or {})
+            ev_dict["broadcast_evidence"] = {
+                **(ev_dict.get("broadcast_evidence") or {}),
+                **airing_view,
+            }
+            base_dict["evidence"] = ev_dict
 
         # 检查是否全部已推送待入库
         gap_state = base_dict.get("gap_fill_state") or {}
@@ -443,3 +488,315 @@ def consolidate_seasons_to_work_records(
     )
 
     return work_records, counts
+
+
+def _build_airing_view(
+    active_items: list[tuple[Any, str, str]],
+    base_dict: dict[str, Any],
+) -> dict[str, Any]:
+    """构建连载留源作品季的三组进度、分端覆盖、在途状态与卡片文案 (L01-L09)."""
+    from collections import Counter
+
+    ev = dict(base_dict.get("evidence") or {})
+    b_ev = dict(ev.get("broadcast_evidence") or {})
+    p_ev = dict(ev.get("period_evidence") or {})
+    dual_info = dict(ev.get("dual_archive_info") or {})
+    ms_check = dict(ev.get("mediaserver_check") or {})
+
+    # 1. 跨物理目录去重聚合源端正片集号 (L07)
+    dir_ep_counter: Counter[int] = Counter()
+    source_eps_union: set[int] = set()
+    dir_breakdown: list[dict[str, Any]] = []
+    has_e00_any = False
+
+    for it_rec, it_cat, _ in active_items:
+        it_ev = _safe_json(
+            get_record_field(it_rec, "evidence_json") or get_record_field(it_rec, "evidence"), {}
+        )
+        it_dual = (it_ev.get("dual_archive_info") or {}) if isinstance(it_ev, dict) else {}
+        it_b_ev = (it_ev.get("broadcast_evidence") or {}) if isinstance(it_ev, dict) else {}
+        raw_rec_eps = _safe_json(
+            get_record_field(it_rec, "recognized_episodes_json")
+            or get_record_field(it_rec, "recognized_episodes"),
+            [],
+        )
+        if 0 in raw_rec_eps or "0" in raw_rec_eps:
+            has_e00_any = True
+        explicit_src = it_dual.get("source_episodes") or it_b_ev.get("source_episodes")
+        if isinstance(explicit_src, list):
+            pos_eps = sorted({int(x) for x in explicit_src if str(x).isdigit() and int(x) > 0})
+        else:
+            pos_eps = sorted({int(x) for x in raw_rec_eps if str(x).isdigit() and int(x) > 0})
+        for ep_n in pos_eps:
+            dir_ep_counter[ep_n] += 1
+        source_eps_union.update(pos_eps)
+        dir_breakdown.append({
+            "id": get_record_field(it_rec, "id"),
+            "season_path": get_record_field(it_rec, "season_path") or get_record_field(it_rec, "show_path"),
+            "status": get_record_field(it_rec, "status"),
+            "episodes": pos_eps,
+        })
+
+    cross_dir_overlap_eps = sorted(ep_n for ep_n, cnt in dir_ep_counter.items() if cnt > 1)
+    archived_eps = sorted({
+        int(x) for x in (dual_info.get("archived_episodes") or b_ev.get("archived_episodes") or [])
+        if str(x).isdigit() and int(x) > 0
+    })
+    emby_eps = sorted({
+        int(x) for x in (ms_check.get("season_episodes") or b_ev.get("emby_episodes") or [])
+        if str(x).isdigit() and int(x) > 0
+    })
+
+    # 若单目录记录此前把归档集并入了 recognized_episodes 且未显式保存 source_episodes，按 local_episode_count 还原源端集数
+    if (
+        len(active_items) == 1
+        and archived_eps
+        and not dual_info.get("source_episodes")
+        and not b_ev.get("source_episodes")
+    ):
+        loc_cnt = int(base_dict.get("local_episode_count") or 0)
+        diff_src = sorted(source_eps_union - set(archived_eps))
+        if len(diff_src) == loc_cnt:
+            source_eps = diff_src
+        else:
+            source_eps = sorted(source_eps_union)
+    else:
+        source_eps = sorted(source_eps_union)
+
+    covered_eps = sorted(set(source_eps) | set(archived_eps) | set(emby_eps))
+
+    # 2. 正片重复与历史底层缺集提示 (L05)
+    pos_duplicates = sorted({
+        int(d)
+        for it_rec, _, _ in active_items
+        for d in _safe_json(
+            get_record_field(it_rec, "duplicate_episodes_json")
+            or get_record_field(it_rec, "duplicate_episodes"),
+            [],
+        )
+        if str(d).isdigit() and int(d) > 0
+    })
+    underlying_statuses = sorted({
+        str(get_record_field(it_rec, "status") or "")
+        for it_rec, _, _ in active_items
+        if get_record_field(it_rec, "status")
+    })
+
+    # 3. 播期三组拆分：已播 / 待播(含今日排播) / 日期未知
+    total_eps = base_dict.get("total_episodes")
+    is_segmented = bool(p_ev.get("is_segmented"))
+    partial_listing = bool(b_ev.get("partial_listing") or (not b_ev.get("schedule_complete", True) and total_eps is None))
+    total_unknown = total_eps is None or int(total_eps or 0) <= 0 or bool(b_ev.get("total_unknown"))
+
+    aired_eps = sorted({int(x) for x in (b_ev.get("aired_episodes") or []) if str(x).isdigit() and int(x) > 0})
+    today_eps = sorted({int(x) for x in (b_ev.get("today_scheduled_episodes") or []) if str(x).isdigit() and int(x) > 0})
+    # 今日排播集若已实际入库，则证实已播
+    confirmed_today = [ep for ep in today_eps if ep in covered_eps]
+    if confirmed_today:
+        aired_eps = sorted(set(aired_eps) | set(confirmed_today))
+        today_eps = [ep for ep in today_eps if ep not in covered_eps]
+
+    upcoming_eps = sorted({int(x) for x in (b_ev.get("upcoming_episodes") or []) if str(x).isdigit() and int(x) > 0})
+    undated_eps = sorted({int(x) for x in (b_ev.get("undated_episodes") or []) if str(x).isdigit() and int(x) > 0})
+    trailer_files = list(b_ev.get("trailer_or_e00_files") or [])
+    if has_e00_any and not trailer_files:
+        trailer_files = ["E00 先导片/特辑"]
+
+    broadcast_status = str(b_ev.get("status") or ("upcoming" if (not aired_eps and upcoming_eps and not covered_eps) else "airing"))
+    has_explicit_schedule = bool(aired_eps or upcoming_eps or today_eps or broadcast_status == "upcoming")
+
+    if has_explicit_schedule:
+        collected_aired = sorted(set(aired_eps) & set(covered_eps))
+        uncollected_aired = sorted(set(aired_eps) - set(covered_eps))
+    else:
+        collected_aired = list(covered_eps)
+        uncollected_aired = []
+
+    # 4. 在途下载对账：已入库集自动从在途集合移除 (L02)
+    gap_state = base_dict.get("gap_fill_state") or {}
+    raw_in_transit: set[int] = set()
+    for x in (gap_state.get("pushed_episodes") or []):
+        if str(x).isdigit() and int(x) > 0:
+            raw_in_transit.add(int(x))
+    for x in (b_ev.get("in_transit_episodes") or []):
+        if str(x).isdigit() and int(x) > 0:
+            raw_in_transit.add(int(x))
+    for it_rec, _, _ in active_items:
+        it_gs = get_record_field(it_rec, "gap_fill_state") or {}
+        for x in (it_gs.get("pushed_episodes") or []):
+            if str(x).isdigit() and int(x) > 0:
+                raw_in_transit.add(int(x))
+    in_transit_eps = sorted(raw_in_transit - set(covered_eps))
+
+    next_ep_num = b_ev.get("next_episode_number") or (upcoming_eps[0] if upcoming_eps else (today_eps[0] if today_eps else None))
+    next_air_date = b_ev.get("next_air_date") or ""
+    fetched_at = b_ev.get("fetched_at") or base_dict.get("last_checked_at") or ""
+    last_recalculated_at = ev.get("last_recalculated_at") or ""
+
+    # 5. 生成卡片展示状态与摘要文案
+    partial_period_notes = list(p_ev.get("partial_period_notes") or b_ev.get("partial_period_notes") or [])
+    unit_word = "期" if is_segmented else "集"
+
+    if broadcast_status == "upcoming":
+        badge_text = "待首播 · 正片尚未播出"
+        total_label = f"共 {total_eps} {unit_word}" if not total_unknown else f"总{unit_word}数待公布"
+        status_text = f"待首播 · 正片 0 {unit_word}（{total_label}）"
+        if trailer_files:
+            status_text += f" · 先导/预告 {len(trailer_files)} 个"
+        segs = ["待首播 · 正片尚未播出"]
+        if next_air_date:
+            segs.append(f"预计 {next_air_date} 首播")
+        if trailer_files:
+            segs.append(f"先导片/预告 {len(trailer_files)} 个已单列")
+        segs.append("文件保留在源目录，本轮无需操作。")
+        card_summary = "；".join(segs)
+    elif is_segmented:
+        badge_text = "连载中"
+        total_label = f"共 {total_eps} 期" if not total_unknown else "总期数待公布"
+        status_text = f"已收 {len(covered_eps)} 期正片 · {total_label}"
+        segs = []
+        if partial_period_notes:
+            segs.extend(partial_period_notes)
+        elif aired_eps:
+            segs.append(f"已播 {len(aired_eps)} 期，已收 {len(collected_aired)} 期")
+        else:
+            segs.append(f"已收 {len(covered_eps)} 期正片")
+        if total_unknown:
+            segs.append("全季总期数待公布")
+        elif upcoming_eps:
+            segs.append(f"后续 {len(upcoming_eps)} 期待播")
+        if trailer_files:
+            segs.append(f"先导/衍生已单列（不抵正片下段）")
+        segs.append("文件保留在源目录，本轮无需操作。")
+        card_summary = "；".join(segs)
+    elif has_explicit_schedule:
+        badge_text = "今日排播" if (today_eps and not aired_eps) else "连载中"
+        aired_cnt = len(aired_eps)
+        coll_cnt = len(collected_aired)
+        upc_cnt = len(upcoming_eps)
+        if total_unknown:
+            status_text = f"已播 {aired_cnt} 集 / 已收 {coll_cnt} 集 · 总集数待公布"
+        else:
+            status_text = f"已播 {aired_cnt} 集 / 已收 {coll_cnt} 集（全季 {total_eps} 集）"
+        if in_transit_eps:
+            status_text += f" · 在途 {len(in_transit_eps)}"
+        if pos_duplicates:
+            status_text += f"，第 {'、'.join(map(str, pos_duplicates))} 集有多个版本"
+
+        parts_txt: list[str] = []
+        if aired_cnt > 0:
+            if not uncollected_aired and coll_cnt >= aired_cnt:
+                parts_txt.append(f"已播 {aired_cnt} 集，已收齐（已收 {coll_cnt} 集）")
+            else:
+                parts_txt.append(f"已播 {aired_cnt} 集，已收 {coll_cnt} 集")
+        else:
+            parts_txt.append(f"已播 0 集，已收 {len(covered_eps)} 集")
+
+        if in_transit_eps:
+            ep_labels = "、".join(f"E{e:02d}" for e in in_transit_eps)
+            parts_txt.append(f"{ep_labels} 已提交下载，等待入库（在途 {len(in_transit_eps)} 集）")
+        elif uncollected_aired:
+            ep_labels = "、".join(f"E{e:02d}" for e in uncollected_aired[:6])
+            parts_txt.append(f"已播未见：{ep_labels}")
+
+        if today_eps:
+            t_labels = "、".join(f"E{e:02d}" for e in today_eps)
+            parts_txt.append(f"今日排播 {t_labels}（待证实播出后计入已播）")
+
+        if upc_cnt > 0:
+            next_hint = f"（下一集 E{int(next_ep_num):02d} 预计 {next_air_date}）" if (next_ep_num and next_air_date) else ""
+            parts_txt.append(f"后续 {upc_cnt} 集待播（{upc_cnt} 集待播）{next_hint}")
+        elif b_ev.get("continuing_announcement") or undated_eps:
+            parts_txt.append("后续播期待公布")
+
+        if pos_duplicates:
+            parts_txt.append(f"第 {','.join(map(str, pos_duplicates))} 集存在重复版本（季终重算后再清理）")
+
+        if b_ev.get("last_check_incomplete"):
+            parts_txt.append("本次核查未完成，保留上次有效结论")
+        else:
+            parts_txt.append("文件保留在源目录，本轮无需操作")
+        card_summary = "；".join(parts_txt) + "。"
+    else:
+        badge_text = "连载中"
+        if total_unknown:
+            status_text = f"已收 {len(covered_eps)} {unit_word} · 总{unit_word}数待公布"
+        else:
+            status_text = f"{len(covered_eps)}/{total_eps}{unit_word}"
+        if pos_duplicates:
+            status_text += f"，第 {'、'.join(map(str, pos_duplicates))} 集有多个版本"
+        card_summary = str(base_dict.get("status_detail") or f"连载中：已收 {len(covered_eps)} {unit_word}，文件保留在源目录。")
+        if b_ev.get("last_check_incomplete") and "本次核查未完成" not in card_summary:
+            card_summary += "（本次核查未完成，保留上次有效结论）"
+
+    return {
+        "status": broadcast_status,
+        "badge_text": badge_text,
+        "status_text": status_text,
+        "card_summary": card_summary,
+        "schedule_verified": has_explicit_schedule or bool(b_ev.get("schedule_verified")),
+        "source": b_ev.get("source") or "tmdb_episodes",
+        "fetched_at": fetched_at,
+        "last_recalculated_at": last_recalculated_at,
+        "date_precision": b_ev.get("date_precision") or ("day" if has_explicit_schedule else "none"),
+        "schedule_complete": bool(b_ev.get("schedule_complete", not partial_listing and not total_unknown)),
+        "total_unknown": total_unknown,
+        "aired_episodes": aired_eps,
+        "collected_aired_episodes": collected_aired,
+        "uncollected_aired_episodes": uncollected_aired,
+        "today_scheduled_episodes": today_eps,
+        "upcoming_episodes": upcoming_eps,
+        "undated_episodes": undated_eps,
+        "in_transit_episodes": in_transit_eps,
+        "source_episodes": source_eps,
+        "archived_episodes": archived_eps,
+        "emby_episodes": emby_eps,
+        "covered_episodes": covered_eps,
+        "duplicate_episodes": pos_duplicates,
+        "cross_dir_overlap_episodes": cross_dir_overlap_eps,
+        "directory_breakdown": dir_breakdown,
+        "underlying_statuses": underlying_statuses,
+        "trailer_or_e00_files": trailer_files,
+        "partial_period_notes": partial_period_notes,
+        "next_episode_number": next_ep_num,
+        "next_air_date": next_air_date,
+        "last_check_incomplete": bool(b_ev.get("last_check_incomplete")),
+        "last_check_error": str(b_ev.get("last_check_error") or ""),
+    }
+
+
+async def get_record_work_main_category(db: Any, rec: Any) -> str:
+    """查询指定物理剧季记录在所属任务中按作品季归并后的唯一主分类 (L05 写入安全门禁)."""
+    from sqlalchemy import select
+    from app.models.season import SeasonRecord
+    from app.models.directory_group import DirectoryGroup
+
+    task_id = get_record_field(rec, "task_id")
+    rec_id = get_record_field(rec, "id")
+    if not task_id or db is None:
+        cat, _ = classify_single_record(rec)
+        return cat
+
+    stmt = select(SeasonRecord).where(
+        SeasonRecord.task_id == task_id,
+        SeasonRecord.status.not_in(tuple(TERMINAL_STATUSES)),
+    )
+    rows = list((await db.execute(stmt)).scalars().all())
+    if not rows:
+        cat, _ = classify_single_record(rec)
+        return cat
+
+    dg_stmt = select(DirectoryGroup.id).where(
+        DirectoryGroup.task_id == task_id,
+        DirectoryGroup.status == "pending_confirm",
+    )
+    pending_dg_ids = {str(x) for x in (await db.execute(dg_stmt)).scalars().all() if x}
+    work_recs, _ = consolidate_seasons_to_work_records(rows, pending_dg_ids)
+    target_wkey = build_work_key(rec)
+    for w in work_recs:
+        if w.get("id") == rec_id or rec_id in (w.get("participating_record_ids") or []):
+            return str(w.get("main_category") or "")
+        if build_work_key(w) == target_wkey:
+            return str(w.get("main_category") or "")
+    cat, _ = classify_single_record(rec, pending_dg_ids)
+    return cat

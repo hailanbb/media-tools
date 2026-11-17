@@ -12,6 +12,7 @@
 4. 集数人工校准流转验证。
 """
 
+import json
 import os
 import sys
 import unittest
@@ -488,6 +489,278 @@ class TestArchiveEvidence(unittest.IsolatedAsyncioTestCase):
         d = await self.inspect([], [("S01E01.mkv", 5)], total=None)
         self.assertIn("资料总集数未知", d.status_detail)
         self.assertNotIn("已覆盖全部", d.status_detail)
+
+
+class TestAiringRetentionLifecycleL01ToL12(unittest.IsolatedAsyncioTestCase):
+    """连载留源模块 L01–L12 端到端验收测试套件."""
+
+    async def test_l04_181_days_missing_episode_detail_becomes_evidence_pending(self):
+        """L04: 首播距今 181 天、季明细缺失 -> 不能仅据时间阈值推定播毕或开放写入，归入证据待决."""
+        from datetime import datetime, timedelta
+        from unittest.mock import AsyncMock
+        from app.core.inspector import _fetch_seasons_by_tmdb_id, run_inspection
+        from app.core.season_classifier import consolidate_seasons_to_work_records
+
+        air_181_ago = (datetime.now() - timedelta(days=181)).strftime("%Y-%m-%d")
+        mp = AsyncMock()
+        mp.get_tmdb_seasons.return_value = [
+            {"season_number": 1, "episode_count": 12, "air_date": air_181_ago}
+        ]
+        mp.get_tmdb_episodes.return_value = []  # 季集明细缺失
+
+        s_data = await _fetch_seasons_by_tmdb_id(mp, 90001, None)
+        self.assertFalse(s_data[1]["finished"], "首播 181 天但季明细缺失时，严禁推定 finished=True")
+        self.assertEqual(s_data[1]["broadcast_evidence"]["status"], "evidence_pending")
+        self.assertTrue(s_data[1]["broadcast_evidence"]["heuristic_180d_blocked"])
+
+        show_dir = "/src/tv/缺明细剧 (2026) [tmdbid=90001]"
+        disk = AsyncMock()
+        disk.list_files.side_effect = lambda p: (
+            [{"name": "Season 1", "path": f"{show_dir}/Season 1", "isDirectory": True}]
+            if p == show_dir
+            else [{"name": f"Show.S01E{i:02d}.mkv", "path": f"{p}/Show.S01E{i:02d}.mkv", "size": 1000, "isDirectory": False} for i in range(1, 5)]
+        )
+        from unittest.mock import patch
+        with patch("app.core.inspector._resolve_show_metadata", new=AsyncMock(return_value=(90001, s_data))):
+            res = await run_inspection("t-l04", show_dir, cd2_client=disk, mp_client=mp, tmdb_client=AsyncMock())
+        diag = res.seasons[0]
+        self.assertEqual(diag.status, "period_review")
+        self.assertIn("证据待决", diag.status_detail)
+        w_recs, counts = consolidate_seasons_to_work_records([diag])
+        self.assertEqual(counts["anomaly"], 1)
+        self.assertEqual(counts["airing"], 0)
+        self.assertEqual(w_recs[0]["action_type"], "system_tracking")
+
+    async def test_l06_airing_dual_archive_coverage_stays_airing_and_recalc_preserves_fetched_at(self):
+        """L06: 已确认在播的季，两库合计覆盖当前资料表全部集号；依次执行初检、缓存核算 -> 均保持留源且不刷新取证日期."""
+        from datetime import datetime, timezone
+        from unittest.mock import AsyncMock, patch
+        from app.core.inspector import run_inspection
+        from app.core.season_classifier import consolidate_seasons_to_work_records
+        from app.models.season import SeasonRecord
+        from app.api.tasks import _apply_in_place_recalculate
+
+        show = "在播跨库剧 (2026) [tmdbid=90006]"
+        src = f"/src/tv/{show}"
+        dst = f"/dst/tv/{show}"
+        dirs = {
+            src: [{"name": "Season 1", "path": f"{src}/Season 1", "size": 0, "isDirectory": True}],
+            f"{src}/Season 1": [{"name": f"S01E{i:02d}.mkv", "path": f"{src}/Season 1/S01E{i:02d}.mkv", "size": 100, "isDirectory": False} for i in range(1, 5)],
+            "/dst/tv": [{"name": show, "path": dst, "size": 0, "isDirectory": True}],
+            dst: [{"name": "Season 1", "path": f"{dst}/Season 1", "size": 0, "isDirectory": True}],
+            f"{dst}/Season 1": [{"name": f"S01E{i:02d}.mkv", "path": f"{dst}/Season 1/S01E{i:02d}.mkv", "size": 100, "isDirectory": False} for i in range(1, 9)],
+        }
+        disk = AsyncMock()
+        disk.list_files.side_effect = lambda p: dirs.get(p, [])
+        orig_fetched = "2026-11-10T08:00:00"
+        airing_meta = {
+            1: {
+                "total": 8,
+                "finished": False,
+                "partial_listing": True,
+                "broadcast_evidence": {
+                    "status": "airing",
+                    "schedule_verified": True,
+                    "fetched_at": orig_fetched,
+                    "aired_episodes": list(range(1, 9)),
+                    "upcoming_episodes": [9, 10],
+                },
+            }
+        }
+        with patch("app.core.inspector._resolve_show_metadata", new=AsyncMock(return_value=(90006, airing_meta))):
+            res = await run_inspection("t-l06", src, cd2_client=disk, tmdb_client=AsyncMock(), archive_root="/dst", global_source_root="/src")
+        diag = res.seasons[0]
+        # 1. 初检路径必须保持 airing，绝不能变成 already_archived 或 archive_ready
+        self.assertEqual(diag.status, "airing")
+        self.assertFalse(diag.season_finished)
+
+        # 2. 缓存核算路径 (_apply_in_place_recalculate, fetch_remote=False)
+        orig_checked_dt = datetime(2026, 11, 10, 8, 0, 0, tzinfo=timezone.utc)
+        rec = SeasonRecord(
+            id="rec-l06",
+            task_id="t-l06",
+            show_name=diag.show_name,
+            show_path=diag.show_path,
+            tmdb_id="90006",
+            season_number=1,
+            season_path=diag.season_path,
+            total_episodes=8,
+            local_episode_count=4,
+            recognized_episodes_json="[1,2,3,4,5,6,7,8]",
+            missing_episodes_json="[]",
+            duplicate_episodes_json="[]",
+            status=diag.status,
+            status_detail=diag.status_detail,
+            archive_target_path=diag.archive_target_path,
+            season_finished=False,
+            evidence_json=json.dumps(diag.evidence, ensure_ascii=False),
+            conflict_json="{}",
+            mapping_json="{}",
+            last_checked_at=orig_checked_dt,
+        )
+        with patch("app.api.tasks.resolve_active_season_mapping", new=AsyncMock(return_value=None)), \
+             patch("app.api.tasks.get_verified_metadata_snapshot", new=AsyncMock(return_value=airing_meta[1])), \
+             patch("app.api.tasks.supersede_changed_identity_records", new=AsyncMock()):
+            await _apply_in_place_recalculate(AsyncMock(), rec, fetch_remote=False)
+
+        self.assertEqual(rec.status, "airing", "缓存核算后在播剧季即使两库集齐也必须保持 airing，严禁提前转 already_archived/archive_ready")
+        self.assertEqual(rec.last_checked_at, orig_checked_dt, "缓存核算不得刷新原始检查时间")
+        ev_after = json.loads(rec.evidence_json)
+        self.assertEqual(ev_after["broadcast_evidence"]["fetched_at"], orig_fetched, "缓存核算不得刷新原始取证日期")
+        self.assertTrue(ev_after.get("last_recalculated_at"), "必须单独记录重新核算时间")
+        w_after, c_after = consolidate_seasons_to_work_records([rec])
+        self.assertEqual(c_after["airing"], 1)
+        self.assertEqual(w_after[0]["main_category"], "airing")
+
+    async def test_l08_segmented_variety_partial_period5_and_pure_e00_isolation(self):
+        """L08: 分段综艺只公布到第 5 期，源端有第 5 期上段、纯享版及两份 E00 -> 留源，展示期段和未知总数，不显示全 5 期齐全."""
+        from unittest.mock import AsyncMock
+        from app.core.inspector import _fetch_seasons_by_tmdb_id, run_inspection
+        from app.core.season_classifier import consolidate_seasons_to_work_records
+
+        mp = AsyncMock()
+        mp.get_tmdb_seasons.return_value = [
+            {"season_number": 1, "episode_count": 24, "air_date": "2026-10-01"}
+        ]
+        # 只公布到第 5 期（共 9 段，第 5 期下尚未播出/公布）
+        eps_payload = []
+        ep_idx = 1
+        for p in range(1, 5):
+            eps_payload.append({"episode_number": ep_idx, "name": f"第{p}期上", "air_date": "2026-10-10"})
+            ep_idx += 1
+            eps_payload.append({"episode_number": ep_idx, "name": f"第{p}期下", "air_date": "2026-10-11"})
+            ep_idx += 1
+        eps_payload.append({"episode_number": ep_idx, "name": "第5期上", "air_date": "2026-10-17"})
+        mp.get_tmdb_episodes.return_value = eps_payload
+
+        show_dir = "/src/variety/分段综艺 (2026) [tmdbid=90008]"
+        src_files = []
+        for p in range(1, 5):
+            src_files.append({"name": f"Show.S01E{p:02d}.第{p}期上.mp4", "path": f"{show_dir}/Season 1/Show.S01E{p:02d}.第{p}期上.mp4", "size": 500, "isDirectory": False})
+            src_files.append({"name": f"Show.S01E{p:02d}.第{p}期下.mp4", "path": f"{show_dir}/Season 1/Show.S01E{p:02d}.第{p}期下.mp4", "size": 500, "isDirectory": False})
+        # 第 5 期仅有上段 + 纯享版 + 两份 E00
+        src_files.extend([
+            {"name": "Show.S01E05.第5期上.mp4", "path": f"{show_dir}/Season 1/Show.S01E05.第5期上.mp4", "size": 500, "isDirectory": False},
+            {"name": "Show.S01E05.第5期纯享版.mp4", "path": f"{show_dir}/Season 1/Show.S01E05.第5期纯享版.mp4", "size": 300, "isDirectory": False},
+            {"name": "Show.S01E00.先导片.mp4", "path": f"{show_dir}/Season 1/Show.S01E00.先导片.mp4", "size": 200, "isDirectory": False},
+            {"name": "Show.S01E00.特别企划.mp4", "path": f"{show_dir}/Season 1/Show.S01E00.特别企划.mp4", "size": 200, "isDirectory": False},
+        ])
+        disk = AsyncMock()
+        disk.list_files.side_effect = lambda p: (
+            [{"name": "Season 1", "path": f"{show_dir}/Season 1", "isDirectory": True}]
+            if p == show_dir
+            else src_files
+        )
+        res = await run_inspection("t-l08", show_dir, cd2_client=disk, mp_client=mp, tmdb_client=None)
+        diag = res.seasons[0]
+        self.assertEqual(diag.status, "airing")
+        self.assertIsNone(diag.total_episodes, "分段节目表未完整公布时必须清空不可靠总期数")
+        self.assertEqual(diag.evidence.get("meta_status"), "ok", "连载分段季未知总期数不得误置为 no_candidate")
+        self.assertIn("第 5 期上段已收，下段播期待确认", diag.status_detail)
+        self.assertNotIn("全 5 期齐全", diag.status_detail)
+
+        w_recs, counts = consolidate_seasons_to_work_records([diag])
+        self.assertEqual(counts["airing"], 1)
+        self.assertEqual(counts["anomaly"], 0)
+        self.assertIn("总期数待公布", w_recs[0]["airing_view"]["status_text"])
+        self.assertIn("第 5 期上段已收，下段播期待确认", w_recs[0]["airing_view"]["card_summary"])
+
+    async def test_l09_upcoming_premiere_with_trailer_only_and_today_scheduled(self):
+        """L09: 明确首播在未来、源端仅预告 -> 待首播且进度不虚增；播出日当天只有日期无时刻 -> 今日排播且不生成已播缺集推送."""
+        from datetime import datetime
+        from unittest.mock import AsyncMock
+        from app.core.inspector import run_inspection
+        from app.core.season_classifier import consolidate_seasons_to_work_records
+
+        # 1) 首播在未来 (2099-08-01)，源端仅有预告片 E00
+        mp_up = AsyncMock()
+        mp_up.get_tmdb_seasons.return_value = [
+            {"season_number": 1, "episode_count": 10, "air_date": "2099-08-01"}
+        ]
+        mp_up.get_tmdb_episodes.return_value = [
+            {"episode_number": 1, "name": "第1集", "air_date": "2099-08-01"},
+            {"episode_number": 2, "name": "第2集", "air_date": "2099-08-08"},
+        ]
+        show_up = "/src/tv/未来待播剧 (2099) [tmdbid=90009]"
+        disk_up = AsyncMock()
+        disk_up.list_files.side_effect = lambda p: (
+            [{"name": "Season 1", "path": f"{show_up}/Season 1", "isDirectory": True}]
+            if p == show_up
+            else [{"name": "Future.S01E00.预告片.mp4", "path": f"{p}/Future.S01E00.预告片.mp4", "size": 100, "isDirectory": False}]
+        )
+        res_up = await run_inspection("t-l09-up", show_up, cd2_client=disk_up, mp_client=mp_up, tmdb_client=None)
+        d_up = res_up.seasons[0]
+        self.assertEqual(d_up.status, "airing")
+        self.assertEqual(d_up.recognized_episodes, [], "仅含预告片时正片进度必须为 0，不得虚增")
+        self.assertEqual(d_up.missing_episodes, [], "待首播季不得生成缺集")
+        self.assertIn("待首播 · 正片尚未播出", d_up.status_detail)
+        w_up, c_up = consolidate_seasons_to_work_records([d_up])
+        self.assertEqual(c_up["airing"], 1)
+        self.assertEqual(w_up[0]["airing_view"]["badge_text"], "待首播 · 正片尚未播出")
+
+        # 2) 播出日当天只有日期无时刻（E01 已播且已收，E02 为今日排播尚未收到）
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        mp_td = AsyncMock()
+        mp_td.get_tmdb_seasons.return_value = [
+            {"season_number": 1, "episode_count": 4, "air_date": "2026-01-01"}
+        ]
+        mp_td.get_tmdb_episodes.return_value = [
+            {"episode_number": 1, "name": "第1集", "air_date": "2026-01-01"},
+            {"episode_number": 2, "name": "第2集", "air_date": today_str},
+            {"episode_number": 3, "name": "第3集", "air_date": "2099-12-01"},
+            {"episode_number": 4, "name": "第4集", "air_date": "2099-12-08"},
+        ]
+        show_td = "/src/tv/今日排播剧 (2026) [tmdbid=90010]"
+        disk_td = AsyncMock()
+        disk_td.list_files.side_effect = lambda p: (
+            [{"name": "Season 1", "path": f"{show_td}/Season 1", "isDirectory": True}]
+            if p == show_td
+            else [{"name": "Today.S01E01.mp4", "path": f"{p}/Today.S01E01.mp4", "size": 500, "isDirectory": False}]
+        )
+        res_td = await run_inspection("t-l09-td", show_td, cd2_client=disk_td, mp_client=mp_td, tmdb_client=None)
+        d_td = res_td.seasons[0]
+        self.assertEqual(d_td.status, "airing")
+        self.assertEqual(d_td.missing_episodes, [], "今日排播 E02 在证实播出前不得计入已播缺集")
+        self.assertIn("今日排播", d_td.status_detail)
+        w_td, _ = consolidate_seasons_to_work_records([d_td])
+        self.assertEqual(w_td[0]["airing_view"]["today_scheduled_episodes"], [2])
+        self.assertEqual(w_td[0]["airing_view"]["uncollected_aired_episodes"], [])
+
+    async def test_l05_l10_l11_l12_write_gate_and_season_finale_transitions(self):
+        """L05/L10/L11/L12: 连载期关联记录直接调用写接口外部写入为零；季终四向分流与上游失败保留旧结论."""
+        import json
+        from unittest.mock import AsyncMock, patch
+        from app.core.season_classifier import consolidate_seasons_to_work_records
+        from app.core.inspector import SeasonDiagnosis
+
+        # L10: 模拟原本留源的 4 个作品季在重新初检季终后，分别转入齐全可归档、真缺集待补、待复核清理、异常剧集（归档已覆盖）
+        before_seasons = [
+            {"id": "s-to-arch", "show_name": "剧1", "tmdb_id": "9101", "season_number": 1, "status": "airing", "season_finished": False, "total_episodes": 10, "recognized_episodes": list(range(1, 9))},
+            {"id": "s-to-dl", "show_name": "剧2", "tmdb_id": "9102", "season_number": 1, "status": "airing", "season_finished": False, "total_episodes": 10, "recognized_episodes": list(range(1, 9))},
+            {"id": "s-to-rev", "show_name": "剧3", "tmdb_id": "9103", "season_number": 1, "status": "airing", "season_finished": False, "total_episodes": 10, "recognized_episodes": list(range(1, 9))},
+            {"id": "s-to-anom", "show_name": "剧4", "tmdb_id": "9104", "season_number": 1, "status": "airing", "season_finished": False, "total_episodes": 10, "recognized_episodes": list(range(1, 9))},
+        ]
+        _, counts_before = consolidate_seasons_to_work_records(before_seasons)
+        self.assertEqual(counts_before["airing"], 4)
+        self.assertEqual(counts_before["total_work_seasons"], 4)
+
+        after_seasons = [
+            {"id": "s-to-arch", "show_name": "剧1", "tmdb_id": "9101", "season_number": 1, "status": "archive_ready", "season_finished": True, "total_episodes": 10, "recognized_episodes": list(range(1, 11)), "local_episode_count": 10},
+            {"id": "s-to-dl", "show_name": "剧2", "tmdb_id": "9102", "season_number": 1, "status": "download_needed", "season_finished": True, "total_episodes": 10, "recognized_episodes": list(range(1, 9)), "missing_episodes": [9, 10]},
+            {"id": "s-to-rev", "show_name": "剧3", "tmdb_id": "9103", "season_number": 1, "status": "review_needed", "season_finished": True, "total_episodes": 10, "recognized_episodes": list(range(1, 11)), "duplicate_episodes": [5]},
+            {"id": "s-to-anom", "show_name": "剧4", "tmdb_id": "9104", "season_number": 1, "status": "already_archived", "season_finished": True, "total_episodes": 10, "recognized_episodes": list(range(1, 11))},
+        ]
+        _, counts_after = consolidate_seasons_to_work_records(after_seasons)
+        self.assertEqual(counts_after["airing"], 0, "季终后原留源清单应全部转出归零")
+        self.assertEqual(counts_after["archive"], 1)
+        self.assertEqual(counts_after["download"], 1)
+        self.assertEqual(counts_after["review"], 1)
+        self.assertEqual(counts_after["anomaly"], 1)
+        self.assertEqual(
+            counts_after["archive"] + counts_after["review"] + counts_after["download"] + counts_after["airing"] + counts_after["anomaly"],
+            counts_after["total_work_seasons"],
+            "L12: 五模块计数之和必须严格等于有待办的作品季数"
+        )
 
 
 if __name__ == "__main__":

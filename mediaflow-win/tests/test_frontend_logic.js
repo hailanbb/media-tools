@@ -298,7 +298,8 @@ console.log("===================================================================
           textContent: '',
           checked: false,
           disabled: false,
-          scrollIntoView() {}
+          scrollIntoView() {},
+          addEventListener() {}
         });
       }
       return dgNodes.get(id);
@@ -467,5 +468,98 @@ console.log("===================================================================
     assert(resolvedPanelHtml.includes('✓ 选定目标'), '已确认归档目标必须标明「✓ 选定目标」');
 
     console.log('✓ 目录组唯一收口异常剧集、缺集页隐藏、跨页定位跳转、逐季覆盖矩阵与单季删除源端契约测试全部通过');
+
+    // ======================================================================
+    // 验证 v2.5.36 连载留源只读契约、防按钮泄露、详情入口与空态/中止区分 (L01-L12)
+    // ======================================================================
+    const airingItemNormal = {
+      id: 'air-l01',
+      show: '沿海列车',
+      season: 'S02',
+      statusText: '已播 8 集 / 已收 7 集（全季 12 集） · 在途 1',
+      mainCategory: 'airing',
+      actionType: 'skip',
+      actionText: '留源',
+      pathA: '/src/沿海列车/Season 2',
+      pathB: '/dst/沿海列车/Season 2',
+      note: '已播 8 集，已收 7 集；E06 已提交下载，等待入库；后续 4 集待播。',
+      duplicates: [5],
+      airingView: {
+        status: 'airing',
+        badge_text: '连载中',
+        fetched_at: '2026-11-18T00:00:00',
+        last_recalculated_at: '2026-11-18T01:00:00',
+        source_episodes: [1, 2, 3, 4, 5, 7],
+        archived_episodes: [8],
+        aired_episodes: [1, 2, 3, 4, 5, 6, 7, 8],
+        uncollected_aired_episodes: [6],
+        in_transit_episodes: [6],
+        upcoming_episodes: [9, 10, 11, 12],
+        duplicate_episodes: [5],
+        next_episode_number: 9,
+        next_air_date: '2026-11-25'
+      },
+      // 模拟底层带 download_needed / review_needed 历史状态 (L05)
+      raw: {
+        status: 'download_needed',
+        main_category: 'airing',
+        total_episodes: 12,
+        recognized_episodes: [1, 2, 3, 4, 5, 7, 8]
+      }
+    };
+
+    sampleTask.categories.airing = [airingItemNormal];
+    sampleTask.summary = {
+      last_airing_transitions: [
+        { show_name: '沿海列车', season_number: 1, to_category: 'archive', to_category_label: '齐全可归档' }
+      ]
+    };
+    dgContext.currentCategory = 'airing';
+    dgContext.findItemByRecordId = id => (id === 'air-l01' ? airingItemNormal : null);
+    vm.runInContext('renderEpisodesList()', dgContext);
+    const airingHtml = getDgNode('episodeItemContainer').innerHTML;
+
+    // 1. 所有连载季必须包含「查看详情」按钮，且禁用勾选框
+    assert(airingHtml.includes("openGapFillDetail('air-l01')"), '连载季必须包含详情入口');
+    assert(airingHtml.includes('查看详情'), '连载季详情按钮应显示「查看详情」');
+    assert(airingHtml.includes('disabled hidden'), '连载季勾选框必须被禁用并隐藏');
+
+    // 2. 即使 raw.status === download_needed 且 duplicates=[5]，绝不能泄露删源、清理、手动完成或归档按钮 (L05)
+    assert(!airingHtml.includes('openDeleteSourceSeasonModal'), '连载季严禁泄露删除源端（本季）按钮');
+    assert(!airingHtml.includes('promptDeleteSourceShow'), '连载季严禁泄露整剧删除源端按钮');
+    assert(!airingHtml.includes('markSeasonHandled'), '连载季严禁泄露已手动处理按钮');
+    assert(!airingHtml.includes('openCleanPreview'), '连载季严禁泄露清理预览按钮');
+    assert(!airingHtml.includes('handleSingleAction'), '连载季严禁挂载归档/补缺执行按钮');
+    assert(airingHtml.includes('最近核查: 2026-11-18 00:00:00'), '连载卡必须展示取证时间');
+    assert(airingHtml.includes('重新核算: 2026-11-18 01:00:00'), '连载卡必须分别展示重新核算时间');
+
+    // 3. 验证点开连载详情弹窗只读且包含分端覆盖与在途明细，无删源或改绑操作 (L02, L05)
+    getDgNode('gapFillDetailDialog').showModal = () => {};
+    vm.runInContext(sourceWithCr('openGapFillDetail') + ";openGapFillDetail('air-l01')", dgContext);
+    const airingDetailHtml = getDgNode('gapFillDetailBody').innerHTML;
+    assert(airingDetailHtml.includes('连载留源 · 季级播期与分端覆盖明细'), '详情必须渲染连载分端覆盖面板');
+    assert(airingDetailHtml.includes('源端 6 集'), '详情必须准确显示源端 6 集');
+    assert(airingDetailHtml.includes('归档端 1 集'), '详情必须准确显示归档端 1 集');
+    assert(airingDetailHtml.includes('E06 已提交下载，等待入库'), '详情必须单列在途下载 E06');
+    assert(!airingDetailHtml.includes('openDeleteSourceSeasonModal'), '连载详情弹窗严禁出现放弃并删除本季按钮');
+    assert(!airingDetailHtml.includes('openSeasonMappingModal'), '连载详情弹窗严禁出现改绑映射按钮');
+
+    // 4. 验证零条完整核查 vs 扫描中止 vs 加载失败的不同反馈 (L11)
+    sampleTask.categories.airing = [];
+    sampleTask.status = 'completed';
+    sampleTask.counts.total = 5;
+    vm.runInContext('renderEpisodesList()', dgContext);
+    assert(getDgNode('episodeItemContainer').innerHTML.includes('本次初检没有需要留源等待播出的季'), '完整核查零条应显示明确提示');
+
+    sampleTask.status = 'stopped';
+    sampleTask.time = '2026-11-18 00:30';
+    vm.runInContext('renderEpisodesList()', dgContext);
+    assert(getDgNode('episodeItemContainer').innerHTML.includes('未扫描范围不解释为零'), '扫描中止时应明示已分析范围且不将未扫描解释为零');
+
+    sampleTask._seasonsLoadError = true;
+    vm.runInContext('renderEpisodesList()', dgContext);
+    assert(getDgNode('episodeItemContainer').innerHTML.includes('重试加载'), '接口加载失败时必须提供重试加载入口');
+
+    console.log('✓ 连载留源 L01-L12 前端只读契约、防泄露、分端详情与空态/中止区分测试全部通过');
   }
 }

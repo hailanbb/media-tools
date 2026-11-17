@@ -215,17 +215,14 @@ async def get_task_seasons(
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
 
+    terminal_tuple = ("manually_handled", "verified_complete", "cleaned_redundant", "source_absent", "archived")
+    if status and status in terminal_tuple:
+        return []
+
     stmt = select(SeasonRecord).where(
         SeasonRecord.task_id == task_id,
-        SeasonRecord.status.not_in(("manually_handled", "verified_complete", "cleaned_redundant", "source_absent", "archived")),
+        SeasonRecord.status.not_in(terminal_tuple),
     )
-    if status:
-        groups = {
-            "archive_ready": ("archive_ready", "period_ready"),
-            "review_needed": ("review_needed", "period_review", "identity_review", "already_archived"),
-            "download_needed": ("download_needed", "period_missing"),
-        }
-        stmt = stmt.where(SeasonRecord.status.in_(groups.get(status, (status,))))
     stmt = stmt.order_by(SeasonRecord.show_name, SeasonRecord.season_number)
     result = await db.execute(stmt)
     records = result.scalars().all()
@@ -246,6 +243,33 @@ async def get_task_seasons(
     pending_dir_group_ids = set(pending_dg)
 
     work_records, _ = consolidate_seasons_to_work_records(serialized, pending_dir_group_ids)
+
+    if status:
+        status_to_cat = {
+            "airing": "airing",
+            "archive": "archive",
+            "archive_ready": "archive",
+            "period_ready": "archive",
+            "download": "download",
+            "download_needed": "download",
+            "period_missing": "download",
+            "review": "review",
+            "anomaly": "anomaly",
+        }
+        groups = {
+            "archive_ready": ("archive_ready", "period_ready"),
+            "review_needed": ("review_needed", "period_review", "identity_review", "already_archived"),
+            "download_needed": ("download_needed", "period_missing"),
+        }
+        if status in status_to_cat:
+            target_cat = status_to_cat[status]
+            work_records = [w for w in work_records if w.get("main_category") == target_cat]
+        else:
+            allowed_st = groups.get(status, (status,))
+            work_records = [
+                w for w in work_records
+                if w.get("status") in allowed_st and w.get("main_category") != "airing"
+            ]
 
     if gap_view in ("todo", "pushed_pending"):
         work_records = [
@@ -350,8 +374,9 @@ async def _apply_in_place_recalculate(
             )
         cached_tot = int(cached_m.get("total") or cached_m.get("episode_count") or 0) if cached_m else 0
         tot = active_map.get("expected_total_episodes") or (cached_tot if cached_tot > 0 else rec.total_episodes)
+        default_fin = rec.season_finished if rec.season_finished is not None else True
         finished = bool(
-            (cached_m or {}).get("finished", True) if cached_m else True
+            (cached_m or {}).get("finished", default_fin) if cached_m else default_fin
         )
         rec.total_episodes = tot
         rec.season_finished = finished
@@ -374,7 +399,11 @@ async def _apply_in_place_recalculate(
                 {**conflict, "blocking": False, "resolved_by_mapping": True, "previous_conflict": conflict},
                 ensure_ascii=False,
             )
-        rec.last_checked_at = now_dt
+        evidence = dict(evidence or {})
+        evidence["last_recalculated_at"] = now_dt.isoformat()
+        rec.evidence_json = json.dumps(evidence, ensure_ascii=False)
+        if rec.last_checked_at is None:
+            rec.last_checked_at = now_dt
         active_key = build_identity_key(rec.show_name, rec.tmdb_id, rec.season_number, active_map)
         await supersede_changed_identity_records(db, rec.task_id, rec.season_path, active_key, rec.id)
         return True
@@ -411,7 +440,11 @@ async def _apply_in_place_recalculate(
             rec.mapping_json = "{}"
             rec.status = "identity_review"
             rec.status_detail = eval_conflict.get("reason") or eval_conflict.get("message") or rec.status_detail
-            rec.last_checked_at = now_dt
+            evidence = dict(evidence or {})
+            evidence["last_recalculated_at"] = now_dt.isoformat()
+            rec.evidence_json = json.dumps(evidence, ensure_ascii=False)
+            if rec.last_checked_at is None:
+                rec.last_checked_at = now_dt
             active_key = build_identity_key(rec.show_name, rec.tmdb_id, rec.season_number, None)
             await supersede_changed_identity_records(db, rec.task_id, rec.season_path, active_key, rec.id)
             return True
@@ -437,17 +470,62 @@ async def _apply_in_place_recalculate(
     dual_info = (evidence or {}).get("dual_archive_info") or {}
     archived_eps = {int(x) for x in (dual_info.get("archived_episodes") or []) if str(x).isdigit()}
 
-    if tot and tot > 0:
+    evidence = dict(evidence or {})
+    b_ev = dict(evidence.get("broadcast_evidence") or {})
+    cached_b_ev = dict((cached_season or {}).get("broadcast_evidence") or {}) if isinstance(cached_season, dict) else {}
+    orig_fetched_at = b_ev.get("fetched_at") or cached_b_ev.get("fetched_at") or (rec.last_checked_at.isoformat() if rec.last_checked_at else "")
+    eff_b_ev = {**cached_b_ev, **b_ev}
+    if orig_fetched_at:
+        eff_b_ev["fetched_at"] = orig_fetched_at
+
+    # 检查旧排期是否已跨过今日 (Section 3 & Section 4)
+    today_iso = datetime.now().strftime("%Y-%m-%d")
+    upc_sched = list(eff_b_ev.get("upcoming_schedule") or [])
+    if upc_sched:
+        past_upc = [x for x in upc_sched if str(x.get("air_date") or "9999-99-99")[:10] <= today_iso]
+        if past_upc:
+            eff_b_ev["schedule_expired_past_today"] = True
+            if len(past_upc) == len(upc_sched) and not finished:
+                eff_b_ev["status"] = "evidence_pending"
+                eff_b_ev["missing_evidence_reason"] = "上次排期已跨过今日，需重新初检核实最新播期与入库情况"
+
+    # L04: 旧记录仅靠 180 天推定、或只有 season_finished=false 且无核实排期依据时，转入证据待决
+    is_legacy_unverified_false = (
+        rec.season_finished is False
+        and rec.status != "airing"
+        and not eff_b_ev.get("schedule_verified")
+        and eff_b_ev.get("status") not in ("airing", "upcoming", "finished")
+        and not (rec.status == "review_needed" and "连载中" in str(rec.status_detail or ""))
+    )
+    if (
+        eff_b_ev.get("status") == "evidence_pending"
+        or eff_b_ev.get("heuristic_180d_blocked")
+        or is_legacy_unverified_false
+    ):
+        pend_reason = eff_b_ev.get("missing_evidence_reason") or "旧记录缺少本季分集播期或终集依据"
+        eff_b_ev["status"] = "evidence_pending"
+        eff_b_ev["schedule_verified"] = False
+        eff_b_ev["missing_evidence_reason"] = pend_reason
+        rec.status = "period_review"
+        rec.season_finished = False
+        rec.missing_episodes_json = "[]"
+        rec.status_detail = f"证据待决 · 安全保留：{pend_reason}（已用上次初检资料重新核算）"
+    elif tot and tot > 0:
         combined_eps = sorted(set(recognized) | archived_eps) if archived_eps else recognized
         expected_set = set(range(1, tot + 1))
-        missing = [ep for ep in range(1, tot + 1) if ep not in set(combined_eps)]
+        aired_in_ev = [int(x) for x in (eff_b_ev.get("aired_episodes") or []) if str(x).isdigit() and int(x) > 0]
+        if not finished and aired_in_ev:
+            missing = [ep for ep in sorted(set(aired_in_ev)) if ep not in set(combined_eps)]
+        else:
+            missing = [ep for ep in range(1, tot + 1) if ep not in set(combined_eps)]
         rec.total_episodes = tot
         rec.season_finished = finished
         rec.missing_episodes_json = json.dumps(missing)
-        if archived_eps and expected_set <= archived_eps and recognized and set(recognized) <= archived_eps:
+        # L06: 仅当已证实本季播毕 (finished=True) 时，才允许提前进入 already_archived 或 archive_ready
+        if finished and archived_eps and expected_set <= archived_eps and recognized and set(recognized) <= archived_eps:
             rec.status = "already_archived"
             rec.status_detail = f"归档库已包含源端正片集号 {sorted(set(recognized))}，可复核源端重复版本"
-        elif archived_eps and not missing and not duplicates and (set(recognized) - archived_eps):
+        elif finished and archived_eps and not missing and not duplicates and (set(recognized) - archived_eps):
             rec.status = "archive_ready"
             rec.status_detail = f"两库合计已齐，源端含增量集 {sorted(set(recognized) - archived_eps)}"
         else:
@@ -469,8 +547,14 @@ async def _apply_in_place_recalculate(
         elif recognized:
             rec.status = "unknown"
             rec.status_detail = "已解除外文发行名误报冲突，待重新匹配官方集数后核算。"
+
+    if eff_b_ev:
+        evidence["broadcast_evidence"] = eff_b_ev
+    evidence["last_recalculated_at"] = now_dt.isoformat()
+    rec.evidence_json = json.dumps(evidence, ensure_ascii=False)
     rec.mapping_json = "{}"
-    rec.last_checked_at = now_dt
+    if rec.last_checked_at is None:
+        rec.last_checked_at = now_dt
     active_key = build_identity_key(rec.show_name, rec.tmdb_id, rec.season_number, None)
     await supersede_changed_identity_records(db, rec.task_id, rec.season_path, active_key, rec.id)
     return True
@@ -622,6 +706,13 @@ async def _run_task_reevaluate_impl(
     after_counts = dict(Counter(r.status for r in active_after))
     task_summary = await refresh_task_summary(task_id, db)
     await db.commit()
+    expired_hint = ""
+    for r in active_after:
+        ev_r = _safe_json(getattr(r, "evidence_json", None), {})
+        if ((ev_r.get("broadcast_evidence") or {}) if isinstance(ev_r, dict) else {}).get("schedule_expired_past_today"):
+            expired_hint = "；部分剧季旧播期已跨过今日，建议点击「重新初检」更新"
+            break
+    mode_prefix = "已用上次初检资料重新核算" if not req.fetch_remote else "已完成远程重查与重新核算"
     return {
         "ok": True,
         "updated_count": updated_count,
@@ -632,8 +723,8 @@ async def _run_task_reevaluate_impl(
         "directory_groups": dir_groups,
         "summary": task_summary,
         "message": (
-            f"已完成只读归属重评估与核算（重算 {updated_count} 季，状态/冲突变更 {len(changes)} 项，"
-            f"保留已处理记录 {preserved_handled} 季，多目录待确认组 {task_summary.get('pending_directory_groups', 0)} 个）"
+            f"{mode_prefix}：已完成只读归属重评估与核算（重算 {updated_count} 季，状态/冲突变更 {len(changes)} 项，"
+            f"保留已处理记录 {preserved_handled} 季，多目录待确认组 {task_summary.get('pending_directory_groups', 0)} 个）{expired_hint}"
         ),
     }
 
@@ -759,6 +850,10 @@ async def clean_directory_group_source_season(
     rec = await db.get(SeasonRecord, body.season_record_id)
     if not rec or rec.task_id != task_id:
         raise HTTPException(status_code=404, detail="源季记录不存在")
+
+    from app.core.season_classifier import get_record_work_main_category
+    if rec.status == "airing" or rec.season_finished is False or (await get_record_work_main_category(db, rec)) == "airing":
+        raise HTTPException(status_code=409, detail="当前作品季处于「连载留源」状态，严禁清理源端")
 
     try:
         entries = json.loads(group.paths_json or "[]")
@@ -1105,11 +1200,16 @@ async def mark_season_handled(task_id: str, record_id: str, db: AsyncSession = D
     from app.services.task_service import TASK_RUNNING_WORKERS
     if task.status in ("running", "paused") or task_id in TASK_RUNNING_WORKERS:
         raise HTTPException(status_code=409, detail="请在初检结束后标记手动处理")
+    from app.core.season_classifier import get_record_work_main_category
+    work_cat = await get_record_work_main_category(db, rec)
+    if rec.status == "airing" or work_cat == "airing":
+        raise HTTPException(status_code=409, detail="连载留源剧季无需且不可标记为手动处理")
     recognized = json.loads(rec.recognized_episodes_json or "[]")
     is_anomaly = (
-        rec.status in ("already_archived", "unknown", "archive_check", "period_review", "identity_review")
-        or not rec.total_episodes
-        or (rec.status != "archive_ready" and max(recognized, default=0) > rec.total_episodes)
+        work_cat == "anomaly"
+        or rec.status in ("already_archived", "unknown", "archive_check", "period_review", "identity_review")
+        or (not rec.total_episodes and rec.status != "airing")
+        or (rec.status not in ("archive_ready", "airing") and bool(rec.total_episodes) and max(recognized, default=0) > rec.total_episodes)
     )
     if not is_anomaly:
         raise HTTPException(status_code=409, detail="仅异常剧集可标记为手动处理")

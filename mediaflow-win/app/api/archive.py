@@ -652,6 +652,15 @@ async def preview_archive(
                 items.append(item_plan)
                 continue
 
+            from app.core.season_classifier import get_record_work_main_category
+            work_cat = await get_record_work_main_category(db, rec)
+            if work_cat == "airing" or rec.status == "airing":
+                item_plan["block_reason"] = "当前作品季处于「连载留源」状态，连载期暂不开放归档"
+                item_plan["summary_lines"] = [f"✗ {item_plan['block_reason']}"]
+                blocked_ids.append(rec.id)
+                items.append(item_plan)
+                continue
+
             if rec.status not in ("archive_ready", "period_ready"):
                 item_plan["block_reason"] = f"当前状态为 {rec.status}，不满足归档条件"
                 item_plan["summary_lines"] = [f"✗ {item_plan['block_reason']}"]
@@ -1121,6 +1130,14 @@ async def execute_archive(
             )
             errors.append(err_msg)
             season_results.append(_make_receipt(rec, "blocked", err_msg, next_step="goto_anomaly"))
+            continue
+
+        from app.core.season_classifier import get_record_work_main_category
+        work_cat = await get_record_work_main_category(db, rec)
+        if work_cat == "airing" or rec.status == "airing":
+            err_msg = f"{rec.show_name} S{rec.season_number:02d}: 当前作品季处于「连载留源」状态，安全拦截归档"
+            errors.append(err_msg)
+            season_results.append(_make_receipt(rec, "blocked", err_msg, next_step="stay_in_airing"))
             continue
 
         if rec.status not in ("archive_ready", "period_ready"):
@@ -2227,6 +2244,12 @@ async def clean_duplicates(
         for rec in records:
             season_path = rec.season_path
 
+            from app.core.season_classifier import get_record_work_main_category
+            work_cat = await get_record_work_main_category(db, rec)
+            if work_cat == "airing" or rec.status == "airing" or (rec.season_finished is False and "连载中" in str(rec.status_detail or "")):
+                errors.append(f"{rec.show_name}：当前作品季处于「连载留源」状态，连载期暂不开放重复版本清理")
+                continue
+
             if rec.status in ("archive_check", "period_review", "period_ready", "period_missing", "identity_review", "already_archived", "manually_handled", "verified_complete"):
                 errors.append(f"{rec.show_name}：当前处理方式不适用重复版本清理")
                 continue
@@ -2465,6 +2488,20 @@ async def clean_duplicates_preview(
     try:
         for rec in records:
             season_path = rec.season_path
+            from app.core.season_classifier import get_record_work_main_category
+            work_cat = await get_record_work_main_category(db, rec)
+            if work_cat == "airing" or rec.status == "airing" or (rec.season_finished is False and "连载中" in str(rec.status_detail or "")):
+                previews.append(CleanPreviewItem(
+                    season_record_id=rec.id,
+                    show_name=rec.show_name,
+                    season_number=rec.season_number,
+                    can_clean=False,
+                    reason="当前作品季处于「连载留源」状态，连载期暂不开放重复版本清理",
+                    version_note="",
+                    to_keep=[],
+                    to_delete=[],
+                ))
+                continue
             try:
                 all_files = await cd2.list_files(season_path, force_refresh=True)
             except Exception as e:
@@ -2950,6 +2987,14 @@ async def preview_delete_source_season(
     if not rec:
         return {"ok": False, "message": "剧季记录不存在"}
 
+    from app.core.season_classifier import get_record_work_main_category
+    work_cat = await get_record_work_main_category(db, rec)
+    if work_cat == "airing" or rec.status == "airing":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="当前作品季处于「连载留源」状态，连载期严禁执行单季删源"
+        )
+
     if rec.status not in ("download_needed", "period_missing"):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -3135,6 +3180,14 @@ async def delete_source_season(
     rec = await db.get(SeasonRecord, body.season_record_id)
     if not rec:
         return StatusResponse(ok=False, message="剧季记录不存在")
+
+    from app.core.season_classifier import get_record_work_main_category
+    work_cat = await get_record_work_main_category(db, rec)
+    if work_cat == "airing" or rec.status == "airing":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="当前作品季处于「连载留源」状态，连载期严禁执行单季删源"
+        )
 
     if rec.status not in ("download_needed", "period_missing"):
         raise HTTPException(

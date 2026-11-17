@@ -292,6 +292,215 @@ class TestSeasonClassifier(unittest.TestCase):
         self.assertTrue(comp_card.get("is_complementary_group"))
         self.assertEqual(comp_card.get("recognized_episodes"), [1, 2, 3, 4, 5, 6])
 
+    def test_l01_l02_l03_l04_l05_l07_l08_l09_airing_rules(self):
+        """验证连载留源 L01-L09 核心分流、三组进度、多目录去重与失效转异常."""
+        # L01: 已播 8/12，八集收齐，后四集有未来排期 -> 留源 1 季，显示已播 8 集，已收齐；4 集待播，无缺集提示
+        rec_l01 = {
+            "id": "l01-s2",
+            "show_name": "沿海列车",
+            "tmdb_id": "8001",
+            "season_number": 2,
+            "season_path": "/src/沿海列车/Season 2",
+            "status": "airing",
+            "season_finished": False,
+            "total_episodes": 12,
+            "recognized_episodes": list(range(1, 9)),
+            "missing_episodes": [9, 10, 11, 12],
+            "duplicate_episodes": [],
+            "evidence": {
+                "broadcast_evidence": {
+                    "status": "airing",
+                    "schedule_verified": True,
+                    "aired_episodes": list(range(1, 9)),
+                    "upcoming_episodes": [9, 10, 11, 12],
+                    "next_episode_number": 9,
+                    "next_air_date": "2099-05-01",
+                }
+            },
+        }
+        w_l01, c_l01 = consolidate_seasons_to_work_records([rec_l01])
+        self.assertEqual(c_l01["airing"], 1)
+        self.assertEqual(w_l01[0]["missing_episodes"], [], "未来待播集不得作为缺集暴露")
+        summary_l01 = w_l01[0]["airing_view"]["card_summary"]
+        self.assertIn("已播 8 集，已收齐", summary_l01)
+        self.assertIn("4 集待播", summary_l01)
+
+        # L02: 源端 E01-E05,E07，归档端 E08，E06 在途 -> 先显示已收 7、在途 1；E06 入库后 -> 已收 8、在途消失
+        rec_l02_before = {
+            "id": "l02-s2",
+            "show_name": "沿海列车",
+            "tmdb_id": "8002",
+            "season_number": 2,
+            "season_path": "/src/沿海列车/Season 2",
+            "status": "airing",
+            "season_finished": False,
+            "total_episodes": 12,
+            "recognized_episodes": [1, 2, 3, 4, 5, 7],
+            "gap_fill_state": {"pushed_episodes": [6]},
+            "evidence": {
+                "dual_archive_info": {
+                    "source_episodes": [1, 2, 3, 4, 5, 7],
+                    "archived_episodes": [8],
+                },
+                "broadcast_evidence": {
+                    "status": "airing",
+                    "schedule_verified": True,
+                    "aired_episodes": list(range(1, 9)),
+                    "upcoming_episodes": [9, 10, 11, 12],
+                },
+            },
+        }
+        w_l02_b, _ = consolidate_seasons_to_work_records([rec_l02_before])
+        av_b = w_l02_b[0]["airing_view"]
+        self.assertEqual(len(av_b["collected_aired_episodes"]), 7)
+        self.assertEqual(av_b["in_transit_episodes"], [6])
+        self.assertIn("已播 8 集，已收 7 集", av_b["card_summary"])
+        self.assertIn("E06 已提交下载，等待入库", av_b["card_summary"])
+
+        rec_l02_after = {
+            **rec_l02_before,
+            "recognized_episodes": [1, 2, 3, 4, 5, 6, 7],
+            "evidence": {
+                **rec_l02_before["evidence"],
+                "dual_archive_info": {
+                    "source_episodes": [1, 2, 3, 4, 5, 6, 7],
+                    "archived_episodes": [8],
+                },
+            },
+        }
+        w_l02_a, _ = consolidate_seasons_to_work_records([rec_l02_after])
+        av_a = w_l02_a[0]["airing_view"]
+        self.assertEqual(len(av_a["collected_aired_episodes"]), 8)
+        self.assertEqual(av_a["in_transit_episodes"], [])
+        self.assertNotIn("已提交下载", av_a["card_summary"])
+
+        # L03: 同剧 S01 已播毕齐全，S02 在播 -> S01 归入 archive，S02 归入 airing
+        rec_s01_done = {
+            "id": "l03-s1",
+            "show_name": "跨季剧",
+            "tmdb_id": "8003",
+            "season_number": 1,
+            "status": "archive_ready",
+            "season_finished": True,
+            "total_episodes": 10,
+            "recognized_episodes": list(range(1, 11)),
+        }
+        rec_s02_air = {
+            "id": "l03-s2",
+            "show_name": "跨季剧",
+            "tmdb_id": "8003",
+            "season_number": 2,
+            "status": "airing",
+            "season_finished": False,
+            "total_episodes": 10,
+            "recognized_episodes": [1, 2, 3],
+        }
+        _, c_l03 = consolidate_seasons_to_work_records([rec_s01_done, rec_s02_air])
+        self.assertEqual(c_l03["archive"], 1)
+        self.assertEqual(c_l03["airing"], 1)
+
+        # L04: 旧记录仅有 season_finished=False（无状态/无排期证据），或 heuristic_180d_blocked -> 归入异常剧集 system_tracking
+        rec_legacy_false = {
+            "id": "l04-legacy",
+            "show_name": "旧布尔剧",
+            "tmdb_id": "8004",
+            "season_number": 1,
+            "season_finished": False,
+            "total_episodes": 12,
+            "recognized_episodes": [1, 2],
+        }
+        cat_l04a, act_l04a = classify_single_record(rec_legacy_false)
+        self.assertEqual((cat_l04a, act_l04a), ("anomaly", "system_tracking"))
+
+        rec_181d = {
+            "id": "l04-181d",
+            "show_name": "缺明细181天剧",
+            "tmdb_id": "8004",
+            "season_number": 2,
+            "status": "airing",
+            "season_finished": False,
+            "evidence": {
+                "broadcast_evidence": {
+                    "status": "evidence_pending",
+                    "heuristic_180d_blocked": True,
+                    "missing_evidence_reason": "季明细缺失，仅凭首播距今 181 天无法确认播毕",
+                }
+            },
+        }
+        cat_l04b, act_l04b = classify_single_record(rec_181d)
+        self.assertEqual((cat_l04b, act_l04b), ("anomaly", "system_tracking"))
+
+        # L05: 连载季 E05 有两份，底层 review_needed；同时关联历史物理记录带 download_needed -> 主卡仅 1 张且为 airing
+        rec_l05_dup = {
+            "id": "l05-dup",
+            "show_name": "连载双版本剧",
+            "tmdb_id": "8005",
+            "season_number": 1,
+            "season_path": "/src/A/Season 1",
+            "status": "review_needed",
+            "status_detail": "连载中存在重复版本 (第 5 集)，需清理低质冗余",
+            "season_finished": False,
+            "total_episodes": 12,
+            "recognized_episodes": [1, 2, 3, 4, 5],
+            "duplicate_episodes": [5],
+        }
+        rec_l05_hist_gap = {
+            "id": "l05-gap",
+            "show_name": "连载双版本剧",
+            "tmdb_id": "8005",
+            "season_number": 1,
+            "season_path": "/src/B/Season 1",
+            "status": "download_needed",
+            "season_finished": True,
+            "total_episodes": 12,
+            "recognized_episodes": [1, 2, 3],
+            "missing_episodes": list(range(4, 13)),
+        }
+        w_l05, c_l05 = consolidate_seasons_to_work_records([rec_l05_dup, rec_l05_hist_gap])
+        self.assertEqual(len(w_l05), 1)
+        self.assertEqual(c_l05["airing"], 1)
+        self.assertEqual(c_l05["download"], 0)
+        self.assertEqual(c_l05["review"], 0)
+        self.assertEqual(w_l05[0]["airing_view"]["duplicate_episodes"], [5])
+
+        # L07: 同季两个已绑定物理目录，正片重叠 (E03,E04 重叠) -> 确认有效时去重计数(6集)、只占 1 季；确认失效后移到异常剧集
+        rec_l07_a = {
+            "id": "l07-a",
+            "show_name": "双目录连载剧",
+            "tmdb_id": "8007",
+            "season_number": 1,
+            "season_path": "/src/DirA/Season 1",
+            "status": "airing",
+            "season_finished": False,
+            "total_episodes": 12,
+            "recognized_episodes": [1, 2, 3, 4],
+            "evidence": {"directory_group": {"id": "grp-8007", "requires_confirm": False, "status": "confirmed"}},
+        }
+        rec_l07_b = {
+            "id": "l07-b",
+            "show_name": "双目录连载剧",
+            "tmdb_id": "8007",
+            "season_number": 1,
+            "season_path": "/src/DirB/Season 1",
+            "status": "airing",
+            "season_finished": False,
+            "total_episodes": 12,
+            "recognized_episodes": [3, 4, 5, 6],
+            "evidence": {"directory_group": {"id": "grp-8007", "requires_confirm": False, "status": "confirmed"}},
+        }
+        w_l07_ok, c_l07_ok = consolidate_seasons_to_work_records([rec_l07_a, rec_l07_b])
+        self.assertEqual(len(w_l07_ok), 1)
+        self.assertEqual(c_l07_ok["airing"], 1)
+        self.assertEqual(w_l07_ok[0]["recognized_episodes"], [1, 2, 3, 4, 5, 6], "重叠目录必须按集号去重计数")
+        self.assertEqual(w_l07_ok[0]["airing_view"]["cross_dir_overlap_episodes"], [3, 4])
+
+        # 当目录组确认失效 (grp-8007 进入 pending_dir_group_ids) -> 唯一主卡移到异常剧集
+        w_l07_inv, c_l07_inv = consolidate_seasons_to_work_records([rec_l07_a, rec_l07_b], pending_dir_group_ids={"grp-8007"})
+        self.assertEqual(len(w_l07_inv), 1)
+        self.assertEqual(c_l07_inv["airing"], 0)
+        self.assertEqual(c_l07_inv["anomaly"], 1)
+        self.assertEqual(w_l07_inv[0]["main_category"], "anomaly")
+
 
 if __name__ == "__main__":
     unittest.main()

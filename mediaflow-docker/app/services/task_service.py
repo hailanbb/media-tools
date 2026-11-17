@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -235,6 +236,55 @@ async def execute_inspection(task_id: str, db: AsyncSession) -> InspectionResult
         now_checked = datetime.now(timezone.utc)
         scanned_show_paths = {diag.show_path for diag in result.seasons}
 
+        # 快照上一轮记录以支持连载季上游请求失败保护与季终转出追踪 (Section 4, L10, L11)
+        from app.core.season_classifier import build_work_key, consolidate_seasons_to_work_records
+        prev_all_rows = list(
+            (await db.scalars(select(SeasonRecord).where(SeasonRecord.task_id == task_id))).all()
+        )
+        prev_by_season_path = {r.season_path: r for r in prev_all_rows if r.season_path}
+        prev_work_recs, _ = consolidate_seasons_to_work_records(prev_all_rows)
+        prev_airing_by_wkey = {
+            build_work_key(w): w for w in prev_work_recs if w.get("main_category") == "airing"
+        }
+
+        today_iso = datetime.now().strftime("%Y-%m-%d")
+        for diag in result.seasons:
+            ev_d = dict(diag.evidence or {})
+            if ev_d.get("meta_status") == "fetch_failed" and diag.season_path in prev_by_season_path:
+                prev_r = prev_by_season_path[diag.season_path]
+                try:
+                    prev_ev = json.loads(prev_r.evidence_json or "{}")
+                except Exception:
+                    prev_ev = {}
+                prev_b_ev = dict((prev_ev.get("broadcast_evidence") or {}) if isinstance(prev_ev, dict) else {})
+                if prev_r.status == "airing" or prev_b_ev.get("status") in ("airing", "upcoming"):
+                    upc_sched = list(prev_b_ev.get("upcoming_schedule") or [])
+                    all_expired = bool(upc_sched) and all(
+                        str(x.get("air_date") or "9999-99-99")[:10] <= today_iso for x in upc_sched
+                    )
+                    if all_expired:
+                        diag.status = "period_review"
+                        diag.season_finished = False
+                        diag.total_episodes = prev_r.total_episodes
+                        diag.status_detail = "证据待决 · 安全保留：本次核查未完成且上次排期已失效，需重新初检核实最新播期。"
+                        prev_b_ev["status"] = "evidence_pending"
+                        prev_b_ev["last_check_incomplete"] = True
+                        ev_d["meta_status"] = "ok"
+                        ev_d["broadcast_evidence"] = prev_b_ev
+                        diag.evidence = ev_d
+                    else:
+                        diag.status = "airing"
+                        diag.season_finished = False
+                        diag.total_episodes = prev_r.total_episodes
+                        prev_b_ev["last_check_incomplete"] = True
+                        prev_b_ev["last_check_error"] = diag.status_detail
+                        base_prev_detail = re.sub(r"（本次核查未完成.*?）", "", str(prev_r.status_detail or "连载留源中"))
+                        diag.status_detail = f"{base_prev_detail}（本次核查未完成，保留上次有效结论）"
+                        ev_d["meta_status"] = "ok"
+                        ev_d["broadcast_evidence"] = prev_b_ev
+                        diag.evidence = ev_d
+        result.compute_summary()
+
         if is_stopped:
             # 部分完成中止：仅删除本轮已完整扫描的剧目旧记录，保留其余未扫描剧目的历史记录
             old_records_to_del = await db.scalars(
@@ -248,14 +298,19 @@ async def execute_inspection(task_id: str, db: AsyncSession) -> InspectionResult
             await db.flush()
         else:
             # 完整扫描成功：全量替换该任务旧记录
-            old_records = await db.execute(
-                select(SeasonRecord).where(SeasonRecord.task_id == task_id)
-            )
-            for old in old_records.scalars().all():
+            for old in prev_all_rows:
                 await db.delete(old)
             await db.flush()
 
         for diag in result.seasons:
+            ev_diag = diag.evidence or {}
+            b_ev_diag = (ev_diag.get("broadcast_evidence") or {}) if isinstance(ev_diag, dict) else {}
+            prev_r = prev_by_season_path.get(diag.season_path)
+            rec_checked_at = (
+                prev_r.last_checked_at
+                if (b_ev_diag.get("last_check_incomplete") and prev_r and prev_r.last_checked_at)
+                else now_checked
+            )
             record = SeasonRecord(
                 task_id=task_id,
                 show_name=diag.show_name,
@@ -272,10 +327,10 @@ async def execute_inspection(task_id: str, db: AsyncSession) -> InspectionResult
                 status_detail=diag.status_detail,
                 archive_target_path=diag.archive_target_path,
                 season_finished=diag.season_finished,
-                evidence_json=json.dumps(diag.evidence or {}, ensure_ascii=False),
+                evidence_json=json.dumps(ev_diag, ensure_ascii=False),
                 conflict_json=json.dumps(diag.conflict or {}, ensure_ascii=False),
                 mapping_json=json.dumps(diag.mapping or {}, ensure_ascii=False),
-                last_checked_at=now_checked,
+                last_checked_at=rec_checked_at,
             )
             db.add(record)
             await db.flush()
@@ -293,11 +348,43 @@ async def execute_inspection(task_id: str, db: AsyncSession) -> InspectionResult
                 new_season_record_id=record.id,
             )
 
-        # 5. 更新任务汇总（扣除已推送全涵盖，保留真实待补清单）
+        # 5. 更新任务汇总（扣除已推送全涵盖，保留真实待补清单）与连载季转出记录
         final_status = "stopped" if is_stopped else "completed"
 
         task.status = final_status  # type: ignore[assignment]
-        await refresh_task_summary(task_id, db)
+        summary_dict = await refresh_task_summary(task_id, db)
+
+        airing_transitions: list[dict] = []
+        if prev_airing_by_wkey:
+            curr_rows = await get_task_seasons(task_id, None, db)
+            curr_work_recs, _ = consolidate_seasons_to_work_records(curr_rows)
+            curr_by_wkey = {build_work_key(w): w for w in curr_work_recs}
+            cat_labels = {
+                "archive": "齐全可归档",
+                "download": "真缺集待补",
+                "review": "待复核清理",
+                "anomaly": "异常剧集",
+            }
+            for wkey, prev_w in prev_airing_by_wkey.items():
+                curr_w = curr_by_wkey.get(wkey)
+                if curr_w and curr_w.get("main_category") != "airing":
+                    to_cat = str(curr_w.get("main_category") or "")
+                    to_label = cat_labels.get(to_cat, to_cat)
+                    airing_transitions.append({
+                        "work_key": wkey,
+                        "record_id": curr_w.get("id"),
+                        "show_name": curr_w.get("show_name"),
+                        "season_number": curr_w.get("season_number"),
+                        "from_category": "airing",
+                        "to_category": to_cat,
+                        "to_category_label": to_label,
+                        "reason": curr_w.get("status_detail") or f"本季已播毕，转入「{to_label}」",
+                    })
+            if airing_transitions and isinstance(summary_dict, dict):
+                summary_dict["last_airing_transitions"] = airing_transitions
+                summary_dict["still_airing_count"] = summary_dict.get("airing", 0)
+                task.summary_json = json.dumps(summary_dict, ensure_ascii=False)
+
         await db.commit()
 
         total_db_seasons = len(await get_task_seasons(task_id, None, db))
