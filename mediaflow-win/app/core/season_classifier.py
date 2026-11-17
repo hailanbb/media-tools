@@ -39,6 +39,10 @@ ANOMALY_STATUSES = {
     "already_archived",
     "archive_check",
     "unknown",
+    "conflict",
+    "failed",
+    "partial_archived",
+    "archive_unverified",
 }
 
 # 属于已完结/终态的状态集合，不落入五大待办模块中的任何一类
@@ -157,8 +161,8 @@ def classify_single_record(
     if status == "airing" or (season_finished is False and status not in ("archive_ready", "period_ready")):
         return "airing", "skip"
 
-    # 3. 真缺集待补 (download) 判定（含缺集兼重复，缺集优先补齐）
-    if status in ("download_needed", "period_missing") or (missing and status not in ("archive_ready", "period_ready")):
+    # 3. 真缺集待补 (download) 判定（含缺集兼重复，缺集优先补齐；历史状态与缺集证据矛盾时以缺集为准）
+    if status in ("download_needed", "period_missing") or missing:
         gap_state = get_record_field(rec, "gap_fill_state") or {}
         if gap_state.get("view_bucket") == "pushed_pending":
             return "download", "inspect_gap_detail"
@@ -167,30 +171,56 @@ def classify_single_record(
     regular_duplicates = [d for d in duplicates if isinstance(d, int) and d > 0]
 
     # 4. 待复核清理 (review) 判定（正片已齐但有正片重复副本或可淘汰冗余）
-    if status not in ("archive_ready", "period_ready") and (
-        status == "review_needed" or (regular_duplicates and not missing)
-    ):
+    if status == "review_needed" or (regular_duplicates and status != "period_ready"):
         return "review", "clean"
 
-    # 5. 齐全可归档 (archive) 判定
-    if status in ("archive_ready", "period_ready") or (
-        not missing and not regular_duplicates and total_eps and len([e for e in rec_eps if e > 0]) >= total_eps
+    # 5. 齐全可归档 (archive) 判定（须具备总集数与本地/跨端覆盖依据）
+    local_ep_count = int(get_record_field(rec, "local_episode_count") or 0)
+    dual_archived_eps = (evidence.get("dual_archive_info") or {}).get("archived_episodes") or []
+    has_coverage_evidence = bool(rec_eps) or local_ep_count > 0 or bool(dual_archived_eps)
+    valid_total_eps = bool(total_eps and int(total_eps) > 0)
+
+    if status == "period_ready" and (total_eps is None or int(total_eps) > 0) and has_coverage_evidence:
+        return "archive", "archive"
+
+    if status == "archive_ready" and valid_total_eps and has_coverage_evidence:
+        return "archive", "archive"
+
+    if (
+        not missing
+        and not regular_duplicates
+        and valid_total_eps
+        and len([e for e in rec_eps if isinstance(e, int) and e > 0]) >= int(total_eps)
     ):
         return "archive", "archive"
 
-    # 兜底
-    if missing:
-        return "download", "download"
-    return "archive", "archive"
+    # 兜底：无明确证据或未知状态转入异常剧集核对，严禁无依据兜底落入 archive
+    return "anomaly", "inspect_info"
 
 
 def build_work_key(rec: Any) -> str:
-    """构建作品季唯一聚合主键 (tmdb_id, season_number) 或 (show_name, season_number)."""
+    """构建作品季唯一聚合主键 (tmdb_id, season_number) 或带路径隔离的回退键.
+
+    遵循规范：
+    - 已确认“有意共存 (intentional_coexist)”的收藏保持各自独立卡片与归档路径，不合并；
+    - 缺 TMDB ID 时不能仅凭名称相同合并不同物理目录。
+    """
     tmdb_id = get_record_field(rec, "tmdb_id")
     season_number = get_record_field(rec, "season_number", 1)
+    show_name = str(get_record_field(rec, "show_name") or "unknown").strip().lower()
+    path_token = str(
+        get_record_field(rec, "show_path") or get_record_field(rec, "season_path") or ""
+    ).strip().rstrip("/")
+    evidence = _safe_json(
+        get_record_field(rec, "evidence_json", None) or get_record_field(rec, "evidence", None), {}
+    )
+    dir_grp = (evidence or {}).get("directory_group") or {}
+    if dir_grp.get("confirmation_mode") == "intentional_coexist" or dir_grp.get("status") == "coexist":
+        return f"coexist:{tmdb_id or show_name}:{path_token}:S{season_number}"
     if tmdb_id and str(tmdb_id).isdigit() and int(tmdb_id) > 0:
         return f"tmdb:{tmdb_id}:S{season_number}"
-    show_name = str(get_record_field(rec, "show_name") or "unknown").strip().lower()
+    if path_token:
+        return f"show:{show_name}:{path_token}:S{season_number}"
     return f"show:{show_name}:S{season_number}"
 
 
@@ -249,8 +279,58 @@ def consolidate_seasons_to_work_records(
         # 取组内最优先的分类 (priority 数值最小)
         best_cat = min(active_items, key=lambda x: CATEGORY_PRIORITY.get(x[1], 99))[1]
 
+        # 检查是否为同一已确认目标下的互补多源目录组 (A06)
+        is_complementary_group = False
+        union_pos_eps: set[int] = set()
+        if len(active_items) > 1 and work_key.startswith("tmdb:") and best_cat not in ("anomaly", "airing"):
+            tot_vals = {
+                int(get_record_field(it[0], "total_episodes") or 0)
+                for it in active_items
+                if get_record_field(it[0], "total_episodes")
+            }
+            if len(tot_vals) == 1 and next(iter(tot_vals)) > 0:
+                expected_tot = next(iter(tot_vals))
+                has_dup_or_overlap = False
+                targets_set: set[str] = set()
+                for it_rec, _, _ in active_items:
+                    dups = _safe_json(
+                        get_record_field(it_rec, "duplicate_episodes_json")
+                        or get_record_field(it_rec, "duplicate_episodes"),
+                        [],
+                    )
+                    if any(isinstance(d, int) and d > 0 for d in dups):
+                        has_dup_or_overlap = True
+                        break
+                    r_eps = {
+                        int(e)
+                        for e in _safe_json(
+                            get_record_field(it_rec, "recognized_episodes_json")
+                            or get_record_field(it_rec, "recognized_episodes"),
+                            [],
+                        )
+                        if str(e).isdigit() and int(e) > 0
+                    }
+                    if union_pos_eps & r_eps:
+                        has_dup_or_overlap = True
+                        break
+                    union_pos_eps |= r_eps
+                    arc_t = str(get_record_field(it_rec, "archive_target_path") or "").strip().rstrip("/")
+                    if arc_t:
+                        targets_set.add(arc_t)
+                if (
+                    not has_dup_or_overlap
+                    and set(range(1, expected_tot + 1)) <= union_pos_eps
+                    and len(targets_set) == 1
+                ):
+                    is_complementary_group = True
+                    best_cat = "archive"
+
         # 从该分类中选出最具有代表性的记录作为主记录
-        candidates = [item for item in active_items if item[1] == best_cat]
+        candidates = (
+            active_items
+            if is_complementary_group
+            else [item for item in active_items if item[1] == best_cat]
+        )
         # 优先选本地正片数更多、或有路径更明确的记录
         def _rank_candidate(cand: tuple[Any, str, str]) -> int:
             rec = cand[0]
@@ -261,6 +341,8 @@ def consolidate_seasons_to_work_records(
 
         primary_item = max(candidates, key=_rank_candidate)
         primary_rec, _, primary_act = primary_item
+        if is_complementary_group:
+            primary_act = "archive"
 
         # 整理关联记录摘要
         associated: list[dict[str, Any]] = []
@@ -326,6 +408,17 @@ def consolidate_seasons_to_work_records(
         base_dict["is_primary_work_record"] = True
         base_dict["associated_records"] = associated
         base_dict["total_dir_count"] = len(items)
+        base_dict["is_complementary_group"] = is_complementary_group
+        base_dict["participating_record_ids"] = [
+            get_record_field(it[0], "id") for it in active_items if get_record_field(it[0], "id")
+        ]
+        if is_complementary_group:
+            base_dict["status"] = "archive_ready"
+            base_dict["recognized_episodes"] = sorted(union_pos_eps)
+            base_dict["missing_episodes"] = []
+            base_dict["status_detail"] = (
+                f"多源互补目录合计全 {len(union_pos_eps)} 集已齐（涉及 {len(active_items)} 个源目录），可归档"
+            )
 
         # 检查是否全部已推送待入库
         gap_state = base_dict.get("gap_fill_state") or {}

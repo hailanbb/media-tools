@@ -37,7 +37,8 @@ SUITES = [
     {"name": "11. 跨库集数差分与前端契约审计测试", "cmd": [sys.executable, "tests/test_amw_and_cross_diff.py"], "type": "python"},
     {"name": "12. 执行手册全规范覆盖专项测试", "cmd": [sys.executable, "tests/test_manual_full_coverage.py"], "type": "python"},
     {"name": "13. 压制组防误杀与季前先导特辑归档测试", "cmd": [sys.executable, "tests/test_cmctv_and_specials.py"], "type": "python"},
-    {"name": "14. 离线 P0 安全探针 (8/8 核心防线)", "cmd": [sys.executable, "-B", "p0_probe.py", "."], "type": "python"},
+    {"name": "14. 五模块互斥分流与作品季归并测试", "cmd": [sys.executable, "tests/test_season_classifier.py"], "type": "python"},
+    {"name": "15. 离线 P0 安全探针 (8/8 核心防线)", "cmd": [sys.executable, "-B", "p0_probe.py", "."], "type": "python"},
 ]
 
 def run_suite():

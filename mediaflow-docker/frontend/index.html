@@ -114,7 +114,7 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.34</span>
+              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.35</span>
             </div>
             <!-- 完善后的命名 -->
             <p class="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">智能媒体库整理与归档工作台</p>
@@ -645,22 +645,23 @@
 
   <!-- 弹窗：归档预检确认框 -->
   <div id="archiveModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
-    <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-xl w-full p-4 sm:p-6 space-y-4 border border-slate-200 dark:border-slate-800 shadow-2xl">
-      <div class="flex items-center justify-between">
+    <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-2xl w-full p-4 sm:p-6 space-y-4 border border-slate-200 dark:border-slate-800 shadow-2xl max-h-[88vh] flex flex-col">
+      <div class="flex items-center justify-between flex-shrink-0">
         <div class="flex items-center space-x-2">
           <i class="fa-solid fa-box-archive text-emerald-600 text-base"></i>
           <h3 class="text-sm font-bold text-slate-900 dark:text-white" id="archiveModalTitle">归档计划预检确认</h3>
         </div>
         <button onclick="closeModal('archiveModal')" class="text-slate-400 hover:text-slate-600"><i class="fa-solid fa-xmark"></i></button>
       </div>
-      <div class="text-xs space-y-2 p-3.5 rounded-lg bg-emerald-50/50 dark:bg-emerald-950/20 font-mono text-slate-600 dark:text-slate-400 border border-emerald-100 dark:border-emerald-900/40">
+      <div id="archiveModalBody" class="text-xs space-y-2.5 p-3.5 rounded-lg bg-emerald-50/50 dark:bg-emerald-950/20 font-mono text-slate-600 dark:text-slate-400 border border-emerald-100 dark:border-emerald-900/40 overflow-y-auto flex-1">
         <div class="text-emerald-700 dark:text-emerald-400 font-bold">✓ 搬移所选季的完整目录与视频文件至目标归档库</div>
         <div>• 削刮资产同步: tvshow.nfo 及剧根封面图完整移入归档库</div>
         <div>• 源端彻底清理: 若源剧集已无其他季度，将彻底清除源端剧集目录，绝无残留</div>
       </div>
-      <div class="flex justify-end gap-2 pt-2">
+      <div class="flex justify-end gap-2 pt-2 flex-shrink-0">
+        <button id="archiveModalRetryBtn" onclick="retryArchivePreview()" class="hidden px-3 py-1.5 rounded-lg border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/50 text-xs text-indigo-600 dark:text-indigo-300 font-semibold hover:bg-indigo-100">重新预检</button>
         <button onclick="closeModal('archiveModal')" class="px-3.5 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-xs text-slate-600 dark:text-slate-300">取消</button>
-        <button onclick="confirmArchiveDone()" class="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-sm">确认归档并清理源端</button>
+        <button id="archiveModalConfirmBtn" onclick="confirmArchiveDone()" class="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold shadow-sm">确认归档</button>
       </div>
     </div>
   </div>
@@ -1519,7 +1520,7 @@
 
     function seasonCategory(status, legacyCheck = false) {
       if (['manually_handled', 'verified_complete', 'cleaned_redundant', 'source_absent', 'archived'].includes(status)) return '';
-      if (legacyCheck || ['archive_check', 'unknown', 'identity_review', 'period_review', 'already_archived'].includes(status)) return 'anomaly';
+      if (legacyCheck || ['archive_check', 'unknown', 'identity_review', 'period_review', 'already_archived', 'conflict', 'failed', 'partial_archived', 'archive_unverified'].includes(status)) return 'anomaly';
       if (['archive_ready', 'period_ready'].includes(status)) return 'archive';
       if (status === 'review_needed') return 'review';
       if (['download_needed', 'period_missing'].includes(status)) return 'download';
@@ -1631,13 +1632,27 @@
             if (s.status === 'period_review') { actionType = 'system_tracking'; actionText = '系统跟踪'; }
             if (s.status === 'period_ready') actionText = '保留全部版本归档';
             if (s.status === 'already_archived') { actionType = 'clean_redundant'; actionText = '删除源端（本季）'; }
-            const uniqueCount = recEps.length;
+            const posRecEps = recEps.filter(e => typeof e === 'number' ? e > 0 : Number(e) > 0);
+            const hasE00 = recEps.includes(0) || recEps.includes('0');
+            const posDup = (dup || []).filter(d => typeof d === 'number' ? d > 0 : Number(d) > 0);
+            const hasE00Dup = (dup || []).includes(0) || (dup || []).includes('0');
+            const dualArcEps = ((evidence && evidence.dual_archive_info && evidence.dual_archive_info.archived_episodes) || []).filter(e => Number(e) > 0);
+            const uniqueCount = posRecEps.length;
             let statusText = `${uniqueCount}/${total || '?'}集`;
+            if (catKey === 'archive' && dualArcEps.length > 0) {
+              const combinedPos = new Set([...posRecEps.map(Number), ...dualArcEps.map(Number)]).size;
+              if (combinedPos > uniqueCount) {
+                statusText = `合计 ${combinedPos}/${total || '?'}集 · 本次增量 ${uniqueCount} 集`;
+              }
+            }
             if (['period_missing', 'period_review'].includes(s.status)) {
               statusText = s.status === 'period_missing' ? `确认缺 ${missing.length} 期 / 全 ${total} 期` : `全 ${total} 期 · 系统跟踪，无需操作`;
             }
-            if (dup && dup.length > 0) {
-              statusText += `，第 ${dup.join("、")} 集有多个版本`;
+            if (hasE00) {
+              statusText += hasE00Dup ? ' · 另有先导/特辑多份' : ' · 另有先导片 1 部';
+            }
+            if (posDup.length > 0) {
+              statusText += `，第 ${posDup.join("、")} 集有多个版本`;
             }
 
             let targetCatKey = catKey;
@@ -2555,12 +2570,31 @@
             <i class="fa-solid fa-box-archive text-xs"></i>
             <span id="batchActionBtnText">批量一键归档所选 (0)</span>
           </button>`;
+        const lastBatch = (typeof _lastArchiveBatchByTask !== 'undefined' && currentTaskId) ? _lastArchiveBatchByTask[currentTaskId] : null;
+        let lastBatchHtml = '';
+        if (lastBatch && Array.isArray(lastBatch.results) && lastBatch.results.length > 0) {
+          const okCnt = lastBatch.results.filter(r => r.outcome === 'archived' || r.outcome === 'archived_pending_cleanup').length;
+          const pendingItems = lastBatch.results.filter(r => r.outcome === 'partial_archived' || r.outcome === 'archive_unverified' || r.outcome === 'archived_pending_cleanup');
+          const pendingHtml = pendingItems.map(p => {
+            const btnLabel = p.outcome === 'partial_archived' ? '核对剩余项' : (p.outcome === 'archive_unverified' ? '核对两端' : '复查收尾');
+            const resumeFlag = p.outcome === 'partial_archived' ? 'true' : 'false';
+            return `<span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-700">
+              <span>${escapeHtml(p.show_name || '')} S${String(p.season_number || 1).padStart(2, '0')}: ${escapeHtml(p.message || p.outcome)}</span>
+              ${p.season_record_id ? `<button type="button" onclick="reconcileArchiveSeason('${escapeHtml(p.season_record_id)}', ${resumeFlag})" class="px-1.5 py-0.5 rounded bg-amber-600 hover:bg-amber-700 text-white text-[10px] font-bold">${btnLabel}</button>` : ''}
+            </span>`;
+          }).join(' ');
+          lastBatchHtml = `<div class="mt-1.5 pt-1.5 border-t border-emerald-200/70 dark:border-emerald-800/50 flex items-center gap-2 flex-wrap text-[11px]">
+            <span class="font-semibold text-emerald-800 dark:text-emerald-300">上次归档结果：共 ${lastBatch.results.length} 季，已确认完成 ${okCnt} 季</span>
+            ${pendingHtml}
+          </div>`;
+        }
         banner.className = "p-3.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800/60 flex items-start space-x-3 text-xs";
         banner.innerHTML = `
           <i class="fa-solid fa-circle-check text-emerald-600 text-sm mt-0.5"></i>
           <div class="flex-1 space-y-1">
-            <div class="font-bold text-emerald-900 dark:text-emerald-300">齐全可归档就绪清单：支持单季增量归档</div>
-            <div class="text-slate-600 dark:text-slate-300">已选剧季将完整搬移至目标归档库并同步削刮资产，全剧完结后自动彻底清除源端空壳目录。</div>
+            <div class="font-bold text-emerald-900 dark:text-emerald-300">齐全可归档就绪清单：支持单季整移、同季增量合并与先导特辑(Season 0)分流</div>
+            <div class="text-slate-600 dark:text-slate-300">点击归档将先执行只读预检，明示整移/增量合并方式、目标落点及预期留源项；核验到位后自动清理空壳。</div>
+            ${lastBatchHtml}
           </div>`;
       } else if (currentCategory === 'review') {
         if (selectAllLabel) selectAllLabel.textContent = "全选待复核项";
@@ -2748,7 +2782,7 @@
           } else {
             emptyMsg = (currentCategory === 'download' && activeGapTab === 'pushed_pending')
               ? '当前暂无已推送待入库的剧季'
-              : '该分类无条目';
+              : (currentCategory === 'archive' ? '本次初检没有可归档的季' : '该分类无条目');
             emptyIcon = 'fa-circle-check text-emerald-500';
           }
         }
@@ -2837,8 +2871,15 @@
 
         const hasEvDetails = Boolean(ev && (ev.meta_status || ev.meta_error || (ev.release_evidence && ev.release_evidence.dominant_release_title) || (ev.mediaserver_check && (ev.mediaserver_check.checked || ev.mediaserver_check.error))));
         const rawObj = item.raw || {};
-        const showDetailBtn = currentCategory === 'download' || currentCategory === 'anomaly' || Boolean(item.isAnomaly) || ['identity_review', 'unknown', 'review_needed', 'period_review', 'download_needed', 'period_missing'].includes(rawStatus) || Boolean(conf && conf.blocking) || Boolean(gapState && gapState.episodes && gapState.episodes.length > 0) || hasEvDetails || Boolean(mp && mp.target_tmdb_id);
+        const showDetailBtn = currentCategory === 'archive' || currentCategory === 'download' || currentCategory === 'anomaly' || Boolean(item.isAnomaly) || ['identity_review', 'unknown', 'review_needed', 'period_review', 'download_needed', 'period_missing'].includes(rawStatus) || Boolean(conf && conf.blocking) || Boolean(gapState && gapState.episodes && gapState.episodes.length > 0) || hasEvDetails || Boolean(mp && mp.target_tmdb_id);
         const disableCheck = currentCategory === 'airing' || currentCategory === 'anomaly' || ['inspect_info', 'inspect_gap_detail', 'clean_redundant'].includes(item.actionType) || (currentCategory === 'download' && activeGapTab === 'pushed_pending');
+
+        let archiveModeBadgeHtml = '';
+        if (currentCategory === 'archive') {
+          const hasDualArc = Boolean(ev && ev.dual_archive_info && Array.isArray(ev.dual_archive_info.archived_episodes) && ev.dual_archive_info.archived_episodes.length > 0);
+          const modeTxt = rawStatus === 'period_ready' ? '保留全部版本归档' : (rawObj.is_complementary_group ? '多源互补归档' : (hasDualArc ? '同季增量合并' : '整季移入'));
+          archiveModeBadgeHtml = `<span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 font-semibold border border-emerald-200 dark:border-emerald-800">${escapeHtml(modeTxt)}</span>`;
+        }
 
         const assocRecs = item.associatedRecords || [];
         const assocDirHtml = assocRecs.length > 0 ? `
@@ -2861,6 +2902,7 @@
                   <span class="text-xs px-2 py-0.5 rounded-full bg-${badgeColor}-100 dark:bg-${badgeColor}-950/70 text-${badgeColor}-700 dark:text-${badgeColor}-400 font-semibold border border-${badgeColor}-300 dark:border-${badgeColor}-800">
                     ${escapeHtml(item.season)} (${escapeHtml(item.statusText)})
                   </span>
+                  ${archiveModeBadgeHtml}
                   ${anomalyTagHtml}
                   ${conflictBadgeHtml}
                   ${dirGroupBadgeHtml}
@@ -3459,8 +3501,7 @@
       } else if (type === 'calibrate') {
         openCalibrateModal(recordId);
       } else if (type === 'archive') {
-        openModal('archiveModal');
-        document.getElementById('archiveModalTitle').textContent = `单季归档预检确认: ${name}`;
+        openArchivePreviewModal([recordId], name);
       } else if (type.startsWith('review') || type === 'clean') {
         openModal('reviewModal');
         document.getElementById('reviewModalTitle').textContent = `复核清理确认: ${name}`;
@@ -3473,7 +3514,14 @@
       }
     }
 
-    function executeBatchArchive() { currentActionRecordId = null; openModal('archiveModal'); }
+    function executeBatchArchive() {
+      currentActionRecordId = null;
+      const listContainer = document.getElementById('episodeItemContainer');
+      const checked = listContainer
+        ? [...listContainer.querySelectorAll('input[name="itemCheck"]:checked')].map(cb => cb.value)
+        : [...document.querySelectorAll('input[name="itemCheck"]:checked')].map(cb => cb.value);
+      openArchivePreviewModal(checked, null);
+    }
     function executeBatchReview() { currentActionRecordId = null; openModal('reviewModal'); }
     function executeBatchDownload() { currentActionRecordId = null; openModal('downloadModal'); }
 
@@ -4372,62 +4420,265 @@
       }
     }
 
+    let _archiveModalContext = {
+      taskId: null,
+      requestedIds: [],
+      executableIds: [],
+      planId: '',
+      singleTitle: null,
+    };
+    const _lastArchiveBatchByTask = {};
+
+    async function openArchivePreviewModal(recordIds, singleTitle = null) {
+      const ids = Array.isArray(recordIds) ? recordIds.filter(Boolean) : [];
+      if (ids.length === 0) {
+        alert('请先勾选需要归档的剧季');
+        return;
+      }
+      _archiveModalContext = {
+        taskId: currentTaskId,
+        requestedIds: ids,
+        executableIds: [...ids],
+        planId: '',
+        singleTitle: singleTitle || null,
+      };
+      openModal('archiveModal');
+      const titleEl = document.getElementById('archiveModalTitle');
+      const bodyEl = document.getElementById('archiveModalBody');
+      const confirmBtn = document.getElementById('archiveModalConfirmBtn');
+      const retryBtn = document.getElementById('archiveModalRetryBtn');
+
+      if (titleEl) {
+        titleEl.textContent = singleTitle ? `单季归档预检确认: ${singleTitle}` : `批量归档预检确认 (所选 ${ids.length} 季)`;
+      }
+      if (retryBtn) retryBtn.classList.add('hidden');
+      if (confirmBtn) {
+        confirmBtn.disabled = true;
+        confirmBtn.textContent = '正在执行只读预检...';
+      }
+      if (bodyEl) {
+        bodyEl.innerHTML = `<div class="py-4 text-center text-slate-500"><i class="fa-solid fa-spinner fa-spin mr-1.5 text-emerald-600"></i>正在读取源端与归档目标目录，生成搬移及留源清单...</div>`;
+      }
+
+      try {
+        const preview = await api('/api/archive/preview', {
+          method: 'POST',
+          body: JSON.stringify({ season_record_ids: ids, task_id: currentTaskId }),
+        });
+        _archiveModalContext.planId = preview.plan_id || '';
+        _archiveModalContext.executableIds = Array.isArray(preview.executable_ids) ? preview.executable_ids : [];
+        const items = Array.isArray(preview.items) ? preview.items : [];
+        const execCount = preview.executable_count || 0;
+        const blockCount = preview.blocked_count || 0;
+
+        if (retryBtn) {
+          if (blockCount > 0 || execCount === 0) retryBtn.classList.remove('hidden');
+          else retryBtn.classList.add('hidden');
+        }
+        if (confirmBtn) {
+          if (execCount > 0) {
+            confirmBtn.disabled = false;
+            confirmBtn.textContent = blockCount > 0 ? `确认归档可执行的 ${execCount} 季` : `确认归档 ${execCount} 季`;
+          } else {
+            confirmBtn.disabled = true;
+            confirmBtn.textContent = '无可执行季';
+          }
+        }
+
+        if (bodyEl) {
+          const headerNote = items.length > 1
+            ? `<div class="pb-2 mb-2 border-b border-emerald-200/70 dark:border-emerald-800/50 font-sans font-bold text-slate-800 dark:text-slate-200 flex items-center justify-between">
+                <span>共选 ${items.length} 季：可执行 <b class="text-emerald-600">${execCount}</b> 季 · 受阻 <b class="${blockCount > 0 ? 'text-rose-600' : 'text-slate-400'}">${blockCount}</b> 季</span>
+                ${preview.plan_id ? `<span class="text-[10px] font-mono text-slate-400">计划: ${escapeHtml(preview.plan_id)}</span>` : ''}
+              </div>`
+            : '';
+
+          const itemsHtml = items.map(it => {
+            const sLabel = `${it.show_name || ''} S${String(it.season_number || 1).padStart(2, '0')}`;
+            if (!it.executable) {
+              const candHtml = (it.candidate_paths && it.candidate_paths.length > 0)
+                ? `<div class="mt-1 text-[11px] text-rose-700 dark:text-rose-300">候选路径: ${escapeHtml(it.candidate_paths.join(' | '))}</div>`
+                : '';
+              const confFilesHtml = (it.conflict_files && it.conflict_files.length > 0)
+                ? `<div class="mt-1 text-[11px] text-rose-700 dark:text-rose-300">冲突文件: ${escapeHtml(it.conflict_files.join(', '))}</div>`
+                : '';
+              const jumpBtn = (it.next_step === 'goto_anomaly' || it.next_step === 'goto_anomaly_dir_group')
+                ? `<button type="button" onclick="closeModal('archiveModal'); filterResultCategory('anomaly');" class="mt-1.5 px-2.5 py-1 rounded bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-sans font-semibold">前往异常剧集确认目标</button>`
+                : '';
+              return `<div class="p-2.5 rounded-lg bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-800/60 space-y-1">
+                <div class="font-sans font-bold text-rose-700 dark:text-rose-400">✗ ${escapeHtml(sLabel)}（受阻）</div>
+                <div class="text-rose-600 dark:text-rose-300">${escapeHtml(it.block_reason || '不满足归档条件')}</div>
+                ${candHtml}${confFilesHtml}${jumpBtn}
+              </div>`;
+            }
+
+            const linesHtml = (it.summary_lines || []).map((ln, idx) =>
+              `<div class="${idx === 0 ? 'text-emerald-700 dark:text-emerald-400 font-bold' : ''}">${escapeHtml(ln)}</div>`
+            ).join('');
+            const allFiles = [...(it.regular_files_to_move || []), ...(it.special_files_to_move || [])];
+            const filesDetailHtml = allFiles.length > 0
+              ? `<details class="mt-1.5 pt-1 border-t border-emerald-200/50 dark:border-emerald-800/40">
+                  <summary class="cursor-pointer text-[11px] text-indigo-600 dark:text-indigo-400 font-sans font-semibold">查看 ${allFiles.length} 个计划迁入文件及完整路径</summary>
+                  <div class="mt-1 space-y-0.5 text-[10px] max-h-36 overflow-y-auto">
+                    <div>源季路径: ${escapeHtml(it.source_path || '')}</div>
+                    <div>目标季路径: ${escapeHtml(it.target_path || '')}</div>
+                    ${allFiles.slice(0, 30).map(f => `<div>• ${escapeHtml(f.name)} → ${escapeHtml(f.target_path || '')}</div>`).join('')}
+                  </div>
+                </details>`
+              : '';
+            return `<div class="p-2.5 rounded-lg bg-white/80 dark:bg-slate-900/60 border border-emerald-200/80 dark:border-emerald-800/50 space-y-1">
+              <div class="font-sans font-bold text-slate-900 dark:text-white flex items-center justify-between">
+                <span>${escapeHtml(sLabel)}</span>
+                <span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300">${escapeHtml(it.mode_label || '可归档')}</span>
+              </div>
+              ${linesHtml}
+              ${filesDetailHtml}
+            </div>`;
+          }).join('');
+
+          bodyEl.innerHTML = headerNote + (itemsHtml || '<div>未找到可预检的季度记录</div>');
+        }
+      } catch (err) {
+        if (confirmBtn) {
+          confirmBtn.disabled = false;
+          confirmBtn.textContent = `确认归档 ${ids.length} 季`;
+        }
+        if (retryBtn) retryBtn.classList.remove('hidden');
+        if (bodyEl) {
+          bodyEl.innerHTML = `<div class="text-amber-600 dark:text-amber-400">预检请求异常 (${escapeHtml(err.message || String(err))})，可点击重新预检或直接由执行端做等价校验。</div>`;
+        }
+      }
+    }
+
+    async function retryArchivePreview() {
+      if (!_archiveModalContext || !_archiveModalContext.requestedIds || _archiveModalContext.requestedIds.length === 0) return;
+      await openArchivePreviewModal(_archiveModalContext.requestedIds, _archiveModalContext.singleTitle);
+    }
+
+    async function reconcileArchiveSeason(recordId, resumeRemaining = false) {
+      if (!recordId) return;
+      try {
+        const res = await api('/api/archive/reconcile', {
+          method: 'POST',
+          body: JSON.stringify({ season_record_id: recordId, resume_remaining: Boolean(resumeRemaining) }),
+        });
+        alert(res.message || '核对完成');
+        const tid = currentTaskId;
+        const task = taskList.find(t => t.id === tid);
+        if (task) task._seasonsLoaded = false;
+        await loadTasks();
+        if (tid) await selectTask(tid);
+      } catch (err) {
+        alert(`核对失败: ${err.message || String(err)}`);
+      }
+    }
+
     async function confirmArchiveDone() {
       closeModal('archiveModal');
+      const originTaskId = (_archiveModalContext && _archiveModalContext.taskId) || currentTaskId;
+      const planId = (_archiveModalContext && _archiveModalContext.planId) || '';
       const targetActionId = currentActionRecordId;
       currentActionRecordId = null;
-      const ids = targetActionId ? [targetActionId] : [...document.querySelectorAll('input[name="itemCheck"]:checked')].map(cb => cb.value);
-      if (ids.length === 0) { alert('未选择任何剧季'); return; }
 
+      let ids = (_archiveModalContext && Array.isArray(_archiveModalContext.executableIds) && _archiveModalContext.executableIds.length > 0)
+        ? [..._archiveModalContext.executableIds]
+        : (targetActionId ? [targetActionId] : [...document.querySelectorAll('#episodeItemContainer input[name="itemCheck"]:checked')].map(cb => cb.value));
+      _archiveModalContext = { taskId: null, requestedIds: [], executableIds: [], planId: '', singleTitle: null };
+      if (ids.length === 0) { alert('未选择任何可执行的剧季'); return; }
+
+      const batchId = 'batch_' + Date.now();
       const items = ids.map(id => ({ id, name: findShowDisplayName(id) }));
       const successArchivedIds = new Set();
+      const batchReceipts = [];
 
       await runBatchPipeline({
-        title: targetActionId ? `一键归档剧季: ${items[0]?.name || ''}` : `批量一键归档所选剧季 (${items.length} 项)`,
-        subtitle: '正在按季将媒体文件移入目标归档库并清理源端空壳...',
+        title: items.length === 1 ? `一键归档剧季: ${items[0]?.name || ''}` : `批量一键归档所选剧季 (${items.length} 项)`,
+        subtitle: '正在按预检计划将媒体文件移入目标归档库并核验两端实物...',
         iconClass: 'fa-box-archive',
         iconWrapClass: 'bg-emerald-100 dark:bg-emerald-950/70 text-emerald-600 dark:text-emerald-400',
         barGradientClass: 'from-emerald-500 to-teal-600',
+        taskId: originTaskId,
+        batchKind: 'archive',
         items,
         processItem: async (item, i, total, appendLog, abortSignal) => {
           appendLog(`<span class="text-slate-400">[${getNowTimestamp()}] 📦 正在归档: <b>【${item.name}】</b>...</span>`);
           try {
             const res = await api('/api/archive/execute', {
               method: 'POST',
-              body: JSON.stringify({ season_record_ids: [item.id] }),
+              body: JSON.stringify({
+                season_record_ids: [item.id],
+                plan_id: planId || null,
+                batch_id: batchId,
+              }),
               signal: abortSignal
             });
-            if (res.ok) {
+            const r = (res && Array.isArray(res.results) && res.results[0]) ? res.results[0] : null;
+            if (r) batchReceipts.push(r);
+
+            const outcome = r ? r.outcome : (res.ok ? 'archived' : 'blocked');
+            if (outcome === 'archived') {
               successArchivedIds.add(item.id);
-              if (res.message && (res.message.includes('待核实') || res.message.includes('残留') || res.message.includes('附件') || res.message.includes('留存'))) {
-                appendLog(`<span class="text-amber-400 font-bold">[${getNowTimestamp()}] ⚠️ 归档待核实: 【${item.name}】${res.message}</span>`);
-              } else {
-                appendLog(`<span class="text-emerald-400 font-bold">[${getNowTimestamp()}] ✓ 归档成功: 【${item.name}】${res.message || '已搬移至归档库并同步削刮资产'}</span>`);
-              }
+              const retCnt = (r && Array.isArray(r.retained_items)) ? r.retained_items.length : 0;
+              const retNote = retCnt > 0 ? `（含预期留源 ${retCnt} 项）` : '';
+              appendLog(`<span class="text-emerald-400 font-bold">[${getNowTimestamp()}] ✓ 已归档: 【${item.name}】${escapeHtml((r && r.message) || res.message || '')}${retNote}</span>`);
               return { success: true };
+            } else if (outcome === 'archived_pending_cleanup') {
+              successArchivedIds.add(item.id);
+              appendLog(`<span class="text-amber-400 font-bold">[${getNowTimestamp()}] ✓ 媒体已归档（源端收尾待处理）: 【${item.name}】${escapeHtml((r && r.message) || res.message || '')}</span>`);
+              return { success: true };
+            } else if (outcome === 'partial_archived') {
+              appendLog(`<span class="text-amber-400 font-bold">[${getNowTimestamp()}] ⚠️ 部分归档: 【${item.name}】${escapeHtml((r && r.message) || res.message || '')}（可在模块顶部点击“核对剩余项”）</span>`);
+              return { success: false, submitted_unverified: true };
+            } else if (outcome === 'archive_unverified') {
+              appendLog(`<span class="text-amber-400 font-bold">[${getNowTimestamp()}] ⚠️ 结果待核实: 【${item.name}】${escapeHtml((r && r.message) || res.message || '')}（可在模块顶部点击“核对两端”）</span>`);
+              return { success: false, submitted_unverified: true };
             } else {
-              appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] ✗ 归档受阻: 【${item.name}】${res.message || '未满足归档条件'}</span>`);
+              appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] ✗ 归档受阻: 【${item.name}】${escapeHtml((r && r.message) || res.message || '未满足归档条件')}</span>`);
               return { success: false };
             }
           } catch (err) {
             if (abortSignal && abortSignal.aborted) {
+              batchReceipts.push({
+                season_record_id: item.id,
+                task_id: originTaskId,
+                show_name: item.name,
+                season_number: 1,
+                outcome: 'cancelled_not_started',
+                message: '未开始已取消',
+              });
               appendLog(`<span class="text-amber-400 font-bold">[${getNowTimestamp()}] ⏹ 归档已中止: 【${item.name}】未开始已取消</span>`);
               return { success: false, aborted: true };
             }
-            appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] ✗ 归档失败: 【${item.name}】${err.message}</span>`);
+            appendLog(`<span class="text-rose-400 font-bold">[${getNowTimestamp()}] ✗ 归档失败: 【${item.name}】${escapeHtml(err.message || String(err))}</span>`);
             return { success: false };
           }
         },
         onFinish: async () => {
-          const task = taskList.find(t => t.id === currentTaskId);
+          if (originTaskId && batchReceipts.length > 0) {
+            _lastArchiveBatchByTask[originTaskId] = {
+              batch_id: batchId,
+              plan_id: planId,
+              task_id: originTaskId,
+              results: batchReceipts,
+            };
+          }
+          const task = taskList.find(t => t.id === originTaskId);
           if (task) {
             task._seasonsLoaded = false;
             if (task.categories && Array.isArray(task.categories.archive)) {
               task.categories.archive = task.categories.archive.filter(it => !successArchivedIds.has(it.id) && !it.associatedRecords?.some(ar => successArchivedIds.has(ar.id)));
             }
           }
-          await loadTasks();
-          if (currentTaskId) await selectTask(currentTaskId);
+          try {
+            await loadTasks();
+            if (currentTaskId === originTaskId && currentTaskId) {
+              await selectTask(currentTaskId);
+            } else if (currentTaskId) {
+              renderEpisodesList();
+            }
+          } catch (_refreshErr) {
+            renderEpisodesList();
+          }
         }
       });
     }

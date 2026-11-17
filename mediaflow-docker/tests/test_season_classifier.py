@@ -1,6 +1,11 @@
 """MediaFlow 五模块互斥分流与作品季归并单元测试."""
 
+import os
+import sys
 import unittest
+
+sys.path.insert(0, os.path.abspath("."))
+
 from app.core.season_classifier import (
     classify_single_record,
     consolidate_seasons_to_work_records,
@@ -162,6 +167,130 @@ class TestSeasonClassifier(unittest.TestCase):
         self.assertEqual(counts["airing"], 1)
         self.assertEqual(counts["review"], 0)
         self.assertEqual(counts["anomaly"], 0)
+
+    def test_a13_failed_conflict_and_missing_evidence_never_fallback_to_archive(self):
+        """A13: 旧记录为 failed/conflict、缺证据或已 archived；无依据记录严禁兜底落入 archive."""
+        rec_failed = {
+            "id": "r-failed",
+            "show_name": "失败剧",
+            "tmdb_id": "5001",
+            "season_number": 1,
+            "status": "failed",
+            "total_episodes": 10,
+            "recognized_episodes": list(range(1, 11)),
+        }
+        cat_f, act_f = classify_single_record(rec_failed)
+        self.assertEqual(cat_f, "anomaly")
+        self.assertEqual(act_f, "inspect_info")
+
+        rec_no_ev = {
+            "id": "r-no-ev",
+            "show_name": "无证据剧",
+            "tmdb_id": "5002",
+            "season_number": 1,
+            "status": "archive_ready",
+            "total_episodes": None,
+            "recognized_episodes": [],
+            "local_episode_count": 0,
+        }
+        cat_ne, _ = classify_single_record(rec_no_ev)
+        self.assertEqual(cat_ne, "anomaly", "缺少总集数与覆盖证据的记录不得进入 archive")
+
+        # 同一作品季：一条已 archived，另一条活跃物理记录为 download_needed
+        rec_done = {
+            "id": "r-done",
+            "show_name": "双目录剧",
+            "tmdb_id": "5003",
+            "season_number": 1,
+            "season_path": "/src/A/Season 1",
+            "status": "archived",
+            "total_episodes": 12,
+            "recognized_episodes": list(range(1, 13)),
+        }
+        rec_active = {
+            "id": "r-active",
+            "show_name": "双目录剧",
+            "tmdb_id": "5003",
+            "season_number": 1,
+            "season_path": "/src/B/Season 1",
+            "status": "download_needed",
+            "total_episodes": 12,
+            "recognized_episodes": [1, 2, 3],
+            "missing_episodes": list(range(4, 13)),
+        }
+        work_recs, counts = consolidate_seasons_to_work_records([rec_failed, rec_no_ev, rec_done, rec_active])
+        self.assertEqual(counts["archive"], 0)
+        self.assertEqual(counts["anomaly"], 2)
+        self.assertEqual(counts["download"], 1)
+        self.assertEqual(
+            counts["archive"] + counts["review"] + counts["download"] + counts["airing"] + counts["anomaly"],
+            counts["total_work_seasons"],
+        )
+
+    def test_a06_complementary_group_vs_intentional_coexist(self):
+        """A06: 同作品季两互补源目录归并为 1 张 archive 卡；有意共存收藏保持各自独立卡片不合并."""
+        comp_a = {
+            "id": "comp-a",
+            "show_name": "互补剧",
+            "tmdb_id": "6001",
+            "season_number": 1,
+            "show_path": "/src/互补剧_A",
+            "season_path": "/src/互补剧_A/Season 1",
+            "archive_target_path": "/dst/互补剧/Season 1",
+            "status": "download_needed",
+            "total_episodes": 6,
+            "recognized_episodes": [1, 2, 3],
+            "missing_episodes": [4, 5, 6],
+            "duplicate_episodes": [],
+            "season_finished": True,
+        }
+        comp_b = {
+            "id": "comp-b",
+            "show_name": "互补剧",
+            "tmdb_id": "6001",
+            "season_number": 1,
+            "show_path": "/src/互补剧_B",
+            "season_path": "/src/互补剧_B/Season 1",
+            "archive_target_path": "/dst/互补剧/Season 1",
+            "status": "download_needed",
+            "total_episodes": 6,
+            "recognized_episodes": [4, 5, 6],
+            "missing_episodes": [1, 2, 3],
+            "duplicate_episodes": [],
+            "season_finished": True,
+        }
+        coexist_1 = {
+            "id": "coex-1",
+            "show_name": "共存收藏_国语",
+            "tmdb_id": "6002",
+            "season_number": 1,
+            "show_path": "/src/共存收藏_国语",
+            "season_path": "/src/共存收藏_国语/Season 1",
+            "archive_target_path": "/dst/共存收藏_国语/Season 1",
+            "status": "archive_ready",
+            "total_episodes": 4,
+            "recognized_episodes": [1, 2, 3, 4],
+            "evidence": {"directory_group": {"status": "coexist", "confirmation_mode": "intentional_coexist"}},
+        }
+        coexist_2 = {
+            "id": "coex-2",
+            "show_name": "共存收藏_粤语",
+            "tmdb_id": "6002",
+            "season_number": 1,
+            "show_path": "/src/共存收藏_粤语",
+            "season_path": "/src/共存收藏_粤语/Season 1",
+            "archive_target_path": "/dst/共存收藏_粤语/Season 1",
+            "status": "archive_ready",
+            "total_episodes": 4,
+            "recognized_episodes": [1, 2, 3, 4],
+            "evidence": {"directory_group": {"status": "coexist", "confirmation_mode": "intentional_coexist"}},
+        }
+        work_recs, counts = consolidate_seasons_to_work_records([comp_a, comp_b, coexist_1, coexist_2])
+        self.assertEqual(len(work_recs), 3, "互补 2 目录归并为 1 卡 + 有意共存 2 目录保持 2 卡 = 共 3 卡")
+        self.assertEqual(counts["archive"], 3)
+        comp_card = next(w for w in work_recs if str(w.get("tmdb_id")) == "6001")
+        self.assertTrue(comp_card.get("is_complementary_group"))
+        self.assertEqual(comp_card.get("recognized_episodes"), [1, 2, 3, 4, 5, 6])
 
 
 if __name__ == "__main__":
