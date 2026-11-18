@@ -381,6 +381,16 @@ async def preview_subscription_cleanup(body: SubscriptionCleanPreviewRequest) ->
                     if diag.clean_confidence in ("high", "medium") and not diag.is_protected:
                         matched.append(diag)
 
+        # 构建原始订阅字典映射以补全海报与 TMDB ID
+        sub_map = {}
+        for s in subs:
+            sid = s.get("id") or s.get("sub_id")
+            if sid is not None:
+                try:
+                    sub_map[int(sid)] = s
+                except (ValueError, TypeError):
+                    pass
+
         clean_items = [
             {
                 "id": m.sub_id,
@@ -389,6 +399,9 @@ async def preview_subscription_cleanup(body: SubscriptionCleanPreviewRequest) ->
                 "year": m.year,
                 "media_type": m.media_type,
                 "season": m.season,
+                "state": m.state,
+                "tmdb_id": sub_map.get(m.sub_id, {}).get("tmdbid") or sub_map.get(m.sub_id, {}).get("tmdb_id"),
+                "poster": sub_map.get(m.sub_id, {}).get("backdrop") or sub_map.get(m.sub_id, {}).get("poster") or "",
                 "clean_confidence": m.clean_confidence,
                 "clean_rule": m.clean_rule,
                 "clean_rule_name": m.clean_rule_name,
@@ -397,6 +410,9 @@ async def preview_subscription_cleanup(body: SubscriptionCleanPreviewRequest) ->
                 "username": m.username,
                 "release_stage": m.release_stage,
                 "in_library_status": m.in_library_status,
+                "total_episodes": m.total_episodes,
+                "completed_episodes": m.completed_episodes,
+                "lack_episodes": m.lack_episodes,
                 "progress": f"{m.completed_episodes}/{m.total_episodes or '?'}" if m.media_type == "tv" else (m.year or "电影"),
             }
             for m in matched
@@ -410,6 +426,8 @@ async def preview_subscription_cleanup(body: SubscriptionCleanPreviewRequest) ->
             "total_evaluated": len(eval_result["items"]),
             "to_clean": clean_items,
             "subscriptions": clean_items,  # 兼容字段
+            "to_delete": clean_items,      # 兼容字段
+            "to_keep": [],                 # 兼容字段
         }
     finally:
         await mp.close()

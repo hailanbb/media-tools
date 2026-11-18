@@ -114,7 +114,7 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.43</span>
+              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.44</span>
             </div>
             <!-- 完善后的命名 -->
             <p class="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">智能媒体库整理与归档工作台</p>
@@ -1114,39 +1114,71 @@
   </div>
 
   <!-- 弹窗：MoviePilot 智能订阅清理决策面板 -->
-  <div id="subCleanModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
-    <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-2xl w-full p-6 space-y-4 border border-slate-200 dark:border-slate-800 shadow-2xl max-h-[90dvh] sm:max-h-[85vh] flex flex-col">
-      <div class="flex items-center justify-between pb-3 border-b border-slate-200 dark:border-slate-800">
-        <div class="flex items-center space-x-2">
-          <i class="fa-solid fa-broom text-amber-500 text-base"></i>
-          <h3 class="text-sm font-bold text-slate-900 dark:text-white" id="modalHeaderTitle">MoviePilot 订阅智能清理审计预案</h3>
+  <div id="subCleanModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-sm">
+    <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-4xl lg:max-w-5xl w-full p-4 sm:p-6 space-y-3.5 border border-slate-200 dark:border-slate-800 shadow-2xl max-h-[92dvh] sm:max-h-[90vh] flex flex-col">
+      <!-- 弹窗顶部栏 -->
+      <div class="flex items-center justify-between pb-3 border-b border-slate-200 dark:border-slate-800 flex-shrink-0">
+        <div class="flex items-center space-x-2.5">
+          <div class="w-8 h-8 rounded-lg bg-amber-500/10 dark:bg-amber-500/20 text-amber-500 flex items-center justify-center">
+            <i class="fa-solid fa-broom text-base"></i>
+          </div>
+          <div>
+            <h3 class="text-sm sm:text-base font-bold text-slate-900 dark:text-white" id="modalHeaderTitle">MoviePilot 订阅智能清理审计预案</h3>
+            <p class="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5" id="modalHeaderSubTitle">智能评估待退订项目，可逐项核查并勾选批量退订</p>
+          </div>
         </div>
-        <button onclick="closeModal('subCleanModal')" class="text-slate-400 hover:text-slate-600"><i class="fa-solid fa-xmark"></i></button>
+        <button onclick="closeModal('subCleanModal')" class="w-8 h-8 rounded-lg flex items-center justify-center text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition"><i class="fa-solid fa-xmark text-base"></i></button>
       </div>
 
       <!-- 动态模式选择卡片网格 -->
-      <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs" id="modalModesContainer">
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs flex-shrink-0" id="modalModesContainer">
         <!-- JS 动态注入专属模式卡片 -->
       </div>
 
-      <!-- 清理清单列表 -->
-      <div class="space-y-1.5 flex-1 overflow-y-auto pr-1">
-        <div class="text-[11px] font-semibold text-slate-500 dark:text-slate-400 flex items-center justify-between">
-          <span>待退订订阅清单 (<span id="modalMatchedCount">0</span> 项):</span>
-          <span class="text-slate-400 text-[10px]" id="modalProtectedHint">受保护项目已自动排除锁定</span>
+      <!-- 清理清单工具栏 (快速搜索、全选与计数) -->
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-1 flex-shrink-0">
+        <div class="flex items-center gap-2 text-xs">
+          <span class="font-bold text-slate-700 dark:text-slate-200">待退订订阅清单</span>
+          <span class="px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 font-mono text-[11px] text-slate-600 dark:text-slate-300">
+            匹配 <span id="modalMatchedCount" class="font-bold">0</span> 项
+          </span>
+          <span class="px-2 py-0.5 rounded-full bg-indigo-50 dark:bg-indigo-950/60 font-mono text-[11px] text-indigo-600 dark:text-indigo-400 border border-indigo-200/60 dark:border-indigo-800/60">
+            已勾选 <span id="modalSelectedCount" class="font-bold">0</span> 项
+          </span>
+          <div class="flex items-center gap-1.5 ml-2">
+            <button type="button" onclick="toggleSelectAllCleanSubs(true)" class="text-[11px] text-indigo-600 dark:text-indigo-400 hover:underline font-semibold">全选</button>
+            <span class="text-slate-300 dark:text-slate-700">/</span>
+            <button type="button" onclick="toggleSelectAllCleanSubs(false)" class="text-[11px] text-slate-500 hover:underline font-semibold">全不选</button>
+          </div>
         </div>
-        <div class="space-y-1.5 max-h-56 overflow-y-auto p-2 rounded-xl bg-slate-50 dark:bg-slate-950/40 border border-slate-200 dark:border-slate-800 font-mono text-[11px]" id="modalCleanList">
-          <!-- 动态注入待退订项 -->
+
+        <div class="flex items-center gap-3">
+          <div class="relative w-full sm:w-64">
+            <input type="text" id="modalSearchInput" oninput="filterModalCleanList()" placeholder="搜索条目名称、年份、TMDB..." class="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg pl-7 pr-3 py-1 text-xs text-slate-700 dark:text-slate-200 placeholder-slate-400 focus:outline-none focus:border-indigo-500 transition">
+            <i class="fa-solid fa-magnifying-glass absolute left-2.5 top-2 text-[10px] text-slate-400"></i>
+          </div>
+          <span class="text-slate-400 text-[10px] hidden md:inline flex-shrink-0" id="modalProtectedHint">受保护项目已自动排除锁定</span>
         </div>
       </div>
 
+      <!-- 清理清单列表容器（自适应高视窗，清晰卡片布局） -->
+      <div class="flex-1 overflow-y-auto pr-1 space-y-2.5 p-3 rounded-xl bg-slate-50/80 dark:bg-slate-950/40 border border-slate-200 dark:border-slate-800 min-h-[320px] max-h-[56vh]" id="modalCleanList">
+        <!-- 动态注入待退订项 -->
+      </div>
+
       <!-- 底部操作 -->
-      <div class="flex justify-end gap-2 pt-3 border-t border-slate-100 dark:border-slate-800">
-        <button onclick="closeModal('subCleanModal')" class="px-4 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 text-xs font-medium">取消</button>
-        <button onclick="confirmBatchCleanSubs()" id="modalConfirmCleanBtn" class="px-4 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm">
-          <i class="fa-solid fa-trash-can text-xs"></i>
-          <span id="modalConfirmBtnText">确认执行退订 (0项)</span>
-        </button>
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-3 border-t border-slate-100 dark:border-slate-800 flex-shrink-0">
+        <div class="text-[11px] text-slate-400 flex items-center gap-1.5">
+          <i class="fa-solid fa-shield-halved text-emerald-500"></i>
+          <span>安全保障：仅取消 MoviePilot 追更订阅，绝不误删媒体库本地正片或下载做种任务</span>
+        </div>
+        <div class="flex justify-end gap-2">
+          <button onclick="closeModal('subCleanModal')" class="px-4 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 text-xs font-medium hover:bg-slate-200 dark:hover:bg-slate-700 transition">关闭</button>
+          <button onclick="confirmBatchCleanSubs()" id="modalConfirmCleanBtn" class="px-4 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition">
+            <i class="fa-solid fa-trash-can text-xs"></i>
+            <span id="modalConfirmBtnText">确认执行退订 (0项)</span>
+          </button>
+        </div>
       </div>
     </div>
   </div>
@@ -6991,38 +7023,41 @@
         }
 
         return `
-          <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 flex items-start justify-between gap-3 hover:border-indigo-300 dark:hover:border-indigo-800 transition">
-            <div class="flex items-start space-x-3 min-w-0">
-              <div class="w-10 h-14 rounded-lg bg-slate-200 dark:bg-slate-800 flex-shrink-0 overflow-hidden relative border border-slate-200 dark:border-slate-700">
+          <div class="p-3.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 flex items-start justify-between gap-3 hover:border-indigo-300 dark:hover:border-indigo-700 transition shadow-2xs">
+            <div class="flex items-start space-x-3.5 min-w-0 flex-1">
+              <div class="w-12 h-16 sm:w-14 sm:h-20 rounded-lg bg-slate-100 dark:bg-slate-800 flex-shrink-0 overflow-hidden relative border border-slate-200 dark:border-slate-700 shadow-2xs">
                 ${s.poster ? `<img src="${s.poster}" class="w-full h-full object-cover" onerror="this.style.display='none'">` : ''}
-                <div class="absolute inset-0 flex items-center justify-center text-slate-400 text-xs">
+                <div class="absolute inset-0 flex items-center justify-center text-slate-400 text-sm pointer-events-none">
                   <i class="fa-solid fa-${s.media_type === 'movie' ? 'film' : 'tv'}"></i>
                 </div>
               </div>
-              <div class="min-w-0 space-y-1">
-                <div class="flex items-center space-x-2">
-                  <h4 class="text-xs font-bold text-slate-900 dark:text-white truncate">${s.name}</h4>
+              <div class="min-w-0 flex-1 space-y-1.5">
+                <div class="flex flex-wrap items-center gap-1.5">
+                  <h4 class="text-sm font-bold text-slate-900 dark:text-white leading-snug break-words">${escapeHtml(s.name)}</h4>
+                  <span class="text-xs text-slate-500 font-mono font-medium">${s.year ? `(${s.year})` : ''}</span>
                   ${typeBadge}
-                  <span class="text-[10px] text-slate-400 font-mono">${s.year || ''}</span>
+                  ${s.tmdb_id ? `<span class="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-400 font-mono text-[10px]">TMDB: ${s.tmdb_id}</span>` : ''}
+                  <span class="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-400 font-mono text-[10px]">ID: ${s.id}</span>
                 </div>
-                <div class="flex items-center space-x-3 text-[11px] text-slate-500 dark:text-slate-400 font-mono">
-                  <span><i class="fa-solid fa-circle text-[6px] ${stateColor} mr-1"></i>${stateName}</span>
-                  <span>${progressDesc}</span>
-                  <span>ID: ${s.id}</span>
+                <div class="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                  <span class="inline-flex items-center gap-1 font-medium"><i class="fa-solid fa-circle text-[6px] ${stateColor}"></i>${stateName}</span>
+                  <span class="text-slate-300 dark:text-slate-700">|</span>
+                  <span class="font-mono text-slate-600 dark:text-slate-300">${progressDesc}</span>
+                  ${s.username ? `<span class="text-slate-300 dark:text-slate-700">|</span><span class="text-slate-400 text-[11px]">添加: ${escapeHtml(s.username)}</span>` : ''}
                 </div>
-                <div class="text-[11px] text-slate-600 dark:text-slate-300 flex items-center gap-1.5 pt-0.5">
-                  <i class="fa-solid fa-circle-info text-indigo-400 text-[10px]"></i>
-                  <span>${s.clean_reason}</span>
+                <div class="text-xs text-slate-600 dark:text-slate-300 flex items-start gap-1.5 pt-0.5 bg-slate-50 dark:bg-slate-950/40 p-1.5 rounded-lg border border-slate-100 dark:border-slate-800/60">
+                  <i class="fa-solid fa-circle-info text-indigo-400 text-xs mt-0.5 flex-shrink-0"></i>
+                  <span class="leading-normal">${escapeHtml(s.clean_reason)}</span>
                 </div>
               </div>
             </div>
 
-            <div class="flex flex-col items-end space-y-2 flex-shrink-0">
+            <div class="flex flex-col items-end space-y-2 flex-shrink-0 ml-2">
               ${confBadge}
               <div class="flex items-center gap-2 pt-1">
-                ${s.state === 'R' ? `<button onclick="toggleSubStatus(${s.id}, 'S')" class="text-[11px] text-amber-600 hover:text-amber-700 transition" title="置为暂停观察">暂停</button>` : `<button onclick="toggleSubStatus(${s.id}, 'R')" class="text-[11px] text-indigo-600 hover:text-indigo-700 transition" title="恢复活跃追更">恢复</button>`}
-                <button onclick="checkSubMediaServer(${s.id})" class="text-[11px] text-slate-500 hover:text-indigo-600 transition" title="查库核验">查库</button>
-                <button onclick="triggerDeleteSingleSub(${s.id})" class="text-slate-400 hover:text-red-500 text-xs p-1 transition" title="立即退订此条目">
+                ${s.state === 'R' ? `<button onclick="toggleSubStatus(${s.id}, 'S')" class="px-2 py-0.8 text-xs rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 hover:bg-amber-100 transition font-medium" title="置为暂停观察">暂停</button>` : `<button onclick="toggleSubStatus(${s.id}, 'R')" class="px-2 py-0.8 text-xs rounded-lg border border-indigo-300 dark:border-indigo-700 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 transition font-medium" title="恢复活跃追更">恢复</button>`}
+                <button onclick="checkSubMediaServer(${s.id})" class="px-2 py-0.8 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-100 transition font-medium" title="查库核验">查库</button>
+                <button onclick="triggerDeleteSingleSub(${s.id})" class="text-slate-400 hover:text-red-500 text-xs p-1.5 transition" title="立即退订此条目">
                   <i class="fa-solid fa-trash-can"></i>
                 </button>
               </div>
@@ -7040,10 +7075,16 @@
     async function openSmartCleanModal() {
       openModal('subCleanModal');
       const titleEl = document.getElementById('modalHeaderTitle');
+      const subTitleEl = document.getElementById('modalHeaderSubTitle');
       if (titleEl) {
         titleEl.textContent = currentMediaTab === 'tv'
           ? "📺 MoviePilot 电视剧订阅智能清理预案"
           : "🎬 MoviePilot 电影订阅智能清理预案";
+      }
+      if (subTitleEl) {
+        subTitleEl.textContent = currentMediaTab === 'tv'
+          ? "针对多集剧集评估完结与停更状态，连载中剧集受绝对保护，可逐项核验并勾选批量退订"
+          : "针对单部电影评估媒体库实际入库与往年死种，待映与洗版电影受严格保护，可逐项核验并勾选批量退订";
       }
 
       renderModalModes();
@@ -7136,18 +7177,27 @@
       await loadCleanPreview(mode);
     }
 
+    let modalSelectedIds = new Set();
+    let modalSearchQuery = '';
+
     async function loadCleanPreview(mode) {
       const listEl = document.getElementById('modalCleanList');
       const countEl = document.getElementById('modalMatchedCount');
+      const selCountEl = document.getElementById('modalSelectedCount');
       const btnText = document.getElementById('modalConfirmBtnText');
       const confirmBtn = document.getElementById('modalConfirmCleanBtn');
       const hintEl = document.getElementById('modalProtectedHint');
+      const searchInput = document.getElementById('modalSearchInput');
+
+      if (searchInput) searchInput.value = '';
+      modalSearchQuery = '';
+      modalSelectedIds.clear();
 
       if (listEl) {
         listEl.innerHTML = `
-          <div class="p-6 text-center text-slate-400">
-            <i class="fa-solid fa-spinner fa-spin text-lg mb-2 text-indigo-500 block"></i>
-            <span>正在执行【${currentMediaTab === 'tv' ? '电视剧' : '电影'}】专属策略预审...</span>
+          <div class="p-12 text-center text-slate-400">
+            <i class="fa-solid fa-spinner fa-spin text-2xl mb-3 text-indigo-500 block"></i>
+            <span class="text-xs font-medium">正在执行【${currentMediaTab === 'tv' ? '电视剧' : '电影'}】专属策略预审与入库诊断...</span>
           </div>`;
       }
 
@@ -7166,73 +7216,281 @@
           })
         });
         currentPreviewData = res;
-        if (confirmBtn) {
-          confirmBtn.style.display = res.matched_count > 0 ? 'flex' : 'none';
-        }
 
-        // 更新卡片上的匹配计数
+        const toClean = Array.isArray(res.to_clean) ? res.to_clean : [];
+        modalSelectedIds = new Set(toClean.map(x => x.id));
+
+        // 更新模式卡片上的匹配计数
         const targetCountId = mode === 'safe' ? 'modeCountSafe' : (mode === 'short_tv' ? 'modeCountShortTv' : (mode === 'old_zombie' ? 'modeCountOldZombie' : 'modeCountDeep'));
         const badgeEl = document.getElementById(targetCountId);
         if (badgeEl) badgeEl.textContent = `匹配 ${res.matched_count} 项`;
 
         if (countEl) countEl.textContent = res.matched_count;
-        if (btnText) btnText.textContent = `确认退订 (${res.matched_count}项)`;
+        if (selCountEl) selCountEl.textContent = modalSelectedIds.size;
+        if (btnText) btnText.textContent = `确认执行退订 (${modalSelectedIds.size}项)`;
+
         if (confirmBtn) {
-          confirmBtn.disabled = res.matched_count === 0;
-          confirmBtn.className = res.matched_count === 0
+          confirmBtn.style.display = res.matched_count > 0 ? 'flex' : 'none';
+          confirmBtn.disabled = modalSelectedIds.size === 0;
+          confirmBtn.className = modalSelectedIds.size === 0
             ? "px-4 py-1.5 rounded-lg bg-slate-300 dark:bg-slate-700 text-slate-500 cursor-not-allowed text-xs font-bold flex items-center gap-1.5"
             : (mode === 'safe'
-                ? "px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm"
-                : "px-4 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm");
+                ? "px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition"
+                : "px-4 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition");
         }
 
-        if (!listEl) return;
-        if (res.matched_count === 0) {
-          listEl.innerHTML = `
-            <div class="p-6 text-center text-slate-400">
-              <i class="fa-solid fa-shield-halved text-2xl mb-2 text-emerald-500 block"></i>
-              <p class="font-medium text-slate-700 dark:text-slate-300">当前没有符合该清理模式的项目</p>
-              <p class="text-[10px] text-slate-400 mt-0.5">${currentMediaTab === 'movie' ? '所有电影均处于待映窗口期或受白名单保护' : '所有剧集均在活跃追更中'}</p>
-            </div>`;
-          return;
-        }
-
-        listEl.innerHTML = res.to_clean.map((item, idx) => {
-          const isMovie = item.media_type === 'movie';
-          let actionsHtml = `
-            <button onclick="checkSubResource(${item.id})" class="text-indigo-600 hover:underline">核查资源</button>
-            <button onclick="checkSubMediaServer(${item.id})" class="text-slate-600 hover:underline">查库</button>
-            <button onclick="planSubOperation(${item.id}, false)" class="text-amber-600 hover:underline">仅退订</button>
-          `;
-          if (!isMovie) {
-            actionsHtml += `<button onclick="planSubOperation(${item.id}, true)" class="text-rose-600 hover:underline">退订并清理源视频</button>`;
-          }
-
-          return `
-          <div class="p-2 rounded-lg bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800 flex items-center justify-between text-xs">
-            <div class="flex items-center space-x-2 min-w-0">
-              <span class="text-[10px] text-slate-400 w-5">${idx + 1}.</span>
-              <span class="font-semibold text-slate-800 dark:text-slate-200 truncate">${item.name} (${item.year || '-'})</span>
-              <span class="text-[10px] px-1.5 py-0.2 rounded ${isMovie ? 'bg-purple-50 text-purple-600 dark:bg-purple-950/60 dark:text-purple-400' : 'bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400'} font-mono">
-                ${isMovie ? '电影' : `S${String(item.season || 1).padStart(2, '0')}`}
-              </span>
-              ${item.is_short_tv ? '<span class="text-[10px] px-1.5 py-0.2 rounded bg-purple-100 dark:bg-purple-900 text-purple-700 dark:text-purple-300 font-mono">短剧</span>' : ''}
-            </div>
-            <div class="flex items-center space-x-2 flex-shrink-0">
-              <span class="text-[10px] text-slate-500 dark:text-slate-400 font-mono truncate max-w-xs">${escapeHtml(item.clean_reason)}</span>
-              ${actionsHtml}
-              <span class="text-[10px] px-1.5 py-0.5 rounded-full font-bold ${item.clean_confidence === 'high' ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-400' : 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-400'}">
-                待核查
-              </span>
-            </div>
-          </div>
-          `;
-        }).join('');
+        renderModalCleanItems();
       } catch (e) {
         if (listEl) {
-          listEl.innerHTML = `<div class="p-4 text-center text-red-500 text-xs">预审加载失败: ${e.message}</div>`;
+          listEl.innerHTML = `<div class="p-8 text-center text-rose-500 text-xs">预审加载失败: ${e.message}</div>`;
         }
       }
+    }
+
+    function filterModalCleanList() {
+      const input = document.getElementById('modalSearchInput');
+      modalSearchQuery = (input?.value || '').trim().toLowerCase();
+      renderModalCleanItems();
+    }
+
+    function toggleSelectAllCleanSubs(select) {
+      if (!currentPreviewData || !Array.isArray(currentPreviewData.to_clean)) return;
+      const allItems = currentPreviewData.to_clean;
+      const filtered = modalSearchQuery
+        ? allItems.filter(item =>
+            (item.name || '').toLowerCase().includes(modalSearchQuery) ||
+            String(item.year || '').includes(modalSearchQuery) ||
+            String(item.tmdb_id || '').includes(modalSearchQuery) ||
+            (item.clean_reason || '').toLowerCase().includes(modalSearchQuery)
+          )
+        : allItems;
+
+      if (select) {
+        filtered.forEach(item => modalSelectedIds.add(item.id));
+      } else {
+        if (modalSearchQuery) {
+          filtered.forEach(item => modalSelectedIds.delete(item.id));
+        } else {
+          modalSelectedIds.clear();
+        }
+      }
+      updateSelectedCount();
+      renderModalCleanItems();
+    }
+
+    function toggleModalItemCheck(subId, checked) {
+      if (checked) {
+        modalSelectedIds.add(subId);
+      } else {
+        modalSelectedIds.delete(subId);
+      }
+      updateSelectedCount();
+    }
+
+    function updateSelectedCount() {
+      const selCount = modalSelectedIds.size;
+      const selEl = document.getElementById('modalSelectedCount');
+      if (selEl) selEl.textContent = selCount;
+
+      const btnText = document.getElementById('modalConfirmBtnText');
+      if (btnText) btnText.textContent = selCount > 0 ? `确认执行退订 (${selCount}项)` : '请勾选退订条目';
+
+      const confirmBtn = document.getElementById('modalConfirmCleanBtn');
+      if (confirmBtn) {
+        confirmBtn.disabled = selCount === 0;
+        confirmBtn.className = selCount === 0
+          ? "px-4 py-1.5 rounded-lg bg-slate-300 dark:bg-slate-700 text-slate-500 cursor-not-allowed text-xs font-bold flex items-center gap-1.5"
+          : (currentCleanMode === 'safe'
+              ? "px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition"
+              : "px-4 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition");
+      }
+    }
+
+    function renderModalCleanItems() {
+      const listEl = document.getElementById('modalCleanList');
+      if (!listEl) return;
+
+      if (!currentPreviewData || !Array.isArray(currentPreviewData.to_clean) || currentPreviewData.to_clean.length === 0) {
+        listEl.innerHTML = `
+          <div class="p-12 text-center text-slate-400">
+            <i class="fa-solid fa-shield-halved text-3xl mb-3 text-emerald-500 block"></i>
+            <p class="font-bold text-slate-700 dark:text-slate-200 text-sm">当前分类下没有符合该模式的待清理项目</p>
+            <p class="text-xs text-slate-400 mt-1">${currentMediaTab === 'movie' ? '所有电影均处于待映窗口期、已入库且满足目标，或受白名单保护' : '所有剧集均在活跃更新追更中，未发现可安全退订项'}</p>
+          </div>`;
+        return;
+      }
+
+      let items = currentPreviewData.to_clean;
+      if (modalSearchQuery) {
+        items = items.filter(item =>
+          (item.name || '').toLowerCase().includes(modalSearchQuery) ||
+          String(item.year || '').includes(modalSearchQuery) ||
+          String(item.tmdb_id || '').includes(modalSearchQuery) ||
+          (item.clean_reason || '').toLowerCase().includes(modalSearchQuery)
+        );
+      }
+
+      if (items.length === 0) {
+        listEl.innerHTML = `
+          <div class="p-8 text-center text-slate-400">
+            <i class="fa-solid fa-magnifying-glass text-2xl mb-2 text-slate-300 dark:text-slate-700 block"></i>
+            <p class="text-xs">未找到匹配关键词“${escapeHtml(modalSearchQuery)}”的条目</p>
+            <button onclick="document.getElementById('modalSearchInput').value=''; filterModalCleanList();" class="mt-2 text-xs text-indigo-600 hover:underline">清空搜索条件</button>
+          </div>`;
+        return;
+      }
+
+      listEl.innerHTML = items.map((item, idx) => {
+        const isMovie = item.media_type === 'movie';
+        const isChecked = modalSelectedIds.has(item.id);
+
+        // 媒体类型与专属标签
+        let typeBadge = '';
+        if (isMovie) {
+          typeBadge = `<span class="px-2 py-0.5 rounded font-semibold bg-purple-50 text-purple-700 dark:bg-purple-950/70 dark:text-purple-300 border border-purple-200 dark:border-purple-800 text-[11px] flex items-center gap-1"><i class="fa-solid fa-film text-[10px]"></i>电影</span>`;
+        } else {
+          typeBadge = `<span class="px-2 py-0.5 rounded font-semibold bg-indigo-50 text-indigo-700 dark:bg-indigo-950/70 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800 text-[11px] font-mono flex items-center gap-1"><i class="fa-solid fa-tv text-[10px]"></i>S${String(item.season || 1).padStart(2, '0')}</span>`;
+        }
+
+        const shortTvBadge = item.is_short_tv
+          ? `<span class="px-2 py-0.5 rounded font-semibold bg-fuchsia-50 text-fuchsia-700 dark:bg-fuchsia-950/70 dark:text-fuchsia-300 border border-fuchsia-200 dark:border-fuchsia-800 text-[11px]">短剧</span>`
+          : '';
+
+        const doubanBadge = item.username === '豆瓣榜单'
+          ? `<span class="px-2 py-0.5 rounded font-semibold bg-sky-50 text-sky-700 dark:bg-sky-950/70 dark:text-sky-300 border border-sky-200 dark:border-sky-800 text-[11px]">豆瓣榜单</span>`
+          : '';
+
+        const tmdbBadge = item.tmdb_id
+          ? `<span class="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-500 font-mono text-[10px]">TMDB: ${item.tmdb_id}</span>`
+          : '';
+
+        // 订阅运行状态
+        const stateCode = (item.state || 'R').toUpperCase();
+        const stateColor = stateCode === 'R' ? 'text-emerald-500' : (stateCode === 'P' ? 'text-amber-500' : 'text-slate-400');
+        const stateName = stateCode === 'R' ? '运行中' : (stateCode === 'P' ? '已暂停' : '已停止');
+
+        // 入库状态标签
+        let libraryBadge = '';
+        if (item.in_library_status === 'in_library') {
+          libraryBadge = `<span class="px-2 py-0.5 rounded font-medium bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800/60 text-[11px] flex items-center gap-1"><i class="fa-solid fa-check text-[10px]"></i>已入媒体库</span>`;
+        } else if (item.in_library_status === 'not_in_library') {
+          libraryBadge = `<span class="px-2 py-0.5 rounded font-medium bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400 border border-slate-200 dark:border-slate-700 text-[11px]">未入库</span>`;
+        } else {
+          libraryBadge = `<span class="px-2 py-0.5 rounded font-medium bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400 text-[11px]">入库待核实</span>`;
+        }
+
+        // 进度/公映描述
+        let progressDesc = '';
+        if (!isMovie) {
+          progressDesc = `已收集 ${item.completed_episodes ?? '?'} / ${item.total_episodes ?? '?'} 集`;
+          if (item.lack_episodes != null) {
+            progressDesc += ` (缺 ${item.lack_episodes} 集)`;
+          }
+        } else {
+          if (item.release_stage === 'in_theaters') {
+            progressDesc = '院线热映中';
+          } else if (item.release_stage === 'upcoming_theatrical') {
+            progressDesc = '待映新片';
+          } else if (item.release_stage === 'digital_pending') {
+            progressDesc = '数字版待发';
+          } else {
+            progressDesc = item.year ? `${item.year} 年公映` : '电影';
+          }
+        }
+
+        // 置信度样式
+        const confBorder = item.clean_confidence === 'high'
+          ? 'border-emerald-200 dark:border-emerald-900/40 bg-emerald-50/50 dark:bg-emerald-950/20'
+          : 'border-amber-200 dark:border-amber-900/40 bg-amber-50/50 dark:bg-amber-950/20';
+
+        const confBadge = item.clean_confidence === 'high'
+          ? `<span class="px-2 py-0.5 rounded-full font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 text-[10px]">🟢 安全退订</span>`
+          : `<span class="px-2 py-0.5 rounded-full font-bold bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 text-[10px]">🟡 建议复核</span>`;
+
+        // 按钮组
+        let actionsHtml = `
+          <button onclick="checkSubMediaServer(${item.id})" class="px-2.5 py-1 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 transition font-medium flex items-center gap-1 shadow-2xs" title="核验 Emby/Plex 媒体库实际入库状态">
+            <i class="fa-solid fa-magnifying-glass text-[10px] text-slate-400"></i>查库
+          </button>
+          <button onclick="checkSubResource(${item.id})" class="px-2.5 py-1 text-xs rounded-lg border border-indigo-200 dark:border-indigo-800 bg-indigo-50/60 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 transition font-medium flex items-center gap-1 shadow-2xs" title="核查下载器做种与站点资源状态">
+            <i class="fa-solid fa-bolt text-[10px]"></i>资源
+          </button>
+          <button onclick="planSubOperation(${item.id}, false)" class="px-2.5 py-1 text-xs rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/50 text-amber-700 dark:text-amber-300 transition font-semibold flex items-center gap-1 shadow-2xs" title="单条立即取消订阅，绝对不删除媒体文件">
+            <i class="fa-solid fa-ban text-[10px]"></i>仅退订
+          </button>
+        `;
+        if (!isMovie) {
+          actionsHtml += `
+            <button onclick="planSubOperation(${item.id}, true)" class="px-2.5 py-1 text-xs rounded-lg border border-rose-300 dark:border-rose-700 bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/50 text-rose-700 dark:text-rose-300 transition font-semibold flex items-center gap-1 shadow-2xs" title="仅限剧集：退订并联动清理已归档的源视频">
+              <i class="fa-solid fa-trash-can text-[10px]"></i>退订+删源
+            </button>
+          `;
+        }
+
+        return `
+        <div class="p-3.5 rounded-xl bg-white dark:bg-slate-900 border ${isChecked ? 'border-indigo-300 dark:border-indigo-700 shadow-sm' : 'border-slate-200 dark:border-slate-800'} hover:border-indigo-400 dark:hover:border-indigo-600 transition flex flex-col md:flex-row md:items-center justify-between gap-3.5">
+          <!-- 左侧：多选框 + 封面图 + 详细元信息 -->
+          <div class="flex items-start gap-3 min-w-0 flex-1">
+            <!-- 勾选与序号 -->
+            <div class="flex flex-col items-center justify-center pt-1 flex-shrink-0">
+              <input type="checkbox" class="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer" ${isChecked ? 'checked' : ''} onchange="toggleModalItemCheck(${item.id}, this.checked)">
+              <span class="text-[10px] text-slate-400 font-mono mt-1">${idx + 1}</span>
+            </div>
+
+            <!-- 海报封面大图 -->
+            <div class="w-14 h-20 rounded-lg bg-slate-100 dark:bg-slate-800 flex-shrink-0 overflow-hidden relative border border-slate-200 dark:border-slate-700 shadow-2xs">
+              ${item.poster ? `<img src="${item.poster}" class="w-full h-full object-cover" onerror="this.style.display='none'">` : ''}
+              <div class="absolute inset-0 flex items-center justify-center text-slate-400 text-base pointer-events-none">
+                <i class="fa-solid fa-${isMovie ? 'film' : 'tv'}"></i>
+              </div>
+            </div>
+
+            <!-- 条目核心信息 -->
+            <div class="min-w-0 flex-1 space-y-1.5">
+              <!-- 第1行：标题与大徽标 -->
+              <div class="flex flex-wrap items-center gap-2">
+                <h4 class="text-sm sm:text-base font-bold text-slate-900 dark:text-white leading-snug break-words">${escapeHtml(item.name)}</h4>
+                <span class="text-xs text-slate-500 font-mono font-medium">${item.year ? `(${item.year})` : ''}</span>
+                ${typeBadge}
+                ${shortTvBadge}
+                ${doubanBadge}
+                ${tmdbBadge}
+                <span class="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-400 font-mono text-[10px]">ID: ${item.id}</span>
+              </div>
+
+              <!-- 第2行：状态与入库及集数进度 -->
+              <div class="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                <span class="inline-flex items-center gap-1 font-medium">
+                  <i class="fa-solid fa-circle text-[7px] ${stateColor}"></i>
+                  <span>${stateName}</span>
+                </span>
+                <span class="text-slate-300 dark:text-slate-700">|</span>
+                ${libraryBadge}
+                <span class="text-slate-300 dark:text-slate-700">|</span>
+                <span class="font-mono text-slate-700 dark:text-slate-300 font-medium">
+                  <i class="fa-solid fa-layer-group text-slate-400 mr-1"></i>${progressDesc}
+                </span>
+                ${item.username ? `<span class="text-slate-300 dark:text-slate-700">|</span><span class="text-slate-400 font-mono text-[10px]">添加人: ${escapeHtml(item.username)}</span>` : ''}
+              </div>
+
+              <!-- 第3行：智能清理规则依据（高亮提示框） -->
+              <div class="text-xs p-2 rounded-lg ${confBorder} text-slate-700 dark:text-slate-300 flex items-start gap-2">
+                <span class="font-bold flex-shrink-0 text-amber-700 dark:text-amber-400">【${escapeHtml(item.clean_rule_name)}】</span>
+                <span class="leading-normal flex-1">${escapeHtml(item.clean_reason)}</span>
+                <div class="flex-shrink-0 ml-1">${confBadge}</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 右侧：快捷操作工具栏 -->
+          <div class="flex md:flex-col items-end justify-between md:justify-center gap-2 flex-shrink-0 pt-2 md:pt-0 border-t md:border-t-0 border-slate-100 dark:border-slate-800">
+            <div class="flex items-center gap-1.5">
+              ${actionsHtml}
+            </div>
+          </div>
+        </div>
+        `;
+      }).join('');
     }
 
     async function checkSubResource(id) {
@@ -7310,14 +7568,25 @@
     }
 
     async function confirmBatchCleanSubs() {
-      if (!currentPreviewData || !currentPreviewData.to_clean || currentPreviewData.to_clean.length === 0) {
+      if (!currentPreviewData || !Array.isArray(currentPreviewData.to_clean) || currentPreviewData.to_clean.length === 0) {
         alert('当前没有可退订的条目');
         return;
       }
-      const count = currentPreviewData.matched_count;
+      const selectedItems = currentPreviewData.to_clean.filter(x => modalSelectedIds.has(x.id));
+      if (selectedItems.length === 0) {
+        alert('请至少勾选一个待退订条目！');
+        return;
+      }
+
+      const count = selectedItems.length;
+      const totalCount = currentPreviewData.matched_count;
       const modeName = currentPreviewData.mode_name;
       const mediaName = currentMediaTab === 'movie' ? '电影' : '电视剧';
-      const promptText = `【${mediaName}批量退订确认】\n模式：${modeName}\n数量：共 ${count} 项\n\n确认退订后，系统将仅在 MoviePilot 中取消上述条目的订阅追更，绝对不会删除已有媒体文件、下载任务或做种任务。\n\n确认立即执行批量退订？`;
+      
+      const itemNamesPreview = selectedItems.slice(0, 8).map((x, i) => `${i + 1}. ${x.name} (${x.year || '-'})`).join('\n');
+      const moreSuffix = count > 8 ? `\n... 等共 ${count} 部作品` : '';
+
+      const promptText = `【${mediaName}批量退订确认】\n\n模式：${modeName}\n已选退订数量：${count} 项（匹配清单共 ${totalCount} 项）\n\n拟退订作品：\n${itemNamesPreview}${moreSuffix}\n\n安全提示：确认退订后，系统将仅在 MoviePilot 中取消上述条目的订阅追更，绝不会删除本地已有视频、Emby媒体库正片或做种任务。\n\n确认立即执行批量退订？`;
 
       if (!confirm(promptText)) return;
 
@@ -7325,23 +7594,24 @@
       const btnText = document.getElementById('modalConfirmBtnText');
       if (confirmBtn) {
         confirmBtn.disabled = true;
-        if (btnText) btnText.textContent = `正在执行 (${count}项)...`;
+        if (btnText) btnText.textContent = `正在执行退订 (${count}项)...`;
       }
 
       try {
-        const subIds = currentPreviewData.to_clean.map(x => x.id);
-        const titles = currentPreviewData.to_clean.map(x => x.name);
+        const subIds = selectedItems.map(x => x.id);
+        const titles = selectedItems.map(x => x.name);
         const res = await api('/api/moviepilot/subscriptions/batch-delete', {
           method: 'POST',
           body: JSON.stringify({ sub_ids: subIds, titles: titles, force: false })
         });
-        alert(res.message || '批量退订完成');
+        alert(res.message || '批量退订已完成');
         closeModal('subCleanModal');
         await loadSubscriptions();
       } catch (err) {
         alert('批量退订执行遇到异常: ' + err.message);
       } finally {
         if (confirmBtn) confirmBtn.disabled = false;
+        updateSelectedCount();
       }
     }
 
