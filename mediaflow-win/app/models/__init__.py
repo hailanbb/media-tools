@@ -9,6 +9,11 @@ from app.models.operation import OperationLog
 from app.models.season import SeasonRecord
 from app.models.season_mapping import SeasonMapping
 from app.models.task import Task
+from app.models.transfer_repair import (
+    TransferRepairBaseline,
+    TransferRepairItem,
+    TransferRepairRule,
+)
 
 __all__ = [
     "Task",
@@ -22,4 +27,7 @@ __all__ = [
     "DirectoryGroup",
     "GapFillSiteRule",
     "GapFillWorkPreference",
+    "TransferRepairBaseline",
+    "TransferRepairItem",
+    "TransferRepairRule",
 ]

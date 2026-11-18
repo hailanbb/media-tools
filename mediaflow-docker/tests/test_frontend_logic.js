@@ -162,7 +162,7 @@ console.log("===================================================================
     raw: {show_path: '/src/Show'}};
   const context = {document: {getElementById: getNode}, currentCategory: 'anomaly', currentTaskId: 'task',
     taskList: [{id: 'task', categories: {anomaly: [item], download: [item]}, counts: {}}],
-    escapeHtml: String, updateSelection() {}, findItemByRecordId: () => item,
+    escapeHtml: String, updateSelection() {}, findItemByRecordId: () => item, updateGapFillSitesToolbarBadge() {},
     openModal: id => {context.openedModal = id;}};
   vm.createContext(context);
   vm.runInContext(source('cleanSeasonStatusNote') + ';' + source('renderEpisodesList') + ';renderEpisodesList()', context);
@@ -399,6 +399,7 @@ console.log("===================================================================
       escapeHtml: String,
       cleanSeasonStatusNote: str => str,
       updateSelection() {},
+      updateGapFillSitesToolbarBadge() {},
       findItemByRecordId: id => sampleTask.categories.download.find(x => x.id === id),
       setTimeout: (fn) => fn(),
       _directoryGroupActiveTab: 'pending',

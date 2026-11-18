@@ -114,7 +114,7 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.42</span>
+              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.43</span>
             </div>
             <!-- 完善后的命名 -->
             <p class="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">智能媒体库整理与归档工作台</p>
@@ -484,21 +484,89 @@
       <!-- ================= 视图 C：MoviePilot 媒体整理修复 ================= -->
       <div id="mpTransferRepairView" class="hidden space-y-6">
         <div class="app-card rounded-2xl p-5 space-y-4">
-          <div class="flex items-center justify-between">
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
               <h2 class="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
                 <i class="fa-solid fa-wrench text-indigo-500"></i>
-                MoviePilot 媒体整理修复队列
+                MoviePilot 媒体整理智能修复
               </h2>
-              <p class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">实时连接 MoviePilot，探测下载已完成但因文件锁死、刮削失败或历史中断的任务，一键触发定向修复</p>
+              <p class="text-xs text-slate-500 dark:text-slate-400 mt-0.5" id="transferRepairSubtitle">
+                已连接 MoviePilot · 接管新失败 · 智能推导参数 · 逐文件核验落地
+              </p>
             </div>
-            <button onclick="loadTransferQueue()" class="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition flex items-center gap-1.5">
-              <i class="fa-solid fa-rotate-right text-xs"></i>
-              <span>刷新队列</span>
+            <div class="flex items-center gap-2">
+              <button onclick="scanTransferRepair()" id="scanTransferRepairBtn" class="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold transition flex items-center gap-1.5 shadow-sm shadow-indigo-600/20">
+                <i class="fa-solid fa-magnifying-glass text-xs"></i>
+                <span>立即检查新失败</span>
+              </button>
+              <button onclick="openTransferRepairSettingsModal()" class="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition flex items-center gap-1.5">
+                <i class="fa-solid fa-sliders text-xs"></i>
+                <span>自动修复设置</span>
+              </button>
+              <button onclick="loadTransferRepairData()" class="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition flex items-center gap-1.5" title="刷新数据">
+                <i class="fa-solid fa-rotate-right text-xs"></i>
+              </button>
+            </div>
+          </div>
+
+          <!-- 提示横幅：接管范围明确说明 (第 9.1 节) -->
+          <div class="p-3 rounded-xl bg-indigo-50/70 dark:bg-indigo-950/30 border border-indigo-100 dark:border-indigo-900/40 text-xs text-indigo-900 dark:text-indigo-200 flex items-start gap-2.5">
+            <i class="fa-solid fa-circle-info text-indigo-500 mt-0.5 flex-shrink-0"></i>
+            <div class="space-y-0.5">
+              <span class="font-bold">接管范围与安全边界：</span>
+              <span>默认仅处理模块启用后新发生的整理失败，启用前积压历史保留在 MoviePilot，不自动重试、不计入待修复数；源文件不存在的跳过项不归入成功，已有合格目标自动核实结案。</span>
+            </div>
+          </div>
+
+          <!-- 统计指标网格 (6 项指标 + MP 队列) -->
+          <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-3" id="transferRepairStatsGrid">
+            <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200/80 dark:border-slate-800">
+              <div class="text-[11px] text-slate-500 dark:text-slate-400">待处理文件</div>
+              <div class="text-lg font-bold text-slate-900 dark:text-white mt-0.5" id="trStatPending">-</div>
+            </div>
+            <div class="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200/60 dark:border-emerald-900/40">
+              <div class="text-[11px] text-emerald-700 dark:text-emerald-300 font-medium">可自动修复</div>
+              <div class="text-lg font-bold text-emerald-600 dark:text-emerald-400 mt-0.5" id="trStatReady">-</div>
+            </div>
+            <div class="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200/60 dark:border-amber-900/40">
+              <div class="text-[11px] text-amber-700 dark:text-amber-300 font-medium">需补充选择</div>
+              <div class="text-lg font-bold text-amber-600 dark:text-amber-400 mt-0.5" id="trStatNeedsConfirm">-</div>
+            </div>
+            <div class="p-3 rounded-xl bg-blue-50 dark:bg-blue-950/30 border border-blue-200/60 dark:border-blue-900/40">
+              <div class="text-[11px] text-blue-700 dark:text-blue-300 font-medium">等待环境恢复</div>
+              <div class="text-lg font-bold text-blue-600 dark:text-blue-400 mt-0.5" id="trStatWaitingEnv">-</div>
+            </div>
+            <div class="p-3 rounded-xl bg-indigo-50 dark:bg-indigo-950/30 border border-indigo-200/60 dark:border-indigo-900/40">
+              <div class="text-[11px] text-indigo-700 dark:text-indigo-300 font-medium">今日实际修复</div>
+              <div class="text-lg font-bold text-indigo-600 dark:text-indigo-400 mt-0.5" id="trStatRepairedToday">-</div>
+            </div>
+            <div class="p-3 rounded-xl bg-teal-50 dark:bg-teal-950/30 border border-teal-200/60 dark:border-teal-900/40">
+              <div class="text-[11px] text-teal-700 dark:text-teal-300 font-medium">今日核实结案</div>
+              <div class="text-lg font-bold text-teal-600 dark:text-teal-400 mt-0.5" id="trStatVerifiedToday">-</div>
+            </div>
+            <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200/80 dark:border-slate-800">
+              <div class="text-[11px] text-slate-500 dark:text-slate-400">MP 运行中队列</div>
+              <div class="text-lg font-bold text-slate-700 dark:text-slate-300 mt-0.5" id="trStatMpQueue">-</div>
+            </div>
+          </div>
+
+          <!-- 标签页导航 -->
+          <div class="flex items-center gap-1 border-b border-slate-200 dark:border-slate-800 pt-1">
+            <button onclick="switchTransferRepairTab('pending')" id="trTab-pending" class="px-3.5 py-2 text-xs font-semibold text-indigo-600 border-b-2 border-indigo-600 dark:text-indigo-400 dark:border-indigo-400 transition">
+              待处理 <span id="trBadge-pending" class="ml-1 px-1.5 py-0.2 rounded-full bg-indigo-100 text-indigo-700 dark:bg-indigo-900/60 dark:text-indigo-300 text-[10px]">0</span>
+            </button>
+            <button onclick="switchTransferRepairTab('executing')" id="trTab-executing" class="px-3.5 py-2 text-xs font-semibold text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 transition">
+              执行与核验中 <span id="trBadge-executing" class="ml-1 px-1.5 py-0.2 rounded-full bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400 text-[10px]">0</span>
+            </button>
+            <button onclick="switchTransferRepairTab('resolved')" id="trTab-resolved" class="px-3.5 py-2 text-xs font-semibold text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 transition">
+              已解决 <span id="trBadge-resolved" class="ml-1 px-1.5 py-0.2 rounded-full bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400 text-[10px]">0</span>
+            </button>
+            <button onclick="switchTransferRepairTab('rules_records')" id="trTab-rules_records" class="px-3.5 py-2 text-xs font-semibold text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 transition">
+              规则与记录
             </button>
           </div>
 
-          <!-- 真实队列动态渲染容器 -->
+          <!-- 动态列表容器 -->
           <div class="space-y-3 pt-1" id="transferQueueContainer">
             <!-- 动态生成 -->
           </div>
@@ -692,7 +760,168 @@
   </div>
 
   
-  <!-- 弹窗：初检实时进度悬浮面板 -->
+  <!-- 弹窗：媒体整理修复详情抽屉/模态框 (第 9.3 节) -->
+  <div id="repairDetailModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+    <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-2xl w-full p-4 sm:p-6 space-y-4 border border-slate-200 dark:border-slate-800 shadow-2xl max-h-[90vh] flex flex-col">
+      <div class="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800 flex-shrink-0">
+        <div class="flex items-center space-x-2">
+          <i class="fa-solid fa-file-circle-check text-indigo-500 text-base"></i>
+          <h3 class="text-sm font-bold text-slate-900 dark:text-white" id="repairDetailTitle">媒体整理修复详情与证据链</h3>
+        </div>
+        <button onclick="closeModal('repairDetailModal')" class="text-slate-400 hover:text-slate-600"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+
+      <div class="space-y-3.5 overflow-y-auto pr-1 flex-1 text-xs" id="repairDetailBody">
+        <!-- 动态生成 5 段式详情 -->
+      </div>
+
+      <div class="flex justify-end gap-2 pt-3 border-t border-slate-100 dark:border-slate-800 flex-shrink-0">
+        <button onclick="closeModal('repairDetailModal')" class="px-4 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 text-xs font-medium">关闭</button>
+        <button id="repairDetailActionBtn" onclick="executeRepairFromDetail()" class="px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-sm">
+          <span>立即执行整理</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 弹窗：补充一次选择 (第 9.4 节) -->
+  <div id="repairChoiceModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+    <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-lg w-full p-4 sm:p-6 space-y-4 border border-slate-200 dark:border-slate-800 shadow-2xl max-h-[90vh] flex flex-col">
+      <div class="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800 flex-shrink-0">
+        <div class="flex items-center space-x-2">
+          <i class="fa-solid fa-pen-to-square text-amber-500 text-base"></i>
+          <h3 class="text-sm font-bold text-slate-900 dark:text-white">补充整理选择与编号映射</h3>
+        </div>
+        <button onclick="closeModal('repairChoiceModal')" class="text-slate-400 hover:text-slate-600"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+
+      <div class="space-y-3 overflow-y-auto pr-1 flex-1 text-xs">
+        <input type="hidden" id="repairChoiceItemId" value="">
+        <div>
+          <label class="block text-slate-500 dark:text-slate-400 mb-1">作品标题 / 剧名</label>
+          <input type="text" id="repairChoiceTitle" class="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500">
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-slate-500 dark:text-slate-400 mb-1">媒体类型</label>
+            <select id="repairChoiceMediaType" class="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-800 dark:text-slate-200">
+              <option value="tv">电视剧 (TV)</option>
+              <option value="movie">电影 (Movie)</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-slate-500 dark:text-slate-400 mb-1">季号 (数字)</label>
+            <input type="number" id="repairChoiceSeason" min="0" max="99" value="1" class="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-800 dark:text-slate-200">
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-slate-500 dark:text-slate-400 mb-1">目标集号 (逗号分隔)</label>
+            <input type="text" id="repairChoiceEpisodes" placeholder="如 11 或 11,12" class="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-800 dark:text-slate-200">
+          </div>
+          <div>
+            <label class="block text-slate-500 dark:text-slate-400 mb-1">分段标识 (选填)</label>
+            <input type="text" id="repairChoicePart" placeholder="如 part1 或 上期" class="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-800 dark:text-slate-200">
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-slate-500 dark:text-slate-400 mb-1">特辑与附加内容归属</label>
+          <select id="repairChoiceSpecialHandling" class="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-800 dark:text-slate-200">
+            <option value="standard">按标准正片整理</option>
+            <option value="special">按特别篇 (SP/S00) 整理</option>
+            <option value="extra_dir">保存至附加内容目录</option>
+            <option value="hold">保留源文件暂不处理</option>
+          </select>
+        </div>
+
+        <div>
+          <label class="block text-slate-500 dark:text-slate-400 mb-1">经验复用作用域 (第 6.4 节)</label>
+          <div class="space-y-1.5 pt-0.5">
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="radio" name="repairChoiceScopeRadio" value="this_run" checked class="text-indigo-600">
+              <span class="text-slate-700 dark:text-slate-300">仅本次处理生效</span>
+            </label>
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="radio" name="repairChoiceScopeRadio" value="this_package" class="text-indigo-600">
+              <span class="text-slate-700 dark:text-slate-300">记住此下载包（同发布包其他集号自动套用）</span>
+            </label>
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="radio" name="repairChoiceScopeRadio" value="this_dir_template" class="text-indigo-600">
+              <span class="text-slate-700 dark:text-slate-300">记住此目录同模板（同源目录未来同构文件自动套用）</span>
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <div class="flex justify-end gap-2 pt-3 border-t border-slate-100 dark:border-slate-800 flex-shrink-0">
+        <button onclick="closeModal('repairChoiceModal')" class="px-4 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 text-xs font-medium">取消</button>
+        <button onclick="submitRepairChoice()" class="px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-sm">
+          <span>保存选择并更新计划</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 弹窗：自动修复设置 (第 9.5 节) -->
+  <div id="repairSettingsModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+    <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-md w-full p-4 sm:p-6 space-y-4 border border-slate-200 dark:border-slate-800 shadow-2xl">
+      <div class="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
+        <div class="flex items-center space-x-2">
+          <i class="fa-solid fa-sliders text-indigo-500 text-base"></i>
+          <h3 class="text-sm font-bold text-slate-900 dark:text-white">媒体整理自动修复设置</h3>
+        </div>
+        <button onclick="closeModal('repairSettingsModal')" class="text-slate-400 hover:text-slate-600"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+
+      <div class="space-y-3.5 text-xs">
+        <div class="flex items-center justify-between p-2.5 rounded-xl bg-slate-50 dark:bg-slate-950/60 border border-slate-200/60 dark:border-slate-800">
+          <div>
+            <div class="font-bold text-slate-800 dark:text-slate-200">启用新失败自动发现</div>
+            <div class="text-[11px] text-slate-500 dark:text-slate-400">持续探测接管起点后的整理失败事件</div>
+          </div>
+          <input type="checkbox" id="repairSettingEnabled" class="w-4 h-4 rounded text-indigo-600">
+        </div>
+
+        <div class="flex items-center justify-between p-2.5 rounded-xl bg-slate-50 dark:bg-slate-950/60 border border-slate-200/60 dark:border-slate-800">
+          <div>
+            <div class="font-bold text-slate-800 dark:text-slate-200">开启高确定性自动修复</div>
+            <div class="text-[11px] text-slate-500 dark:text-slate-400">对参数齐备且无冲突项自动调用整理</div>
+          </div>
+          <input type="checkbox" id="repairSettingAutoRepair" class="w-4 h-4 rounded text-indigo-600">
+        </div>
+
+        <div class="grid grid-cols-2 gap-3 pt-1">
+          <div>
+            <label class="block text-slate-500 dark:text-slate-400 mb-1">执行并发限制</label>
+            <input type="number" id="repairSettingMaxConcurrency" min="1" max="5" value="1" class="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-800 dark:text-slate-200">
+          </div>
+          <div>
+            <label class="block text-slate-500 dark:text-slate-400 mb-1">每轮最大提交数</label>
+            <input type="number" id="repairSettingBatchQuota" min="5" max="50" value="20" class="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-800 dark:text-slate-200">
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-slate-500 dark:text-slate-400 mb-1">单计划最大重试预算</label>
+            <input type="number" id="repairSettingRetryBudget" min="1" max="5" value="3" class="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-800 dark:text-slate-200">
+          </div>
+          <div>
+            <label class="block text-slate-500 dark:text-slate-400 mb-1">扫描周期(分钟)</label>
+            <input type="number" id="repairSettingInterval" min="5" max="60" value="10" class="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-800 dark:text-slate-200">
+          </div>
+        </div>
+      </div>
+
+      <div class="flex justify-end gap-2 pt-3 border-t border-slate-100 dark:border-slate-800">
+        <button onclick="closeModal('repairSettingsModal')" class="px-4 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 text-xs font-medium">取消</button>
+        <button onclick="saveTransferRepairSettings()" class="px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-sm">保存设置</button>
+      </div>
+    </div>
+  </div>
   <div id="inspectProgressModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/70 backdrop-blur-sm">
     <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-md w-full p-4 sm:p-6 space-y-4 border border-slate-200 dark:border-slate-800 shadow-2xl">
       <div class="flex items-center justify-between">
@@ -7141,66 +7370,465 @@
       }
     }
 
-    async function loadTransferQueue() {
+    // =========================================================================
+    // 12.2 MoviePilot 媒体整理智能修复 (Transfer Repair)
+    // =========================================================================
+    let currentTransferRepairTab = 'pending';
+    let currentRepairDetailItem = null;
+
+    async function loadTransferRepairData() {
+      const container = document.getElementById('transferQueueContainer');
+      if (!container) return;
+
+      try {
+        // 1. 加载仪表盘汇总统计与基线状态
+        const summary = await api('/api/moviepilot/transfer-repair/summary');
+        const counts = summary.counts || {};
+
+        const setTxt = (id, val) => {
+          const el = document.getElementById(id);
+          if (el) el.textContent = val !== undefined && val !== null ? val : '-';
+        };
+
+        setTxt('trStatPending', counts.pending || 0);
+        setTxt('trStatReady', counts.ready || 0);
+        setTxt('trStatNeedsConfirm', counts.needs_confirmation || 0);
+        setTxt('trStatWaitingEnv', counts.waiting_env || 0);
+        setTxt('trStatRepairedToday', counts.repaired_today || 0);
+        setTxt('trStatVerifiedToday', counts.already_present_verified || 0);
+        setTxt('trStatMpQueue', summary.mp_queue_count || 0);
+
+        setTxt('trBadge-pending', counts.pending || 0);
+        setTxt('trBadge-executing', counts.executing || 0);
+        setTxt('trBadge-resolved', counts.resolved_today || 0);
+
+        const subEl = document.getElementById('transferRepairSubtitle');
+        if (subEl) {
+          const baseId = summary.baseline_history_id || 0;
+          const autoTxt = summary.auto_repair_enabled ? '自动修复: 开启' : '自动修复: 观察模式';
+          subEl.textContent = `已连接 MoviePilot · 接管新失败基线 #${baseId} · ${autoTxt} · 逐文件核验落地`;
+        }
+
+        const navBadge = document.querySelector('#mp-nav-transfer_repair .rounded-full');
+        if (navBadge) {
+          navBadge.textContent = counts.pending > 0 ? `${counts.pending}项待处理` : '基线正常';
+        }
+
+        // 2. 加载当前标签页明细
+        await loadTransferRepairItems();
+
+      } catch (e) {
+        if (container) {
+          container.innerHTML = `<div class="p-6 text-center text-xs text-red-500">获取整理修复数据失败: ${e.message}</div>`;
+        }
+      }
+    }
+
+    // 兼容旧入口
+    const loadTransferQueue = loadTransferRepairData;
+
+    function switchTransferRepairTab(tab) {
+      currentTransferRepairTab = tab;
+      ['pending', 'executing', 'resolved', 'rules_records'].forEach(t => {
+        const btn = document.getElementById(`trTab-${t}`);
+        if (!btn) return;
+        if (t === tab) {
+          btn.className = 'px-3.5 py-2 text-xs font-semibold text-indigo-600 border-b-2 border-indigo-600 dark:text-indigo-400 dark:border-indigo-400 transition';
+        } else {
+          btn.className = 'px-3.5 py-2 text-xs font-semibold text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 transition';
+        }
+      });
+      loadTransferRepairItems();
+    }
+
+    async function loadTransferRepairItems() {
       const container = document.getElementById('transferQueueContainer');
       if (!container) return;
       container.innerHTML = `
         <div class="p-8 text-center text-slate-400">
           <i class="fa-solid fa-spinner fa-spin text-2xl mb-2 text-indigo-500 block"></i>
-          <p class="text-xs">正在查询 MoviePilot 转移队列...</p>
+          <p class="text-xs">正在加载修复项清单...</p>
         </div>`;
 
       try {
-        const queue = await api('/api/moviepilot/transfer-queue');
-        const badge = document.querySelector('#mp-nav-transfer_repair .rounded-full');
-        const items = Array.isArray(queue) ? queue : [];
-
-        if (badge) {
-          badge.textContent = items.length > 0 ? `${items.length}项卡滞` : '队列正常';
+        if (currentTransferRepairTab === 'rules_records') {
+          // 渲染规则与跳过记录
+          const [rules, skippedResp] = await Promise.all([
+            api('/api/moviepilot/transfer-repair/rules'),
+            api('/api/moviepilot/transfer-repair/items?tab=rules_records&limit=30'),
+          ]);
+          renderRulesAndRecords(container, rules, skippedResp.items || []);
+          return;
         }
 
+        const res = await api(`/api/moviepilot/transfer-repair/items?tab=${currentTransferRepairTab}&limit=50`);
+        const items = res.items || [];
+
         if (items.length === 0) {
+          let emptyTitle = '当前暂无待处理项';
+          let emptyDesc = '接管范围内的整理任务均正常或已结案。若有新失败发生，系统将自动增量捕获并诊断。';
+          if (currentTransferRepairTab === 'executing') {
+            emptyTitle = '当前无正在执行或核验中的任务';
+            emptyDesc = '所有提交的整理任务已核验落地或归档。';
+          } else if (currentTransferRepairTab === 'resolved') {
+            emptyTitle = '今日暂无已结案记录';
+            emptyDesc = '完成整理核验或已有合格目标核实的记录将汇总于此。';
+          }
           container.innerHTML = `
             <div class="p-8 text-center rounded-xl border border-dashed border-emerald-300 dark:border-emerald-800/60 bg-emerald-50/30 dark:bg-emerald-950/20">
               <i class="fa-solid fa-circle-check text-2xl text-emerald-500 mb-2 block"></i>
-              <div class="font-bold text-xs text-emerald-800 dark:text-emerald-300">转移整理队列畅通</div>
-              <p class="text-[11px] text-slate-500 dark:text-slate-400 mt-1">当前 MoviePilot 没有处于卡滞或排他锁阻塞的整理任务，下载完成后将自动秒级整理。</p>
+              <div class="font-bold text-xs text-emerald-800 dark:text-emerald-300">${emptyTitle}</div>
+              <p class="text-[11px] text-slate-500 dark:text-slate-400 mt-1">${emptyDesc}</p>
             </div>`;
           return;
         }
 
-        container.innerHTML = items.map(item => `
-          <div class="p-4 rounded-xl border border-amber-200 dark:border-amber-800/60 bg-amber-50/60 dark:bg-amber-950/20 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs">
-            <div class="space-y-1 min-w-0 flex-1">
-              <div class="flex items-center gap-2">
-                <span class="font-bold text-slate-900 dark:text-white truncate">${item.title || item.name || '未知任务'}</span>
-                <span class="px-2 py-0.2 rounded bg-amber-100 text-amber-800 dark:bg-amber-900/60 dark:text-amber-300 font-mono text-[10px] flex-shrink-0">卡滞</span>
-              </div>
-              <div class="text-slate-500 dark:text-slate-400 font-mono text-[11px] truncate">
-                源路径: ${item.source_path || item.src || item.path || '未知'}
-              </div>
-              <div class="text-amber-700 dark:text-amber-400 text-[11px]">
-                原因: ${item.error || item.reason || '整理进程被锁或软链接冲突'}
-              </div>
-            </div>
-            <button onclick="repairTransferItem('${item.id || item.item_id}')" class="px-3.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold shadow-sm transition text-xs flex-shrink-0">
-              <i class="fa-solid fa-play mr-1"></i> 定向修复
-            </button>
-          </div>
-        `).join('');
+        container.innerHTML = items.map(item => renderTransferRepairItemCard(item)).join('');
       } catch (e) {
-        container.innerHTML = `<div class="p-6 text-center text-xs text-red-500">获取转移队列失败: ${e.message}</div>`;
+        container.innerHTML = `<div class="p-6 text-center text-xs text-red-500">加载修复项列表失败: ${e.message}</div>`;
       }
     }
 
-    async function repairTransferItem(itemId) {
-      if (!itemId) { alert('无效的任务ID'); return; }
+    function renderTransferRepairItemCard(item) {
+      const st = item.status;
+      let badgeBg = 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300';
+      let badgeText = st;
+
+      if (st === 'ready') {
+        badgeBg = 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/70 dark:text-emerald-300';
+        badgeText = '可自动修复';
+      } else if (st === 'needs_confirmation') {
+        badgeBg = 'bg-amber-100 text-amber-800 dark:bg-amber-950/70 dark:text-amber-300';
+        badgeText = '需补充选择';
+      } else if (st === 'waiting_environment') {
+        badgeBg = 'bg-blue-100 text-blue-800 dark:bg-blue-950/70 dark:text-blue-300';
+        badgeText = '等待环境恢复';
+      } else if (st === 'conflict') {
+        badgeBg = 'bg-red-100 text-red-800 dark:bg-red-950/70 dark:text-red-300';
+        badgeText = '冲突待解决';
+      } else if (st === 'protected') {
+        badgeBg = 'bg-purple-100 text-purple-800 dark:bg-purple-950/70 dark:text-purple-300';
+        badgeText = '已保护';
+      } else if (st === 'resolved') {
+        badgeBg = 'bg-teal-100 text-teal-800 dark:bg-teal-950/70 dark:text-teal-300';
+        badgeText = item.resolution_code === 'already_present_verified' ? '目标已存在(核实结案)' : '整理成功';
+      } else if (st === 'skipped') {
+        badgeBg = 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400';
+        badgeText = '已跳过 (源不存在)';
+      }
+
+      const showTitle = item.title || '作品待核实';
+      const seasonTxt = item.season_number !== null ? `S${String(item.season_number).padStart(2, '0')}` : '季待定';
+      const epsTxt = item.episode_numbers && item.episode_numbers.length > 0
+        ? 'E' + item.episode_numbers.map(e => String(e).padStart(2, '0')).join('-E')
+        : (item.is_special ? (item.special_type || '特辑') : '集待定');
+      const mediaBadge = item.media_type === 'movie' ? '电影' : '电视剧';
+
+      return `
+        <div class="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 flex flex-col md:flex-row items-start md:items-center justify-between gap-3 text-xs shadow-sm hover:border-slate-300 dark:hover:border-slate-700 transition">
+          <div class="space-y-1.5 min-w-0 flex-1">
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="font-bold text-slate-900 dark:text-white text-sm">${showTitle}</span>
+              <span class="px-2 py-0.5 rounded text-[10px] font-mono font-medium ${badgeBg}">${badgeText}</span>
+              <span class="px-1.5 py-0.2 rounded text-[10px] bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400">${mediaBadge}</span>
+              <span class="font-mono text-[11px] text-indigo-600 dark:text-indigo-400 font-semibold">${seasonTxt} ${epsTxt}</span>
+            </div>
+            <div class="text-slate-500 dark:text-slate-400 font-mono text-[11px] truncate" title="${item.source_path}">
+              源文件: ${item.file_basename || item.source_path}
+            </div>
+            <div class="text-slate-700 dark:text-slate-300 text-[11px] flex items-center gap-1.5">
+              <i class="fa-solid fa-circle-dot text-[9px] ${st === 'ready' ? 'text-emerald-500' : 'text-amber-500'}"></i>
+              <span>${item.main_block_reason || item.raw_error || '无'}</span>
+            </div>
+          </div>
+
+          <div class="flex items-center gap-2 flex-shrink-0 flex-wrap">
+            ${st === 'ready' ? `
+              <button onclick="executeSingleRepair('${item.id}')" class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-semibold transition text-xs flex items-center gap-1 shadow-sm">
+                <i class="fa-solid fa-play text-xs"></i> 立即整理
+              </button>
+            ` : ''}
+            <button onclick="openRepairChoiceModal('${item.id}')" class="px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-medium transition text-xs flex items-center gap-1">
+              <i class="fa-solid fa-pen text-xs"></i> 补充选择
+            </button>
+            <button onclick="openRepairDetailModal('${item.id}')" class="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 transition text-xs flex items-center gap-1">
+              <i class="fa-solid fa-eye text-xs"></i> 查看详情
+            </button>
+            <button onclick="toggleRepairItemProtect('${item.id}')" class="p-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-400 hover:text-purple-600 transition text-xs" title="${item.is_protected ? '解除保护' : '保护此项'}">
+              <i class="fa-solid ${item.is_protected ? 'fa-shield text-purple-600' : 'fa-shield-halved'}"></i>
+            </button>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderRulesAndRecords(container, rules, skippedItems) {
+      let rulesHtml = rules.length === 0 ? `
+        <div class="p-4 text-center text-slate-400 text-xs border border-dashed border-slate-200 dark:border-slate-800 rounded-xl">
+          暂无已保存的智能复用规则。可在“补充选择”弹窗中勾选“记住此下载包/目录模板”以创建规则。
+        </div>` : rules.map(r => `
+        <div class="p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 flex items-center justify-between gap-3 text-xs">
+          <div class="space-y-0.5">
+            <div class="flex items-center gap-2">
+              <span class="font-bold text-slate-900 dark:text-white">《${r.show_title}》S${String(r.season_number).padStart(2, '0')}</span>
+              <span class="px-1.5 py-0.2 rounded text-[10px] bg-indigo-50 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">${r.scope_kind === 'this_package' ? '同下载包' : '目录模板'}</span>
+              <span class="text-[11px] text-slate-500 font-mono">命中: ${r.hit_count} 次</span>
+            </div>
+            <div class="text-slate-500 font-mono text-[11px] truncate">作用域特征: ${r.scope_key}</div>
+          </div>
+          <button onclick="deleteRepairRule('${r.id}')" class="text-slate-400 hover:text-red-500 p-1.5 transition"><i class="fa-solid fa-trash-can text-xs"></i></button>
+        </div>
+      `).join('');
+
+      let skippedHtml = skippedItems.length === 0 ? `
+        <div class="p-4 text-center text-slate-400 text-xs border border-dashed border-slate-200 dark:border-slate-800 rounded-xl">
+          暂无被跳过的记录。
+        </div>` : skippedItems.map(it => `
+        <div class="p-2.5 rounded-lg border border-slate-100 dark:border-slate-800/60 text-xs flex items-center justify-between">
+          <div class="font-mono truncate max-w-md text-slate-600 dark:text-slate-400">${it.file_basename || it.source_path}</div>
+          <span class="text-[11px] text-slate-500">${it.skip_reason === 'source_missing' ? '源不存在跳过' : (it.main_block_reason || '已记录')}</span>
+        </div>
+      `).join('');
+
+      container.innerHTML = `
+        <div class="space-y-4">
+          <div>
+            <h3 class="text-xs font-bold text-slate-900 dark:text-white mb-2 flex items-center gap-1.5">
+              <i class="fa-solid fa-brain text-indigo-500"></i> 已保存的经验复用规则 (第 6.4 节)
+            </h3>
+            <div class="space-y-2">${rulesHtml}</div>
+          </div>
+
+          <div class="pt-2">
+            <h3 class="text-xs font-bold text-slate-900 dark:text-white mb-2 flex items-center gap-1.5">
+              <i class="fa-solid fa-forward text-slate-400"></i> 跳过与保护审计记录 (第 4.3 节)
+            </h3>
+            <div class="space-y-1.5">${skippedHtml}</div>
+          </div>
+        </div>
+      `;
+    }
+
+    async function scanTransferRepair() {
+      const btn = document.getElementById('scanTransferRepairBtn');
+      if (btn) btn.setAttribute('disabled', 'true');
       try {
-        const resp = await api(`/api/moviepilot/transfer-repair/${itemId}`, { method: 'POST' });
-        alert(resp.message || '修复任务已提交！');
-        loadTransferQueue();
+        const res = await api('/api/moviepilot/transfer-repair/scan', { method: 'POST', body: JSON.stringify({ max_pages: 5, page_size: 50 }) });
+        alert(`扫描完成！发现新失败 ${res.new_failures_found || 0} 条，新增修复项 ${res.new_items_created || 0} 个。`);
+        loadTransferRepairData();
       } catch (e) {
-        alert(`修复失败: ${e.message}`);
+        alert(`扫描失败: ${e.message}`);
+      } finally {
+        if (btn) btn.removeAttribute('disabled');
+      }
+    }
+
+    async function executeSingleRepair(itemId) {
+      if (!itemId) return;
+      try {
+        const res = await api('/api/moviepilot/transfer-repair/execute', {
+          method: 'POST',
+          body: JSON.stringify({ item_ids: [itemId] }),
+        });
+        const first = (res.results || [])[0] || {};
+        if (first.ok) {
+          alert('整理请求已提交！' + (first.message || ''));
+        } else {
+          alert('整理受阻: ' + (first.reason || '未知原因'));
+        }
+        loadTransferRepairData();
+      } catch (e) {
+        alert(`执行整理异常: ${e.message}`);
+      }
+    }
+
+    const repairTransferItem = executeSingleRepair;
+
+    async function toggleRepairItemProtect(itemId) {
+      try {
+        const res = await api(`/api/moviepilot/transfer-repair/items/${itemId}/protect`, { method: 'POST' });
+        loadTransferRepairData();
+      } catch (e) {
+        alert(`更新保护状态失败: ${e.message}`);
+      }
+    }
+
+    async function openRepairDetailModal(itemId) {
+      try {
+        const item = await api(`/api/moviepilot/transfer-repair/items/${itemId}`);
+        currentRepairDetailItem = item;
+        const body = document.getElementById('repairDetailBody');
+        if (!body) return;
+
+        const plan = item.plan || {};
+        const epsTxt = (item.episode_numbers || []).map(e => `E${String(e).padStart(2, '0')}`).join(', ') || '未确定';
+
+        body.innerHTML = `
+          <!-- 1. 问题是什么 -->
+          <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-950/60 border border-slate-200/80 dark:border-slate-800 space-y-1">
+            <div class="font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-red-500"></span> 1. 原始问题与当前状态
+            </div>
+            <div class="text-[11px] text-slate-600 dark:text-slate-400">原始错误: <span class="font-mono text-red-600 dark:text-red-400">${item.raw_error || '无'}</span></div>
+            <div class="text-[11px] text-slate-600 dark:text-slate-400">当前诊断状态: <span class="font-mono text-indigo-600 dark:text-indigo-400">${item.status}</span> (${item.main_block_reason || '-'})</div>
+          </div>
+
+          <!-- 2. 系统准备怎么改 -->
+          <div class="p-3 rounded-xl bg-indigo-50/50 dark:bg-indigo-950/30 border border-indigo-100 dark:border-indigo-900/40 space-y-1">
+            <div class="font-bold text-indigo-900 dark:text-indigo-200 flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-indigo-500"></span> 2. 参数推导与拟执行计划
+            </div>
+            <div class="text-[11px] text-slate-700 dark:text-slate-300">目标作品: 《<span class="font-bold">${item.title || '未知'}</span>》 (${item.media_type === 'movie' ? '电影' : '电视剧'})</div>
+            <div class="text-[11px] text-slate-700 dark:text-slate-300">目标季集: <span class="font-mono font-bold">${item.season_number !== null ? 'S' + String(item.season_number).padStart(2, '0') : '未知'} ${epsTxt}</span> ${item.part ? `[分段: ${item.part}]` : ''}</div>
+          </div>
+
+          <!-- 3. 为什么这样判断 -->
+          <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-950/60 border border-slate-200/80 dark:border-slate-800 space-y-1">
+            <div class="font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-amber-500"></span> 3. 判断依据与证据链
+            </div>
+            <div class="text-[11px] text-slate-600 dark:text-slate-400">• 文件名解析: 剔除版本标记与噪音，命中季集正则与分段标记</div>
+            <div class="text-[11px] text-slate-600 dark:text-slate-400">• 安全保护门禁: 严格验证 from_history=false、reorganize=false，不盲目清理旧目标</div>
+          </div>
+
+          <!-- 4. 逐文件对照 -->
+          <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-950/60 border border-slate-200/80 dark:border-slate-800 space-y-1">
+            <div class="font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-teal-500"></span> 4. 逐文件路径映射
+            </div>
+            <div class="text-[11px] text-slate-500 font-mono break-all">源: ${item.source_path}</div>
+            <div class="text-[11px] text-slate-500 font-mono break-all">目标目录: ${plan.target_dir || '(继承 MoviePilot 推荐目录配置)'}</div>
+          </div>
+
+          <!-- 5. 执行与验证 -->
+          <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-950/60 border border-slate-200/80 dark:border-slate-800 space-y-1">
+            <div class="font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-blue-500"></span> 5. 执行与验证记录
+            </div>
+            <div class="text-[11px] text-slate-600 dark:text-slate-400">重试次数: ${item.retry_count || 0} 次 | 保护状态: ${item.is_protected ? '已保护' : '未保护'}</div>
+          </div>
+        `;
+
+        const actBtn = document.getElementById('repairDetailActionBtn');
+        if (actBtn) {
+          actBtn.style.display = item.status === 'ready' ? 'inline-block' : 'none';
+        }
+
+        openModal('repairDetailModal');
+      } catch (e) {
+        alert(`加载详情失败: ${e.message}`);
+      }
+    }
+
+    async function executeRepairFromDetail() {
+      if (!currentRepairDetailItem) return;
+      closeModal('repairDetailModal');
+      await executeSingleRepair(currentRepairDetailItem.id);
+    }
+
+    async function openRepairChoiceModal(itemId) {
+      try {
+        const item = await api(`/api/moviepilot/transfer-repair/items/${itemId}`);
+        document.getElementById('repairChoiceItemId').value = item.id;
+        document.getElementById('repairChoiceTitle').value = item.title || '';
+        document.getElementById('repairChoiceMediaType').value = item.media_type || 'tv';
+        document.getElementById('repairChoiceSeason').value = item.season_number !== null ? item.season_number : 1;
+        document.getElementById('repairChoiceEpisodes').value = (item.episode_numbers || []).join(', ');
+        document.getElementById('repairChoicePart').value = item.part || '';
+        openModal('repairChoiceModal');
+      } catch (e) {
+        alert(`加载修复项失败: ${e.message}`);
+      }
+    }
+
+    async function submitRepairChoice() {
+      const itemId = document.getElementById('repairChoiceItemId').value;
+      if (!itemId) return;
+
+      const title = document.getElementById('repairChoiceTitle').value.trim();
+      const mediaType = document.getElementById('repairChoiceMediaType').value;
+      const season = parseInt(document.getElementById('repairChoiceSeason').value, 10);
+      const epsStr = document.getElementById('repairChoiceEpisodes').value.trim();
+      const part = document.getElementById('repairChoicePart').value.trim() || null;
+      const specialHandling = document.getElementById('repairChoiceSpecialHandling').value;
+      const scopeRadio = document.querySelector('input[name="repairChoiceScopeRadio"]:checked');
+      const rememberScope = scopeRadio ? scopeRadio.value : 'this_run';
+
+      let eps = [];
+      if (epsStr) {
+        eps = epsStr.split(/[,，\s]+/).map(s => parseInt(s, 10)).filter(n => !isNaN(n));
+      }
+
+      try {
+        const body = {
+          title: title,
+          media_type: mediaType,
+          season_number: isNaN(season) ? 1 : season,
+          episode_numbers: eps,
+          part: part,
+          is_special: specialHandling === 'special',
+          remember_scope: rememberScope,
+        };
+
+        const res = await api(`/api/moviepilot/transfer-repair/items/${itemId}/plan`, {
+          method: 'POST',
+          body: JSON.stringify(body),
+        });
+
+        alert(res.message || '选择已保存并更新计划！');
+        closeModal('repairChoiceModal');
+        loadTransferRepairData();
+      } catch (e) {
+        alert(`保存选择失败: ${e.message}`);
+      }
+    }
+
+    async function openTransferRepairSettingsModal() {
+      try {
+        const settings = await api('/api/moviepilot/transfer-repair/settings');
+        document.getElementById('repairSettingEnabled').checked = bool(settings.is_enabled);
+        document.getElementById('repairSettingAutoRepair').checked = bool(settings.auto_repair_enabled);
+        document.getElementById('repairSettingMaxConcurrency').value = settings.max_concurrency || 1;
+        document.getElementById('repairSettingBatchQuota').value = settings.batch_quota || 20;
+        document.getElementById('repairSettingRetryBudget').value = settings.retry_budget || 3;
+        document.getElementById('repairSettingInterval').value = settings.scan_interval_minutes || 10;
+        openModal('repairSettingsModal');
+      } catch (e) {
+        alert(`加载设置失败: ${e.message}`);
+      }
+    }
+
+    async function saveTransferRepairSettings() {
+      try {
+        const body = {
+          is_enabled: document.getElementById('repairSettingEnabled').checked,
+          auto_repair_enabled: document.getElementById('repairSettingAutoRepair').checked,
+          max_concurrency: parseInt(document.getElementById('repairSettingMaxConcurrency').value, 10) || 1,
+          batch_quota: parseInt(document.getElementById('repairSettingBatchQuota').value, 10) || 20,
+          retry_budget: parseInt(document.getElementById('repairSettingRetryBudget').value, 10) || 3,
+          scan_interval_minutes: parseInt(document.getElementById('repairSettingInterval').value, 10) || 10,
+        };
+
+        await api('/api/moviepilot/transfer-repair/settings', {
+          method: 'PUT',
+          body: JSON.stringify(body),
+        });
+
+        alert('设置已成功保存！');
+        closeModal('repairSettingsModal');
+        loadTransferRepairData();
+      } catch (e) {
+        alert(`保存设置失败: ${e.message}`);
+      }
+    }
+
+    async function deleteRepairRule(ruleId) {
+      if (!confirm('确定删除此复用规则吗？')) return;
+      try {
+        await api(`/api/moviepilot/transfer-repair/rules/${ruleId}`, { method: 'DELETE' });
+        loadTransferRepairData();
+      } catch (e) {
+        alert(`删除规则失败: ${e.message}`);
       }
     }
 

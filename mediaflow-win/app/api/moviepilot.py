@@ -518,13 +518,321 @@ async def list_transfer_queue() -> list[dict]:
         await mp.close()
 
 
-@router.post("/transfer-repair/{item_id}", response_model=StatusResponse)
-async def repair_transfer(item_id: str) -> StatusResponse:
-    """修复卡住的转移任务 — 真正向 MoviePilot 发起手动转移重试。"""
+# ---------- 媒体整理智能修复 (Transfer Repair) ----------
+
+class TransferRepairScanRequest(BaseModel):
+    max_pages: int = 5
+    page_size: int = 50
+
+
+class TransferRepairExecuteRequest(BaseModel):
+    item_ids: list[str]
+
+
+class TransferRepairPlanUpdateRequest(BaseModel):
+    title: str | None = None
+    media_type: str | None = None
+    season_number: int | None = None
+    episode_numbers: list[int] | None = None
+    part: str | None = None
+    is_special: bool | None = None
+    special_type: str | None = None
+    remember_scope: str | None = None
+    numbering_mode: str | None = "standard"
+    episode_offset: int | None = 0
+
+
+class TransferRepairSettingsRequest(BaseModel):
+    is_enabled: bool | None = None
+    auto_repair_enabled: bool | None = None
+    max_concurrency: int | None = None
+    batch_quota: int | None = None
+    retry_budget: int | None = None
+    scan_interval_minutes: int | None = None
+
+
+class TransferRepairRuleCreateRequest(BaseModel):
+    scope_kind: str
+    scope_key: str
+    show_title: str
+    media_type: str = "tv"
+    tmdb_id: int | None = None
+    season_number: int = 1
+    numbering_mode: str = "standard"
+    episode_offset: int = 0
+    note: str = ""
+
+
+@router.post("/transfer-repair/scan")
+async def scan_transfer_repair(
+    req: TransferRepairScanRequest | None = None,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """启动 MoviePilot 整理失败扫描并执行智能诊断 (R01, R02, R29)。"""
+    from app.services.transfer_repair_service import scan_new_failures
     _check_mp_configured()
     mp = MoviePilotClient()
     try:
-        # 1. 从当前转移队列中定位任务对应的源路径
+        max_p = req.max_pages if req else 5
+        p_sz = req.page_size if req else 50
+        return await scan_new_failures(db, mp, max_pages=max_p, page_size=p_sz)
+    finally:
+        await mp.close()
+
+
+@router.get("/transfer-repair/summary")
+async def get_transfer_repair_summary_endpoint(
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """获取整理修复仪表盘统计数据 (R01, R29)。"""
+    from app.services.transfer_repair_service import get_repair_summary
+    mp = MoviePilotClient() if get_settings().mp_url else None
+    try:
+        return await get_repair_summary(db, mp)
+    finally:
+        if mp:
+            await mp.close()
+
+
+@router.get("/transfer-repair/items")
+async def list_transfer_repair_items(
+    tab: str = "pending",
+    category: str | None = None,
+    keyword: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """获取整理修复项列表。"""
+    from app.services.transfer_repair_service import get_repair_items
+    return await get_repair_items(db, tab=tab, category=category, keyword=keyword, limit=limit, offset=offset)
+
+
+@router.get("/transfer-repair/items/{item_id}")
+async def get_transfer_repair_item_detail(
+    item_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """获取单个修复项详情、证据快照与计划预览。"""
+    from app.models.transfer_repair import TransferRepairItem
+    item = await db.get(TransferRepairItem, item_id)
+    if not item:
+        raise HTTPException(404, "修复项不存在")
+    return {
+        "id": item.id,
+        "source_path": item.source_path,
+        "file_basename": item.file_basename,
+        "file_size": item.file_size,
+        "title": item.title,
+        "media_type": item.media_type,
+        "tmdb_id": item.tmdb_id,
+        "season_number": item.season_number,
+        "episode_numbers": json.loads(item.episode_numbers_json or "[]"),
+        "part": item.part,
+        "is_special": item.is_special,
+        "special_type": item.special_type,
+        "status": item.status,
+        "error_category": item.error_category,
+        "main_block_reason": item.main_block_reason,
+        "raw_error": item.raw_error,
+        "resolution_code": item.resolution_code,
+        "skip_reason": item.skip_reason,
+        "plan": json.loads(item.plan_json or "{}"),
+        "plan_hash": item.plan_hash,
+        "is_protected": item.is_protected,
+        "retry_count": item.retry_count,
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+        "updated_at": item.updated_at.isoformat() if item.updated_at else None,
+    }
+
+
+@router.post("/transfer-repair/items/{item_id}/plan")
+async def update_transfer_repair_plan_endpoint(
+    item_id: str,
+    req: TransferRepairPlanUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """用户补充一次选择并生成新计划预览 (R04, R24)。"""
+    from app.services.transfer_repair_service import update_item_plan_choice
+    res = await update_item_plan_choice(db, item_id, req.model_dump())
+    if not res.get("ok"):
+        raise HTTPException(400, res.get("message"))
+    return res
+
+
+@router.post("/transfer-repair/execute")
+async def execute_transfer_repairs(
+    req: TransferRepairExecuteRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """批量提交明确计划执行整理并验证 (R03, R16)。"""
+    from app.services.transfer_repair_service import execute_repair_plans
+    _check_mp_configured()
+    mp = MoviePilotClient()
+    try:
+        return await execute_repair_plans(db, mp, req.item_ids)
+    finally:
+        await mp.close()
+
+
+@router.post("/transfer-repair/items/{item_id}/protect")
+async def toggle_item_protect(
+    item_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """保护或解除保护修复项 (R26)。"""
+    from app.models.transfer_repair import TransferRepairItem
+    item = await db.get(TransferRepairItem, item_id)
+    if not item:
+        raise HTTPException(404, "修复项不存在")
+    item.is_protected = not item.is_protected
+    if item.is_protected:
+        item.status = "protected"
+        item.main_block_reason = "用户已手动设置保护，暂停自动修复"
+    else:
+        item.status = "ready" if item.plan_hash else "diagnosing"
+    item.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    return {"ok": True, "is_protected": item.is_protected, "status": item.status}
+
+
+@router.get("/transfer-repair/settings")
+async def get_transfer_repair_settings(
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """获取媒体整理自动化设置与基线。"""
+    from app.services.transfer_repair_service import get_or_create_baseline
+    baseline = await get_or_create_baseline(db)
+    return {
+        "instance_id": baseline.instance_id,
+        "baseline_history_id": baseline.baseline_history_id,
+        "takeover_at": baseline.takeover_at.isoformat() if baseline.takeover_at else None,
+        "is_enabled": baseline.is_enabled,
+        "auto_repair_enabled": baseline.auto_repair_enabled,
+        "max_concurrency": baseline.max_concurrency,
+        "batch_quota": baseline.batch_quota,
+        "retry_budget": baseline.retry_budget,
+        "scan_interval_minutes": baseline.scan_interval_minutes,
+    }
+
+
+@router.put("/transfer-repair/settings")
+async def update_transfer_repair_settings(
+    req: TransferRepairSettingsRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """更新媒体整理自动化设置。"""
+    from app.services.transfer_repair_service import get_or_create_baseline
+    baseline = await get_or_create_baseline(db)
+    if req.is_enabled is not None:
+        baseline.is_enabled = req.is_enabled
+    if req.auto_repair_enabled is not None:
+        baseline.auto_repair_enabled = req.auto_repair_enabled
+    if req.max_concurrency is not None:
+        baseline.max_concurrency = req.max_concurrency
+    if req.batch_quota is not None:
+        baseline.batch_quota = req.batch_quota
+    if req.retry_budget is not None:
+        baseline.retry_budget = req.retry_budget
+    if req.scan_interval_minutes is not None:
+        baseline.scan_interval_minutes = req.scan_interval_minutes
+    baseline.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    return {"ok": True, "message": "设置已保存"}
+
+
+@router.get("/transfer-repair/rules")
+async def list_transfer_repair_rules(
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    """查询整理复用规则列表 (R24)。"""
+    from app.models.transfer_repair import TransferRepairRule
+    res = await db.execute(select(TransferRepairRule).order_by(TransferRepairRule.created_at.desc()))
+    rules = res.scalars().all()
+    return [
+        {
+            "id": r.id,
+            "scope_kind": r.scope_kind,
+            "scope_key": r.scope_key,
+            "show_title": r.show_title,
+            "media_type": r.media_type,
+            "tmdb_id": r.tmdb_id,
+            "season_number": r.season_number,
+            "numbering_mode": r.numbering_mode,
+            "episode_offset": r.episode_offset,
+            "is_active": r.is_active,
+            "hit_count": r.hit_count,
+            "note": r.note,
+        }
+        for r in rules
+    ]
+
+
+@router.post("/transfer-repair/rules")
+async def create_transfer_repair_rule(
+    req: TransferRepairRuleCreateRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """新增媒体整理经验复用规则。"""
+    from app.models.transfer_repair import TransferRepairRule
+    rule = TransferRepairRule(
+        scope_kind=req.scope_kind,
+        scope_key=req.scope_key,
+        show_title=req.show_title,
+        media_type=req.media_type,
+        tmdb_id=req.tmdb_id,
+        season_number=req.season_number,
+        numbering_mode=req.numbering_mode,
+        episode_offset=req.episode_offset,
+        note=req.note,
+    )
+    db.add(rule)
+    await db.commit()
+    return {"ok": True, "id": rule.id, "message": "规则已创建"}
+
+
+@router.delete("/transfer-repair/rules/{rule_id}")
+async def delete_transfer_repair_rule(
+    rule_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """删除或停用经验复用规则。"""
+    from app.models.transfer_repair import TransferRepairRule
+    rule = await db.get(TransferRepairRule, rule_id)
+    if not rule:
+        raise HTTPException(404, "规则不存在")
+    await db.delete(rule)
+    await db.commit()
+    return {"ok": True, "message": "规则已删除"}
+
+
+@router.post("/transfer-repair/{item_id}", response_model=StatusResponse)
+async def repair_transfer(
+    item_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> StatusResponse:
+    """修复整理任务 — 优先执行文件计划，兼容旧队列直接重试。"""
+    from app.models.transfer_repair import TransferRepairItem
+    from app.services.transfer_repair_service import execute_repair_plans
+
+    # 1. 如果存在精确的 TransferRepairItem 记录，通过新引擎执行
+    item = await db.get(TransferRepairItem, item_id)
+    if item:
+        _check_mp_configured()
+        mp = MoviePilotClient()
+        try:
+            exec_res = await execute_repair_plans(db, mp, [item_id])
+            first_res = exec_res.get("results", [{}])[0]
+            ok = bool(first_res.get("ok"))
+            msg = first_res.get("message") or first_res.get("reason") or "执行完成"
+            return StatusResponse(ok=ok, message=msg)
+        finally:
+            await mp.close()
+
+    # 2. 否则回退兼容旧版队列逻辑
+    _check_mp_configured()
+    mp = MoviePilotClient()
+    try:
         queue = await mp.get_transfer_queue()
         matched = None
         if isinstance(queue, list):
@@ -546,10 +854,9 @@ async def repair_transfer(item_id: str) -> StatusResponse:
         if not source_path:
             return StatusResponse(
                 ok=False,
-                message=f"未能在 MoviePilot 队列中找到任务 #{item_id} 的原始路径，建议在 MoviePilot 后台查看",
+                message=f"未能在 MoviePilot 队列或修复库中找到任务 #{item_id}，建议在后台查看",
             )
 
-        # 2. 真实调用 MoviePilot 手动转移重试
         res = await mp.manual_transfer(source_path=source_path)
         success = res.get("success", True) if isinstance(res, dict) else True
         msg = (

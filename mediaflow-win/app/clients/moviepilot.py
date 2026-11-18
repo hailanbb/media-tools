@@ -230,24 +230,77 @@ class MoviePilotClient:
 
     # ── 转移队列 ──────────────────────────────────────────
     async def get_transfer_queue(self) -> list[dict]:
-        return await self._get("/api/v1/transfer/queue")
+        res = await self._get("/api/v1/transfer/queue")
+        # 兼容 MP 返回嵌套队列结构 {media: ..., season: ..., tasks: [...]}
+        if isinstance(res, list):
+            return res
+        if isinstance(res, dict) and isinstance(res.get("data"), list):
+            return res["data"]
+        return []
 
     # ── 转移历史管理 ──────────────────────────────────────
-    async def get_transfer_history(self, title: str | None = None, page: int = 1, count: int = 100) -> list[dict]:
+    async def get_transfer_history(
+        self,
+        title: str | None = None,
+        status: bool | None = None,
+        page: int = 1,
+        count: int = 100,
+    ) -> list[dict]:
         """获取 MoviePilot 媒体整理（转移历史）记录列表。"""
+        res = await self.get_transfer_history_paginated(status=status, title=title, page=page, count=count)
+        return res.get("list", [])
+
+    async def get_transfer_history_paginated(
+        self,
+        status: bool | None = None,
+        title: str | None = None,
+        page: int = 1,
+        count: int = 50,
+    ) -> dict[str, Any]:
+        """获取 MoviePilot 媒体整理（转移历史）记录分页字典，保留 total 与 list。"""
         params: dict[str, Any] = {"page": page, "count": count}
+        if status is not None:
+            params["status"] = "true" if status else "false"
         if title:
             params["title"] = title
         res = await self._get("/api/v1/history/transfer", **params)
+        total = 0
+        records: list[dict[str, Any]] = []
         if isinstance(res, dict):
             data = res.get("data")
             if isinstance(data, dict):
-                return data.get("list") or data.get("items") or []
-            if isinstance(data, list):
-                return data
-        if isinstance(res, list):
-            return res
-        return []
+                total = int(data.get("total") or len(data.get("list") or []))
+                records = data.get("list") or data.get("items") or []
+            elif isinstance(data, list):
+                total = len(data)
+                records = data
+            elif isinstance(res.get("list"), list):
+                total = int(res.get("total") or len(res["list"]))
+                records = res["list"]
+        elif isinstance(res, list):
+            total = len(res)
+            records = res
+        return {"total": total, "list": records}
+
+    async def get_manual_target_path(self, in_path: str) -> dict[str, Any]:
+        """根据源文件路径调用 MoviePilot 匹配目标配置与推荐目标路径。"""
+        try:
+            return await self._post("/api/v1/transfer/manual/target-path", json={"in_path": in_path})
+        except Exception as e:
+            log.warning("MoviePilot target-path 匹配失败: %s", e)
+            return {"success": False, "message": str(e)}
+
+    async def recommend_episode_format(self, in_path: str) -> dict[str, Any]:
+        """请求 MoviePilot 推荐集号格式。"""
+        try:
+            return await self._post("/api/v1/transfer/episode-format/recommend", json={"in_path": in_path})
+        except Exception as e:
+            log.warning("MoviePilot episode-format/recommend 失败: %s", e)
+            return {"success": False, "message": str(e)}
+
+    async def manual_transfer_v2(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """按照 MoviePilot v2.15.6 ManualTransferItem 契约执行手动整理或预览。"""
+        return await self._post("/api/v1/transfer/manual", json=payload)
 
     async def get_all_transfer_history_for_title(self, title: str) -> list[dict]:
         """获取指定剧集标题的全部转移历史（自动处理分页）。"""
