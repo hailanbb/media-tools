@@ -2,6 +2,7 @@
 
 from app.models.directory_group import DirectoryGroup
 from app.models.gap_fill import GapFillEpisode, GapFillSeasonRun
+from app.models.manual_confirmation import ManualSeasonConfirmation
 from app.models.metadata_cache import MetadataCache
 from app.models.operation import OperationLog
 from app.models.season import SeasonRecord
@@ -13,6 +14,7 @@ __all__ = [
     "SeasonRecord",
     "OperationLog",
     "SeasonMapping",
+    "ManualSeasonConfirmation",
     "MetadataCache",
     "GapFillEpisode",
     "GapFillSeasonRun",

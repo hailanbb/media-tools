@@ -173,12 +173,14 @@ console.log("===================================================================
   assert(!downloadCard.includes("promptDeleteSourceShow("), "真缺集待补分类绝不应包含删除源端整剧删除按钮！");
   assert(!downloadCard.includes('markSeasonHandled('));
 
-  // 验证未收录异常项挂载整剧删除
+  // 验证异常卡片移除整剧删除入口，并按问题提供人工确认
   item.anomalySubtype = 'unknown_meta';
+  item.raw.status = 'unknown';
   context.currentCategory = 'anomaly';
   vm.runInContext('renderEpisodesList()', context);
   const anomalyUnknownCard = getNode('episodeItemContainer').innerHTML;
-  assert(anomalyUnknownCard.includes("promptDeleteSourceShow('record')"), "异常剧集未收录项必须挂载删除源端按钮！");
+  assert(!anomalyUnknownCard.includes("promptDeleteSourceShow('record')"), "异常剧集卡片必须移除整剧删除源端按钮！");
+  assert(anomalyUnknownCard.includes("openManualConfirmModal('record')"), "资料不完整异常项主入口必须为人工确认！");
   vm.runInContext(source('promptDeleteSourceShow') + ";promptDeleteSourceShow('record')", context);
   assert.strictEqual(getNode('deleteSourceShowPath').textContent, '源端目标路径: /src/Show');
   assert.strictEqual(context.openedModal, 'deleteSourceShowModal');
@@ -548,7 +550,8 @@ console.log("===================================================================
     const airingAnomaly = {
       ...airingItemNormal, id: 'boss-anomaly', mainCategory: 'anomaly',
       actionType: 'inspect_info', isAnomaly: true, anomalySubtype: 'file_check',
-      raw: {status: 'airing', main_category: 'anomaly'},
+      anomalySubCategory: 'decision',
+      raw: {status: 'airing', main_category: 'anomaly', airing_protected: true},
       evidence: {directory_group: {id: 'boss-group', requires_confirm: true}}
     };
     sampleTask.categories.anomaly = [airingAnomaly];
@@ -557,23 +560,35 @@ console.log("===================================================================
     const bossHtml = getDgNode('episodeItemContainer').innerHTML;
     assert(!bossHtml.includes('markSeasonHandled'), '异常模块中的连载原始状态也不得出现手动处理');
     assert(bossHtml.includes("openDirectoryGroupDialog('boss-group')"), '多目录条目主操作应直达确认目录');
-    assert(bossHtml.includes("recheckSeasonEvidence('boss-anomaly', this)"), '提供只读重新核查');
+    assert(!bossHtml.includes("recheckSeasonEvidence('boss-anomaly', this)"), '连载多目录异常卡无常驻重新核查按钮');
     assert(!bossHtml.includes('handleSingleAction'), '连载异常不能泄露写文件主操作');
+
+    // 初检请求失败（fetch_failed）条目：主入口为「重试失败项」，扫描进行中禁用
+    sampleTask.categories.anomaly = [{...airingAnomaly, id: 'failed-fetch',
+      airingView: null, anomalySubCategory: 'pending_evidence', anomalySubtype: 'unknown_meta',
+      raw: {status: 'unknown', main_category: 'anomaly'},
+      evidence: {meta_status: 'fetch_failed'}}];
+    vm.runInContext('renderEpisodesList()', dgContext);
+    const failedHtml = getDgNode('episodeItemContainer').innerHTML;
+    assert(failedHtml.includes("recheckSeasonEvidence('failed-fetch', this)"), '初检请求失败条目应提供重试失败项');
+    assert(failedHtml.includes('重试失败项'), '按钮文案应为重试失败项');
     sampleTask.status = 'running';
     vm.runInContext('renderEpisodesList()', dgContext);
-    assert(/recheckSeasonEvidence[^>]+disabled/.test(getDgNode('episodeItemContainer').innerHTML), '初检进行中禁用再次核查');
+    assert(/recheckSeasonEvidence[^>]+disabled/.test(getDgNode('episodeItemContainer').innerHTML), '初检进行中禁用重试失败项');
     sampleTask.status = 'completed';
 
-    // 候选资料不确定时不引导校准总集数、删源或结案。
+    // 候选资料不确定时统一标签为「作品资料不完整」，主入口为「人工确认」，更多菜单提供「本次保留，不再提示」，不引导删源或结案。
     sampleTask.categories.anomaly = [{...airingAnomaly, id: 'candidate-reference',
       raw: {status: 'unknown', main_category: 'anomaly'}, airingView: null,
-      actionType: 'calibrate', anomalySubtype: 'unknown_meta',
+      actionType: 'calibrate', anomalySubtype: 'unknown_meta', anomalySubCategory: 'pending_evidence',
       evidence: {meta_status: 'metadata_unverified'}}];
     vm.runInContext('renderEpisodesList()', dgContext);
     const candidateHtml = getDgNode('episodeItemContainer').innerHTML;
-    assert(candidateHtml.includes('作品资料待核实（非文件错配）'));
-    assert(candidateHtml.includes('recheckSeasonEvidence'));
-    for (const action of ['markSeasonHandled', 'promptDeleteSourceShow', 'handleSingleAction']) {
+    assert(candidateHtml.includes('作品资料不完整'), '统一标签必须为「作品资料不完整」');
+    assert(!candidateHtml.includes('非文件错配'), '标签不得追加超出证据的「非文件错配」断言');
+    assert(candidateHtml.includes("openManualConfirmModal('candidate-reference')"), '资料不完整主入口必须为人工确认');
+    assert(candidateHtml.includes("holdSeasonForTask('candidate-reference', this)"), '更多菜单必须提供本次保留');
+    for (const action of ['markSeasonHandled', 'promptDeleteSourceShow', 'handleSingleAction', 'recheckSeasonEvidence']) {
       assert(!candidateHtml.includes(action), `未核实候选资料不能引导 ${action}`);
     }
     dgContext.currentCategory = 'airing';

@@ -1,6 +1,21 @@
 # MediaFlow 版本管理
 
-当前源码版本为 v2.5.38，修订日期为 2026-11-18。
+当前源码版本为 v2.5.39，修订日期为 2026-11-18。
+
+v2.5.39 重点落实《MediaFlow异常剧集模块需求与交互方案-v2.5.39.md》全部优化规范：
+1. **人工确认持久化与逐项独立生效引擎（`app/models/manual_confirmation.py` + `app/core/manual_confirmation.py` + `app/core/inspector.py` + `app/api/tasks.py`）**：
+   - 新增独立持久化表 `manual_season_confirmations`（标注来源为 `manual_confirmation`），绝不写入或篡改 TMDB 官方缓存，完整保留原始查询证据与参考说明；
+   - 实现逐项独立生效与实时分流预览（`POST /api/tasks/{task_id}/seasons/{record_id}/manual-confirm/preview` / `POST` / `DELETE`）：仅确认作品归属正确时解除候选/未收录质疑但保留「总集数待补充」或「播毕状态待确认」；确认仍在连载时转入「连载留源」；确认总集数与已播毕时结合实物覆盖与门禁分流至「齐全可归档」「真缺集待补」「待复核清理」或「归档已齐可清源」；存在待确认目录组、混放作品或未核实分段等其他阻塞时保留在「异常剧集」并切换主提示为剩余阻塞；
+   - 支持跨轮初检自动继承与实质矛盾熔断：相同弱证据不推翻人工确认；当发现新正片超出确认总集数（如确认 4 集后新增 E05）或新增显式异作品 ID 文件时，自动暂停对应字段准入并保留仍有效字段；目录 ID、季号或作用范围变化且不再匹配时，不将旧确认误继承到新作品或新季。
+2. **异常三分类互斥拆分、本次保留清单与跨轮指纹差分智能（`app/core/season_classifier.py` + `app/services/task_service.py` + `app/services/gap_fill_tracker.py`）**：
+   - 按「需你决定（`decision`）→ 归档已齐，可清源（`cleanable`）→ 证据待决 · 安全保留（`pending_evidence`）」互斥评估唯一子分类，并在首页卡片及任务摘要中输出三项细分计数（`anomaly_decision` / `anomaly_pending_evidence` / `anomaly_cleanable`）；
+   - 新增任务级「本次保留，不再提示」（`POST / DELETE /api/tasks/{task_id}/seasons/{record_id}/hold`）与独立「本次保留 H 季」页签：移出当前任务 5 个待办模块计数且保持已分析作品季总数不变，支持随时「恢复处理」，下一次重新初检自动清空保留状态重新评估；
+   - 实现跨轮指纹差分智能（Delta Intelligence）：计算季级资产与元数据版本指纹 `asset_fingerprint`，重新初检时对指纹无变化的证据待决项标记 `delta_state = "unchanged_shelved"` 默认静默折叠，指纹变化项标记 `"progressed"` 置顶高亮唤醒。
+3. **问题导向按钮矩阵、整剧删除封堵与集数校准解耦（`app/api/archive.py` + `app/core/directory_governance.py` + `frontend/index.html`）**：
+   - 移除普通异常卡常驻「重新核查」与整剧级删除入口，服务端 `delete_source_show` 严格拦截异常记录的整剧删除请求，仅开放单季级受控清源；
+   - 解耦 `calibrate_episodes` 人工集数校准与完结状态，校准集数不再强制把 `season_finished` 设为 `True`；
+   - 统一候选资料提示为「作品资料不完整」（附已识别集号、缺口说明与人工确认引导），按问题精准提供「人工确认」「确认目录」「核对归属」「重试失败项」「删除源端（本季）」及更多菜单（「本次保留，不再提示」「刷新修改结果」「已手动处理」）；
+   - 新增 `tests/test_v2539_anomaly_module.py` 专项验收测试套件并扩充前端契约测试，全套 17 组自动化测试矩阵 100% 通过。
 
 v2.5.38 重点落实《MediaFlow真缺集待补模块需求与交互方案-v2.5.38.md》全部优化规范（覆盖 D01–D09 验收场景）：
 1. **逐集/逐期诊断精度、综艺连期选种与单季自选集号推送（`app/services/download_service.py` + `app/api/moviepilot.py`）**：
@@ -25,7 +40,7 @@ v2.5.37 修复候选资料误报与异常列表连载条目操作不一致：
 2. 旧候选资料误报经只读重算转为「作品资料待核实」，保留原 ID 和实际集号；真实文件显式 ID 冲突及已确认映射继续按原规则处理。
 3. 异常列表里的连载目录组仍保持异常主分类，同时携带连载保护状态和多目录合并进度；隐藏不可用的「已手动处理」，主操作直达「确认目录」，并提供只读「重新核查」。
 4. 重新核查覆盖同卡所有关联目录，核查失败保留旧判断；扫描中阻止并发核算。修复核查异常路径引用未定义日志对象的问题。
-5. 上述规则已整合到 [异常剧集模块需求与交互方案 v2.5.37](MediaFlow异常剧集模块需求与交互方案-v2.5.37.md)，原 v2.5.34 方案已更名；本地验证范围与环境限制详见 [修正说明](MediaFlow异常误报与连载条目操作修正-v2.5.37.md)。
+5. 上述规则已整合到 [异常剧集模块需求与交互方案 v2.5.39](MediaFlow异常剧集模块需求与交互方案-v2.5.39.md)，原 v2.5.34 方案已更名；本地验证范围与环境限制详见 [修正说明](MediaFlow异常误报与连载条目操作修正-v2.5.37.md)。
 
 v2.5.36 重点落实《MediaFlow连载留源模块需求与交互方案-v2.5.34.md》全部优化规范（覆盖 L01–L12 验收场景）：
 1. **季级播出证据扩充与 180 天/旧布尔推定解耦（`app/core/inspector.py` + `app/core/segments.py`）**：

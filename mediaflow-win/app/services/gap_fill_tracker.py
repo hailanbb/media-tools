@@ -1060,6 +1060,10 @@ async def refresh_task_summary(task_id: str, db: AsyncSession) -> dict[str, Any]
         "already_archived": 0,
         "total_seasons": counts["total_work_seasons"],
         "pending_directory_groups": len(pending_dir_group_ids),
+        "held_seasons": counts.get("held", 0),
+        "anomaly_decision": counts.get("anomaly_decision", 0),
+        "anomaly_cleanable": counts.get("anomaly_cleanable", 0),
+        "anomaly_pending_evidence": counts.get("anomaly_pending_evidence", 0),
     }
     if isinstance(prev_summary, dict) and prev_summary.get("last_airing_transitions"):
         summary["last_airing_transitions"] = prev_summary["last_airing_transitions"]

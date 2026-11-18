@@ -39,7 +39,8 @@ SUITES = [
     {"name": "13. 压制组防误杀与季前先导特辑归档测试", "cmd": [sys.executable, "tests/test_cmctv_and_specials.py"], "type": "python"},
     {"name": "14. 五模块互斥分流与作品季归并测试", "cmd": [sys.executable, "tests/test_season_classifier.py"], "type": "python"},
     {"name": "15. 真缺集待补模块全场景验收测试 (D01-D09)", "cmd": [sys.executable, "tests/test_v2538_gap_fill_module.py"], "type": "python"},
-    {"name": "16. 离线 P0 安全探针 (8/8 核心防线)", "cmd": [sys.executable, "-B", "p0_probe.py", "."], "type": "python"},
+    {"name": "16. 异常剧集模块全场景验收测试 (v2.5.39)", "cmd": [sys.executable, "tests/test_v2539_anomaly_module.py"], "type": "python"},
+    {"name": "17. 离线 P0 安全探针 (8/8 核心防线)", "cmd": [sys.executable, "-B", "p0_probe.py", "."], "type": "python"},
 ]
 
 def run_suite():

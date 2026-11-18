@@ -248,16 +248,21 @@ async def execute_inspection(task_id: str, db: AsyncSession) -> InspectionResult
         }
 
         today_iso = datetime.now().strftime("%Y-%m-%d")
+        from app.core.inspector import unverified_metadata_candidates
+        from app.core.manual_confirmation import compute_asset_fingerprint
+
         for diag in result.seasons:
             ev_d = dict(diag.evidence or {})
-            if ev_d.get("meta_status") == "fetch_failed" and diag.season_path in prev_by_season_path:
+            if diag.season_path in prev_by_season_path:
                 prev_r = prev_by_season_path[diag.season_path]
                 try:
                     prev_ev = json.loads(prev_r.evidence_json or "{}")
                 except Exception:
                     prev_ev = {}
+                if not isinstance(prev_ev, dict):
+                    prev_ev = {}
                 prev_b_ev = dict((prev_ev.get("broadcast_evidence") or {}) if isinstance(prev_ev, dict) else {})
-                if prev_r.status == "airing" or prev_b_ev.get("status") in ("airing", "upcoming"):
+                if ev_d.get("meta_status") == "fetch_failed" and (prev_r.status == "airing" or prev_b_ev.get("status") in ("airing", "upcoming")):
                     upc_sched = list(prev_b_ev.get("upcoming_schedule") or [])
                     all_expired = bool(upc_sched) and all(
                         str(x.get("air_date") or "9999-99-99")[:10] <= today_iso for x in upc_sched
@@ -283,6 +288,56 @@ async def execute_inspection(task_id: str, db: AsyncSession) -> InspectionResult
                         ev_d["meta_status"] = "ok"
                         ev_d["broadcast_evidence"] = prev_b_ev
                         diag.evidence = ev_d
+
+                # 跨轮资产指纹差分智能 (Delta Intelligence)
+                prev_fp = str(prev_ev.get("asset_fingerprint") or "")
+                if not prev_fp:
+                    try:
+                        p_rec_eps = json.loads(prev_r.recognized_episodes_json or "[]")
+                    except Exception:
+                        p_rec_eps = []
+                    try:
+                        p_dup_eps = json.loads(prev_r.duplicate_episodes_json or "[]")
+                    except Exception:
+                        p_dup_eps = []
+                    p_arc_eps = ((prev_ev.get("dual_archive_info") or {}).get("archived_episodes") or [])
+                    prev_fp = compute_asset_fingerprint(
+                        recognized_episodes=p_rec_eps,
+                        duplicate_episodes=p_dup_eps,
+                        local_episode_count=prev_r.local_episode_count or 0,
+                        archived_episodes=p_arc_eps,
+                        total_episodes=prev_r.total_episodes,
+                        season_finished=prev_r.season_finished,
+                        meta_status=str(prev_ev.get("meta_status") or ""),
+                        broadcast_status=str(prev_b_ev.get("status") or ""),
+                    )
+                curr_fp = str(ev_d.get("asset_fingerprint") or "")
+                if not curr_fp:
+                    c_arc_eps = ((ev_d.get("dual_archive_info") or {}).get("archived_episodes") or [])
+                    curr_fp = compute_asset_fingerprint(
+                        recognized_episodes=diag.recognized_episodes,
+                        duplicate_episodes=diag.duplicate_episodes,
+                        local_episode_count=diag.local_episode_count or 0,
+                        archived_episodes=c_arc_eps,
+                        total_episodes=diag.total_episodes,
+                        season_finished=diag.season_finished,
+                        meta_status=str(ev_d.get("meta_status") or ""),
+                        broadcast_status=str((ev_d.get("broadcast_evidence") or {}).get("status") or ""),
+                    )
+                    ev_d["asset_fingerprint"] = curr_fp
+
+                had_legacy_candidate_pollution = bool(
+                    unverified_metadata_candidates(prev_ev, prev_r.tmdb_id, prev_r.season_number)
+                    and prev_r.total_episodes is not None
+                )
+                if prev_r.status in ("unknown", "period_review", "archive_check", "identity_review") and not had_legacy_candidate_pollution:
+                    if curr_fp == prev_fp and diag.status in ("unknown", "period_review", "archive_check"):
+                        ev_d["delta_state"] = "unchanged_shelved"
+                        ev_d["delta_note"] = "跨轮资产与元数据指纹未变，已自动静默折叠"
+                    elif curr_fp != prev_fp:
+                        ev_d["delta_state"] = "progressed"
+                        ev_d["delta_note"] = "检测到物理文件或官方元数据较上轮发生实质变化"
+                diag.evidence = ev_d
         result.compute_summary()
 
         if is_stopped:

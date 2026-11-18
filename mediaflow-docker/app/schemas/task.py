@@ -18,6 +18,10 @@ class TaskSummary(BaseModel):
     already_archived: int = 0
     total_seasons: int = 0
     pending_directory_groups: int = 0
+    held_seasons: int = 0
+    anomaly_decision: int = 0
+    anomaly_cleanable: int = 0
+    anomaly_pending_evidence: int = 0
 
 
 class TaskCreate(BaseModel):

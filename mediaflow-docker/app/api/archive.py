@@ -2823,16 +2823,16 @@ async def calibrate_episodes(
     missing = sorted(expected - set(recognized))
     rec.missing_episodes_json = json.dumps(missing)
 
+    eff_finished = bool(rec.season_finished) if rec.season_finished is not None else False
     new_status, new_detail = diagnose_season(
         recognized=recognized,
         total_episodes=body.total_episodes,
-        season_finished=True,  # 人工校准即视为该指定集数已完结
+        season_finished=eff_finished,
         has_duplicates=bool(duplicates),
         duplicate_episodes=duplicates,
     )
     rec.status = new_status
     rec.status_detail = f"人工已校准总集数为 {body.total_episodes} 集（原 {old_total} 集）：{new_detail}"
-    rec.season_finished = True
 
     await _refresh_task_summary(rec.task_id, db)
     await db.commit()
@@ -2887,8 +2887,10 @@ async def delete_source_show(
 
     if rec.status in ("download_needed", "period_missing"):
         return StatusResponse(ok=False, message="真缺集待补剧集严禁删除源端整剧，仅支持推送补缺")
-    if rec.status != "unknown":
-        return StatusResponse(ok=False, message="仅未收录/元数据未知的异常剧集允许整剧删除源端")
+    return StatusResponse(
+        ok=False,
+        message="安全拦截：异常剧集模块已禁止整剧级删除父目录，仅支持单季级受控清理",
+    )
     c_info = json.loads(rec.conflict_json or "{}") if getattr(rec, "conflict_json", None) else {}
     if isinstance(c_info, dict) and c_info.get("blocking"):
         return StatusResponse(ok=False, message="存在作品身份冲突，安全拦截删除源端目录")

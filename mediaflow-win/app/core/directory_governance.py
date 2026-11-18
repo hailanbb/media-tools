@@ -1125,7 +1125,9 @@ async def confirm_directory_group(
         ).all()
     )
     for rec in recs:
-        if normalize_dir_path(rec.show_path) not in source_paths:
+        in_src_paths = normalize_dir_path(rec.show_path) in source_paths
+        same_tid = bool(group.tmdb_id and str(rec.tmdb_id or "").strip() == str(group.tmdb_id).strip())
+        if not in_src_paths and not same_tid:
             continue
         if clean_mode == "use_archive_target" and norm_target:
             if normalize_dir_path(rec.season_path) == normalize_dir_path(rec.show_path):
@@ -1137,9 +1139,11 @@ async def confirm_directory_group(
             ev = json.loads(rec.evidence_json or "{}")
         except Exception:
             ev = {}
-        if isinstance(ev, dict) and isinstance(ev.get("directory_group"), dict):
+        if isinstance(ev, dict):
+            old_dg = ev.get("directory_group") if isinstance(ev.get("directory_group"), dict) else {}
             ev["directory_group"] = {
-                **ev["directory_group"],
+                **old_dg,
+                "id": group.id,
                 "status": group.status,
                 "requires_confirm": False,
                 "confirmation_mode": group.confirmation_mode,

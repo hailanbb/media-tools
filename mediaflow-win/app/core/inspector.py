@@ -1772,7 +1772,7 @@ async def run_inspection(
             if reference_candidates and not total_eps and not active_mapping and not identity_conflict:
                 status = "unknown"
                 meta_status = "metadata_unverified"
-                detail = metadata_reference_note(tmdb_id_num, season_num, reference_candidates)
+                detail = metadata_reference_note(tmdb_id_num, season_num, reference_candidates, recognized)
                 missing = []
 
             if identity_conflict:
@@ -1784,9 +1784,33 @@ async def run_inspection(
             if edition_note:
                 detail += edition_note
 
+            from app.core.manual_confirmation import (
+                compute_asset_fingerprint,
+                evaluate_confirmation_outcome,
+                resolve_active_manual_confirmation,
+            )
+
+            file_sigs = [
+                f"{f.get('name')}:{f.get('size', 0)}"
+                for f in season_files
+                if not f.get("isDirectory")
+            ]
+            asset_fp = compute_asset_fingerprint(
+                recognized_episodes=recognized,
+                duplicate_episodes=duplicates,
+                local_episode_count=len(parsed_episodes),
+                file_signatures=file_sigs,
+                archived_episodes=list(archived_eps_this_season),
+                total_episodes=total_eps,
+                season_finished=season_finished,
+                meta_status=meta_status,
+                broadcast_status=broadcast_evidence_payload.get("status") or "",
+            )
+
             evidence_payload = {
                 "meta_status": meta_status,
                 "metadata_binding_verified": bool(active_mapping or (info.get("total") and not info.get("candidate_id"))),
+                "asset_fingerprint": asset_fp,
                 "source_total_conflict": source_total_conflict_info,
                 "meta_error": meta_evidence.get("meta_error") or "",
                 "stale_cache_reused": bool(info.get("stale_cache_reused")),
@@ -1817,12 +1841,71 @@ async def run_inspection(
                     "release_years": release_signals.get("release_years") or [],
                     "platform_tags": release_signals.get("platform_tags") or [],
                     "sample_files": release_signals.get("sample_files") or [],
+                    "explicit_file_tmdb_conflicts": release_signals.get("explicit_file_tmdb_conflicts") or [],
+                    "mixed_works": bool(release_signals.get("mixed_works")),
                 },
                 "dual_archive_info": dual_archive_info,
                 "mediaserver_check": mediaserver_check,
                 "period_evidence": period_evidence,
                 "broadcast_evidence": broadcast_evidence_payload,
             }
+
+            if db is not None and not active_mapping:
+                manual_conf = await resolve_active_manual_confirmation(
+                    db,
+                    tmdb_id=tmdb_id_num,
+                    season_number=season_num,
+                    season_path=season_path,
+                    show_path=show_path,
+                )
+                if manual_conf:
+                    emby_eps = (
+                        list(mediaserver_check.get("season_episodes") or [])
+                        if mediaserver_check.get("trusted_match") is not False
+                        else []
+                    )
+                    m_outcome = evaluate_confirmation_outcome(
+                        conf=manual_conf,
+                        tmdb_id=tmdb_id_num,
+                        season_number=season_num,
+                        recognized_episodes=recognized,
+                        archived_episodes=list(archived_eps_this_season),
+                        emby_episodes=emby_eps,
+                        duplicate_episodes=duplicates,
+                        current_total_episodes=total_eps,
+                        current_season_finished=season_finished,
+                        current_status=status,
+                        current_status_detail=detail,
+                        evidence=evidence_payload,
+                        conflict=identity_conflict,
+                    )
+                    status = m_outcome["status"]
+                    detail = m_outcome["status_detail"]
+                    total_eps = m_outcome["total_episodes"]
+                    season_finished = m_outcome["season_finished"]
+                    missing = m_outcome["missing_episodes"]
+                    if m_outcome.get("identity_cleared"):
+                        if isinstance(identity_conflict, dict) and identity_conflict.get("blocking") and identity_conflict.get("kind") != "mixed_works":
+                            identity_conflict = {**identity_conflict, "blocking": False, "resolved_by_manual_confirmation": True}
+                        evidence_payload["meta_status"] = "manual_confirmed" if total_eps else "total_episodes_pending"
+                    if manual_conf.get("broadcast_status") == "airing":
+                        evidence_payload["broadcast_evidence"] = {
+                            **broadcast_evidence_payload,
+                            "status": "airing",
+                            "schedule_verified": True,
+                            "source": "manual_confirmation",
+                        }
+                    elif manual_conf.get("broadcast_status") == "finished" and not m_outcome["contradiction"].get("has_contradiction"):
+                        evidence_payload["broadcast_evidence"] = {
+                            **broadcast_evidence_payload,
+                            "status": "finished",
+                            "schedule_verified": True,
+                            "source": "manual_confirmation",
+                        }
+                    evidence_payload["manual_confirmation"] = {
+                        **manual_conf,
+                        "contradiction": m_outcome["contradiction"],
+                    }
 
             show_src_seasons.append(season_num)
             show_src_ep_map[str(season_num)] = list(recognized)
@@ -3017,12 +3100,22 @@ def unverified_metadata_candidates(evidence: dict, tmdb_id, season_number: int) 
                 c.get("result") == "accepted" and str(c.get("tmdb_id")) != str(tmdb_id)))]
 
 
-def metadata_reference_note(tmdb_id, season_number: int, candidates: list[dict]) -> str:
+def metadata_reference_note(
+    tmdb_id, season_number: int, candidates: list[dict], recognized: list[int] | None = None
+) -> str:
     candidate = candidates[0]
     count = candidate.get("episode_count") or "未知"
-    return (f"目录 TMDB {tmdb_id or '未标注'} 的第 {season_number} 季资料尚未核实；"
-            f"搜索候选 TMDB {candidate.get('tmdb_id')} 收录 {count} 集，仅供参考。"
-            "这不代表本地文件属于另一作品，也不据此要求修改目录 ID。请重新核查资料，必要时在详情中核对作品映射。")
+    pos_rec = sorted({int(x) for x in (recognized or []) if str(x).isdigit() and int(x) > 0})
+    rec_prefix = ""
+    if pos_rec:
+        ep_span = f"E{pos_rec[0]:02d}–E{pos_rec[-1]:02d}" if len(pos_rec) > 1 else f"E{pos_rec[0]:02d}"
+        rec_prefix = f"已识别 {ep_span}，共 {len(pos_rec)} 集；暂不确定全季总集数。"
+    return (
+        f"{rec_prefix}目录 TMDB {tmdb_id or '未标注'} 的第 {season_number} 季资料尚未核实；"
+        f"搜索候选 TMDB {candidate.get('tmdb_id')} 收录 {count} 集，仅供参考。"
+        "这不代表本地文件属于另一作品，也不据此要求修改目录 ID。"
+        "若你已核实，可点击「人工确认」补充结果，必要时在详情中核对作品映射。"
+    )
 
 
 async def _resolve_show_metadata(

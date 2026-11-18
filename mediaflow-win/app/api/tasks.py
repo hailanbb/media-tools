@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import posixpath
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
@@ -36,8 +37,14 @@ from app.core.identity_resolver import (
     resolve_active_season_mapping,
 )
 from app.core.inspector import diagnose_season, metadata_reference_note, unverified_metadata_candidates
+from app.core.manual_confirmation import (
+    evaluate_confirmation_outcome,
+    orm_confirmation_to_dict,
+    resolve_active_manual_confirmation,
+)
 from app.database import get_db
 from app.models.directory_group import DirectoryGroup
+from app.models.manual_confirmation import ManualSeasonConfirmation
 from app.models.operation import OperationLog
 from app.models.season import SeasonRecord
 from app.models.season_mapping import SeasonMapping
@@ -257,6 +264,7 @@ async def get_task_seasons(
             "period_missing": "download",
             "review": "review",
             "anomaly": "anomaly",
+            "held": "held",
         }
         groups = {
             "archive_ready": ("archive_ready", "period_ready"),
@@ -465,14 +473,96 @@ async def _apply_in_place_recalculate(
         conflict_cleared = True
 
     # 旧版本曾将搜索候选的集数缓存到目录 ID 下；离线重算不能把这类
-    # identity_review 直接升级为可归档。仅新的远程核实/有效映射可解除。
+    # identity_review 直接升级为可归档。仅新的远程核实/有效映射/有效人工确认可解除。
+    manual_conf = await resolve_active_manual_confirmation(
+        db,
+        tmdb_id=rec.tmdb_id,
+        season_number=rec.season_number,
+        season_path=rec.season_path,
+        show_path=rec.show_path,
+    )
+    if manual_conf:
+        dual_info_mc = (evidence or {}).get("dual_archive_info") or {}
+        arc_eps_mc = [int(x) for x in (dual_info_mc.get("archived_episodes") or []) if str(x).isdigit()]
+        ms_mc = (evidence or {}).get("mediaserver_check") or {}
+        emby_eps_mc = (
+            [int(x) for x in (ms_mc.get("season_episodes") or []) if str(x).isdigit()]
+            if ms_mc.get("trusted_match") is not False
+            else []
+        )
+        eval_recognized = list(recognized)
+        scope_paths_mc = list(manual_conf.get("scope_paths") or [])
+        if len(scope_paths_mc) > 1 and rec.task_id:
+            peer_rows = list(
+                (
+                    await db.scalars(
+                        select(SeasonRecord).where(
+                            SeasonRecord.task_id == rec.task_id,
+                            SeasonRecord.season_path.in_(scope_paths_mc),
+                        )
+                    )
+                ).all()
+            )
+            for pr in peer_rows:
+                eval_recognized.extend(
+                    int(x) for x in _safe_json(pr.recognized_episodes_json, []) if str(x).isdigit()
+                )
+            eval_recognized = sorted(set(eval_recognized))
+        m_outcome = evaluate_confirmation_outcome(
+            conf=manual_conf,
+            tmdb_id=rec.tmdb_id,
+            season_number=rec.season_number,
+            recognized_episodes=eval_recognized,
+            archived_episodes=arc_eps_mc,
+            emby_episodes=emby_eps_mc,
+            duplicate_episodes=duplicates,
+            current_total_episodes=rec.total_episodes,
+            current_season_finished=rec.season_finished,
+            current_status=rec.status,
+            current_status_detail=rec.status_detail or "",
+            evidence=evidence,
+            conflict=conflict if isinstance(conflict, dict) else {},
+            pending_dir_group=bool(((evidence or {}).get("directory_group") or {}).get("requires_confirm")),
+        )
+        rec.status = m_outcome["status"]
+        rec.status_detail = m_outcome["status_detail"]
+        rec.total_episodes = m_outcome["total_episodes"]
+        rec.season_finished = m_outcome["season_finished"]
+        rec.missing_episodes_json = json.dumps(m_outcome["missing_episodes"])
+        evidence = dict(evidence or {})
+        if m_outcome.get("identity_cleared"):
+            if isinstance(conflict, dict) and conflict.get("blocking") and conflict.get("kind") != "mixed_works":
+                rec.conflict_json = json.dumps(
+                    {**conflict, "blocking": False, "resolved_by_manual_confirmation": True},
+                    ensure_ascii=False,
+                )
+            evidence["meta_status"] = "manual_confirmed" if rec.total_episodes else "total_episodes_pending"
+        b_ev_mc = dict(evidence.get("broadcast_evidence") or {})
+        if manual_conf.get("broadcast_status") == "airing":
+            b_ev_mc.update(status="airing", schedule_verified=True, source="manual_confirmation")
+            evidence["broadcast_evidence"] = b_ev_mc
+        elif manual_conf.get("broadcast_status") == "finished" and not m_outcome["contradiction"].get("has_contradiction"):
+            b_ev_mc.update(status="finished", schedule_verified=True, source="manual_confirmation")
+            evidence["broadcast_evidence"] = b_ev_mc
+        evidence["manual_confirmation"] = {
+            **manual_conf,
+            "contradiction": m_outcome["contradiction"],
+        }
+        evidence["last_recalculated_at"] = now_dt.isoformat()
+        rec.evidence_json = json.dumps(evidence, ensure_ascii=False)
+        if rec.last_checked_at is None:
+            rec.last_checked_at = now_dt
+        active_key = build_identity_key(rec.show_name, rec.tmdb_id, rec.season_number, None)
+        await supersede_changed_identity_records(db, rec.task_id, rec.season_path, active_key, rec.id)
+        return True
+
     reference_candidates = unverified_metadata_candidates(evidence, rec.tmdb_id, rec.season_number)
     if reference_candidates:
         rec.status = "unknown"
         rec.total_episodes = None
         rec.season_finished = False
         rec.missing_episodes_json = "[]"
-        rec.status_detail = metadata_reference_note(rec.tmdb_id, rec.season_number, reference_candidates)
+        rec.status_detail = metadata_reference_note(rec.tmdb_id, rec.season_number, reference_candidates, recognized)
         evidence["meta_status"] = "metadata_unverified"
         evidence["broadcast_evidence"] = {
             "status": "evidence_pending", "schedule_verified": False,
@@ -844,6 +934,9 @@ async def confirm_task_directory_group(
     group = await db.get(DirectoryGroup, group_id)
     if not task or not group or group.task_id != task_id:
         raise HTTPException(status_code=404, detail="多目录确认组不存在")
+    from app.services.task_service import TASK_RUNNING_WORKERS
+    if task.status in ("running", "paused", "stopping") or task_id in TASK_RUNNING_WORKERS:
+        raise HTTPException(status_code=409, detail="请在初检结束后确认目录组")
     try:
         updated = await confirm_directory_group(
             db, group, mode=body.mode, target_path=body.target_path
@@ -1259,22 +1352,665 @@ async def mark_season_handled(task_id: str, record_id: str, db: AsyncSession = D
     )
     if not is_anomaly:
         raise HTTPException(status_code=409, detail="仅异常剧集可标记为手动处理")
+    part_ids = list(work.get("participating_record_ids") or [record_id])
+    if record_id not in part_ids:
+        part_ids.append(record_id)
     previous = rec.status
     changed = await db.execute(update(SeasonRecord).where(
-        SeasonRecord.id == record_id, SeasonRecord.status == previous
+        SeasonRecord.id.in_(part_ids), SeasonRecord.task_id == task_id
     ).values(status="manually_handled"))
     if not changed.rowcount:
         await db.refresh(rec)
         if rec.status != "manually_handled":
             raise HTTPException(status_code=409, detail="条目状态已更新，请刷新清单")
     if changed.rowcount:
-        db.add(OperationLog(
-            task_id=task_id, season_record_id=record_id, action="manually_handled", status="completed",
-            detail_json=json.dumps({"season_path": rec.season_path, "show_name": rec.show_name,
-                                    "season_number": rec.season_number, "previous_status": previous}, ensure_ascii=False),
-        ))
+        part_rows = list((await db.scalars(select(SeasonRecord).where(SeasonRecord.id.in_(part_ids)))).all())
+        for pr in part_rows:
+            db.add(OperationLog(
+                task_id=task_id, season_record_id=pr.id, action="manually_handled", status="completed",
+                detail_json=json.dumps({"season_path": pr.season_path, "show_name": pr.show_name,
+                                        "season_number": pr.season_number, "previous_status": previous}, ensure_ascii=False),
+            ))
     await db.refresh(rec)
     from app.api.archive import _refresh_task_summary
     await _refresh_task_summary(task_id, db)
     await db.commit()
     return StatusResponse(ok=True, message="已标记为手动处理，并从任务清单中移除")
+
+
+class ManualConfirmRequest(BaseModel):
+    confirm_current_identity: bool = False
+    target_tmdb_id: int | None = None
+    target_season: int | None = None
+    target_title: str = ""
+    total_episodes: int | None = None
+    broadcast_status: str = "unknown"  # "finished" | "airing" | "unknown"
+    note: str = ""
+
+
+class HoldSeasonRequest(BaseModel):
+    reason: str = ""
+
+
+class RefreshModifiedRequest(BaseModel):
+    record_ids: list[str] = []
+    paths: list[str] = []
+
+
+async def _collect_work_season_records(db: AsyncSession, rec: SeasonRecord) -> tuple[list[SeasonRecord], dict[str, Any]]:
+    from app.core.season_classifier import get_record_work_context
+    work = await get_record_work_context(db, rec)
+    part_ids = list(work.get("participating_record_ids") or [rec.id])
+    if rec.id not in part_ids:
+        part_ids.append(rec.id)
+    rows = list(
+        (
+            await db.scalars(
+                select(SeasonRecord).where(
+                    SeasonRecord.task_id == rec.task_id,
+                    SeasonRecord.id.in_(part_ids),
+                )
+            )
+        ).all()
+    )
+    return (rows or [rec]), work
+
+
+@router.post("/{task_id}/seasons/{record_id}/manual-confirm/preview")
+async def preview_manual_season_confirmation(
+    task_id: str,
+    record_id: str,
+    body: ManualConfirmRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """预览人工确认的作用范围与预计分流结果（不写入数据库或修改文件）。"""
+    task = await db.get(Task, task_id)
+    rec = await db.get(SeasonRecord, record_id)
+    if not task or not rec or rec.task_id != task_id:
+        raise HTTPException(status_code=404, detail="剧季记录不存在")
+
+    if body.total_episodes is not None and body.total_episodes <= 0:
+        raise HTTPException(status_code=400, detail="本季总集数必须为大于 0 的正整数或留空表示尚不清楚")
+
+    part_rows, work = await _collect_work_season_records(db, rec)
+    scope_paths = [r.season_path for r in part_rows if r.season_path]
+    union_rec: set[int] = set()
+    union_arc: set[int] = set()
+    union_emby: set[int] = set()
+    union_dups: set[int] = set()
+    pending_dg = False
+    for r in part_rows:
+        union_rec.update(int(x) for x in _safe_json(r.recognized_episodes_json, []) if str(x).isdigit() and int(x) > 0)
+        union_dups.update(int(x) for x in _safe_json(r.duplicate_episodes_json, []) if str(x).isdigit() and int(x) > 0)
+        ev_r = _safe_json(getattr(r, "evidence_json", None), {})
+        dual_r = (ev_r.get("dual_archive_info") or {}) if isinstance(ev_r, dict) else {}
+        union_arc.update(int(x) for x in (dual_r.get("archived_episodes") or []) if str(x).isdigit() and int(x) > 0)
+        ms_r = (ev_r.get("mediaserver_check") or {}) if isinstance(ev_r, dict) else {}
+        if ms_r.get("trusted_match") is not False:
+            union_emby.update(int(x) for x in (ms_r.get("season_episodes") or []) if str(x).isdigit() and int(x) > 0)
+        if ((ev_r.get("directory_group") or {}) if isinstance(ev_r, dict) else {}).get("requires_confirm"):
+            pending_dg = True
+
+    eff_tid = body.target_tmdb_id or (int(rec.tmdb_id) if rec.tmdb_id and str(rec.tmdb_id).isdigit() else None)
+    eff_sn = body.target_season or rec.season_number
+    draft_conf = {
+        "identity_confirmed": bool(body.confirm_current_identity or body.target_tmdb_id),
+        "confirmed_tmdb_id": eff_tid,
+        "confirmed_season_number": eff_sn,
+        "confirmed_total_episodes": body.total_episodes,
+        "broadcast_status": body.broadcast_status or "unknown",
+        "note": body.note,
+    }
+    outcome = evaluate_confirmation_outcome(
+        conf=draft_conf,
+        tmdb_id=eff_tid,
+        season_number=eff_sn,
+        recognized_episodes=sorted(union_rec),
+        archived_episodes=sorted(union_arc),
+        emby_episodes=sorted(union_emby),
+        duplicate_episodes=sorted(union_dups),
+        current_total_episodes=rec.total_episodes,
+        current_season_finished=rec.season_finished,
+        current_status=rec.status,
+        current_status_detail=rec.status_detail or "",
+        evidence=_safe_json(getattr(rec, "evidence_json", None), {}),
+        conflict=_safe_json(getattr(rec, "conflict_json", None), {}),
+        pending_dir_group=pending_dg,
+    )
+    return {
+        "ok": True,
+        "scope_paths": scope_paths,
+        "recognized_episodes": sorted(union_rec),
+        "archived_episodes": sorted(union_arc),
+        "emby_episodes": sorted(union_emby),
+        "predicted_category": outcome["predicted_category"],
+        "predicted_category_label": outcome["predicted_category_label"],
+        "predicted_status": outcome["status"],
+        "predicted_detail": outcome["status_detail"],
+        "blocking_reason": outcome["blocking_reason"],
+        "contradiction": outcome["contradiction"],
+    }
+
+
+@router.post("/{task_id}/seasons/{record_id}/manual-confirm")
+async def save_manual_season_confirmation(
+    task_id: str,
+    record_id: str,
+    body: ManualConfirmRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """保存单季人工确认事实并立即利用已有初检结果更新分流与统计（不移动/删除文件，不提交下载）。"""
+    task = await db.get(Task, task_id)
+    rec = await db.get(SeasonRecord, record_id)
+    if not task or not rec or rec.task_id != task_id:
+        raise HTTPException(status_code=404, detail="剧季记录不存在")
+
+    from app.services.task_service import TASK_RUNNING_WORKERS
+    if task.status in ("running", "paused", "stopping") or task_id in TASK_RUNNING_WORKERS:
+        raise HTTPException(status_code=409, detail="请在初检结束后保存人工确认")
+
+    if body.total_episodes is not None and body.total_episodes <= 0:
+        raise HTTPException(status_code=400, detail="本季总集数必须为大于 0 的正整数或留空表示尚不清楚")
+
+    has_any_choice = bool(
+        body.confirm_current_identity
+        or (body.target_tmdb_id and body.target_tmdb_id > 0)
+        or (body.total_episodes is not None and body.total_episodes > 0)
+        or body.broadcast_status in ("finished", "airing")
+    )
+    if not has_any_choice:
+        raise HTTPException(
+            status_code=400,
+            detail="请至少明确确认一项事实（如当前作品与季号正确、本季总集数或播出状态），全未选择不能作为有效确认提交",
+        )
+
+    part_rows, _ = await _collect_work_season_records(db, rec)
+    scope_paths = [r.season_path for r in part_rows if r.season_path]
+    union_rec = sorted({
+        int(x)
+        for r in part_rows
+        for x in _safe_json(r.recognized_episodes_json, [])
+        if str(x).isdigit() and int(x) > 0
+    })
+
+    # 若用户在人工确认中修正了目标 TMDB ID 或季号（跨条目映射），同步写入 SeasonMapping
+    cur_tid_int = int(rec.tmdb_id) if rec.tmdb_id and str(rec.tmdb_id).isdigit() else None
+    is_remapped = bool(
+        (body.target_tmdb_id and body.target_tmdb_id != cur_tid_int)
+        or (body.target_season and int(body.target_season) != int(rec.season_number))
+    )
+    if is_remapped and body.target_tmdb_id:
+        for r in part_rows:
+            old_maps = (
+                await db.scalars(
+                    select(SeasonMapping).where(
+                        SeasonMapping.scope_key == r.season_path,
+                        SeasonMapping.is_active.is_(True),
+                    )
+                )
+            ).all()
+            for om in old_maps:
+                om.is_active = False
+            db.add(
+                SeasonMapping(
+                    scope_key=r.season_path,
+                    source_tmdb_id=cur_tid_int,
+                    source_season=r.season_number,
+                    show_path=r.show_path,
+                    season_path=r.season_path,
+                    mapping_kind="manual_confirm_remap",
+                    target_tmdb_id=int(body.target_tmdb_id),
+                    target_season=int(body.target_season or r.season_number),
+                    target_title=str(body.target_title or "").strip(),
+                    expected_total_episodes=body.total_episodes,
+                    evidence_note=str(body.note or "").strip(),
+                    created_by="user",
+                    is_active=True,
+                )
+            )
+        await db.flush()
+
+    eff_tid = body.target_tmdb_id or cur_tid_int
+    eff_sn = int(body.target_season or rec.season_number)
+
+    # 停用同作用范围的旧 ManualSeasonConfirmation
+    old_confs = (
+        await db.scalars(
+            select(ManualSeasonConfirmation).where(
+                ManualSeasonConfirmation.is_active.is_(True),
+                ManualSeasonConfirmation.season_path.in_(scope_paths),
+            )
+        )
+    ).all()
+    for oc in old_confs:
+        oc.is_active = False
+
+    new_conf = ManualSeasonConfirmation(
+        scope_key=rec.season_path,
+        task_id=task_id,
+        season_record_id=rec.id,
+        show_path=rec.show_path,
+        season_path=rec.season_path,
+        scope_paths_json=json.dumps(scope_paths, ensure_ascii=False),
+        show_name=rec.show_name,
+        tmdb_id=str(rec.tmdb_id or ""),
+        season_number=rec.season_number,
+        identity_confirmed=bool(body.confirm_current_identity or body.target_tmdb_id),
+        confirmed_tmdb_id=eff_tid,
+        confirmed_season_number=eff_sn,
+        confirmed_total_episodes=body.total_episodes,
+        broadcast_status=body.broadcast_status if body.broadcast_status in ("finished", "airing") else "unknown",
+        note=str(body.note or "").strip(),
+        source="manual_confirmation",
+        recognized_snapshot_json=json.dumps(union_rec),
+        is_active=True,
+    )
+    db.add(new_conf)
+    await db.flush()
+
+    # 若此前同卡合并了多个目录的集数，对主记录与关联记录同步更新
+    for r in part_rows:
+        ev_r = _safe_json(getattr(r, "evidence_json", None), {})
+        if isinstance(ev_r, dict) and "hold_for_task" in ev_r:
+            ev_r.pop("hold_for_task", None)
+            r.evidence_json = json.dumps(ev_r, ensure_ascii=False)
+        await _apply_in_place_recalculate(db, r, fetch_remote=False)
+
+    task_summary = await refresh_task_summary(task_id, db)
+    await db.commit()
+    await db.refresh(rec)
+
+    from app.core.season_classifier import get_record_work_context
+    updated_work = await get_record_work_context(db, rec)
+    cat_key = str(updated_work.get("main_category") or "anomaly")
+    from app.core.manual_confirmation import CATEGORY_LABELS
+    cat_label = CATEGORY_LABELS.get(cat_key, cat_key)
+
+    recorded_parts: list[str] = []
+    if new_conf.identity_confirmed:
+        recorded_parts.append(f"作品归属 TMDB:{eff_tid or '原目录'} S{eff_sn:02d}")
+    if new_conf.confirmed_total_episodes:
+        recorded_parts.append(f"本季共 {new_conf.confirmed_total_episodes} 集")
+    if new_conf.broadcast_status == "finished":
+        recorded_parts.append("已播毕")
+    elif new_conf.broadcast_status == "airing":
+        recorded_parts.append("仍在连载")
+
+    return {
+        "ok": True,
+        "confirmation": orm_confirmation_to_dict(new_conf),
+        "season": updated_work,
+        "summary": task_summary,
+        "target_category": cat_key,
+        "target_category_label": cat_label,
+        "message": f"已保存人工确认（{' · '.join(recorded_parts)}），当前条目已更新至「{cat_label}」",
+    }
+
+
+@router.delete("/{task_id}/seasons/{record_id}/manual-confirm")
+async def revoke_manual_season_confirmation(
+    task_id: str,
+    record_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """撤销单季人工确认，按当前可用证据重新计算分流（不删除文件）。"""
+    task = await db.get(Task, task_id)
+    rec = await db.get(SeasonRecord, record_id)
+    if not task or not rec or rec.task_id != task_id:
+        raise HTTPException(status_code=404, detail="剧季记录不存在")
+
+    from app.services.task_service import TASK_RUNNING_WORKERS
+    if task.status in ("running", "paused", "stopping") or task_id in TASK_RUNNING_WORKERS:
+        raise HTTPException(status_code=409, detail="请在初检结束后撤销人工确认")
+
+    part_rows, _ = await _collect_work_season_records(db, rec)
+    scope_paths = [r.season_path for r in part_rows if r.season_path]
+
+    confs = (
+        await db.scalars(
+            select(ManualSeasonConfirmation).where(
+                ManualSeasonConfirmation.is_active.is_(True),
+                ManualSeasonConfirmation.season_path.in_(scope_paths),
+            )
+        )
+    ).all()
+    for c in confs:
+        c.is_active = False
+
+    # 同时停用由 manual_confirm_remap 写入的单季映射
+    remap_rows = (
+        await db.scalars(
+            select(SeasonMapping).where(
+                SeasonMapping.scope_key.in_(scope_paths),
+                SeasonMapping.mapping_kind == "manual_confirm_remap",
+                SeasonMapping.is_active.is_(True),
+            )
+        )
+    ).all()
+    for rm in remap_rows:
+        rm.is_active = False
+    await db.flush()
+
+    for r in part_rows:
+        ev_r = _safe_json(getattr(r, "evidence_json", None), {})
+        if isinstance(ev_r, dict):
+            ev_r.pop("manual_confirmation", None)
+            if ev_r.get("meta_status") in ("manual_confirmed", "total_episodes_pending"):
+                ref_cands = unverified_metadata_candidates(ev_r, r.tmdb_id, r.season_number)
+                ev_r["meta_status"] = "metadata_unverified" if ref_cands else "no_candidate"
+                r.total_episodes = None
+                r.season_finished = False
+            b_ev_r = ev_r.get("broadcast_evidence")
+            if isinstance(b_ev_r, dict) and b_ev_r.get("source") == "manual_confirmation":
+                b_ev_r["status"] = "evidence_pending"
+                b_ev_r["schedule_verified"] = False
+            r.evidence_json = json.dumps(ev_r, ensure_ascii=False)
+        await _apply_in_place_recalculate(db, r, fetch_remote=False)
+
+    task_summary = await refresh_task_summary(task_id, db)
+    await db.commit()
+    from app.core.season_classifier import get_record_work_context
+    updated_work = await get_record_work_context(db, rec)
+    return {
+        "ok": True,
+        "revoked_count": len(confs),
+        "season": updated_work,
+        "summary": task_summary,
+        "message": f"已撤销 {rec.show_name} S{rec.season_number:02d} 的人工确认，已按当前可用证据重新分流",
+    }
+
+
+@router.post("/{task_id}/seasons/{record_id}/hold")
+async def hold_season_for_task(
+    task_id: str,
+    record_id: str,
+    body: HoldSeasonRequest | None = Body(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """本次保留，不再提示：移出本轮五模块待办计数，保留原问题与原状态，已扫描总量不变。"""
+    task = await db.get(Task, task_id)
+    rec = await db.get(SeasonRecord, record_id)
+    if not task or not rec or rec.task_id != task_id:
+        raise HTTPException(status_code=404, detail="剧季记录不存在")
+
+    from app.services.task_service import TASK_RUNNING_WORKERS
+    if task.status in ("running", "paused", "stopping") or task_id in TASK_RUNNING_WORKERS:
+        raise HTTPException(status_code=409, detail="请在初检结束后操作本次保留")
+
+    part_rows, work = await _collect_work_season_records(db, rec)
+    scope_paths = [r.season_path for r in part_rows if r.season_path]
+    now_iso = datetime.now(timezone.utc).isoformat()
+    req_reason = (body.reason if body else "") or rec.status_detail or "本轮暂不处理，安全保留原样"
+
+    hold_payload = {
+        "active": True,
+        "task_id": task_id,
+        "held_at": now_iso,
+        "reason": req_reason,
+        "original_status": rec.status,
+        "original_detail": rec.status_detail,
+        "original_sub_category": work.get("anomaly_sub_category") or "pending_evidence",
+        "scope_paths": scope_paths,
+    }
+    for r in part_rows:
+        ev_r = _safe_json(getattr(r, "evidence_json", None), {})
+        if not isinstance(ev_r, dict):
+            ev_r = {}
+        ev_r["hold_for_task"] = hold_payload
+        r.evidence_json = json.dumps(ev_r, ensure_ascii=False)
+
+    task_summary = await refresh_task_summary(task_id, db)
+    await db.commit()
+    return {
+        "ok": True,
+        "hold_info": hold_payload,
+        "summary": task_summary,
+        "message": f"已将 {rec.show_name} S{rec.season_number:02d} 移入「本次保留」（可随时恢复处理）",
+    }
+
+
+@router.delete("/{task_id}/seasons/{record_id}/hold")
+async def restore_held_season(
+    task_id: str,
+    record_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """从「本次保留」恢复处理，根据当前证据重新分流且不产生重复主卡。"""
+    task = await db.get(Task, task_id)
+    rec = await db.get(SeasonRecord, record_id)
+    if not task or not rec or rec.task_id != task_id:
+        raise HTTPException(status_code=404, detail="剧季记录不存在")
+
+    from app.services.task_service import TASK_RUNNING_WORKERS
+    if task.status in ("running", "paused", "stopping") or task_id in TASK_RUNNING_WORKERS:
+        raise HTTPException(status_code=409, detail="请在初检结束后恢复处理")
+
+    part_rows, _ = await _collect_work_season_records(db, rec)
+    for r in part_rows:
+        ev_r = _safe_json(getattr(r, "evidence_json", None), {})
+        if isinstance(ev_r, dict):
+            ev_r.pop("hold_for_task", None)
+            r.evidence_json = json.dumps(ev_r, ensure_ascii=False)
+        await _apply_in_place_recalculate(db, r, fetch_remote=False)
+
+    task_summary = await refresh_task_summary(task_id, db)
+    await db.commit()
+    from app.core.season_classifier import get_record_work_context
+    restored_work = await get_record_work_context(db, rec)
+    return {
+        "ok": True,
+        "season": restored_work,
+        "summary": task_summary,
+        "message": f"已恢复 {rec.show_name} S{rec.season_number:02d} 的待办处理",
+    }
+
+
+@router.post("/{task_id}/retry-failed")
+async def retry_task_failed_seasons(
+    task_id: str,
+    body: RecalculateRequest | None = Body(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """仅重试本任务中初检请求失败/超时的剧季及其关联记录，不无差别重跑已成功剧季。"""
+    task = await db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    from app.services.task_service import TASK_RUNNING_WORKERS
+    if task.status in ("running", "paused", "stopping") or task_id in TASK_RUNNING_WORKERS:
+        raise HTTPException(status_code=409, detail="请在初检结束后重试失败项")
+
+    all_rows = list((await db.scalars(select(SeasonRecord).where(SeasonRecord.task_id == task_id))).all())
+    req_ids = set((body.record_ids if body else []) or [])
+    target_ids: list[str] = []
+    for r in all_rows:
+        if r.status in ("manually_handled", "verified_complete", "cleaned_redundant", "source_absent", "archived"):
+            continue
+        ev = _safe_json(getattr(r, "evidence_json", None), {})
+        is_failed = (
+            (ev.get("meta_status") in ("fetch_failed", "query_failed"))
+            or bool(ev.get("last_remote_recheck_error"))
+            or bool(((ev.get("broadcast_evidence") or {}) if isinstance(ev, dict) else {}).get("last_check_incomplete"))
+        )
+        if (req_ids and r.id in req_ids) or (not req_ids and is_failed):
+            target_ids.append(r.id)
+
+    if not target_ids:
+        return {
+            "ok": True,
+            "updated_count": 0,
+            "remote_failures": [],
+            "succeeded_ids": [],
+            "message": "当前没有需要重试的失败项",
+        }
+
+    res = await _run_task_reevaluate_impl(
+        db, task_id, RecalculateRequest(record_ids=target_ids, fetch_remote=True)
+    )
+    failed_id_set = {f["id"] for f in (res.get("remote_failures") or [])}
+    res["succeeded_ids"] = [rid for rid in target_ids if rid not in failed_id_set]
+    res["retried_ids"] = target_ids
+    return res
+
+
+@router.post("/{task_id}/refresh-modified")
+async def refresh_task_modified_scope(
+    task_id: str,
+    body: RefreshModifiedRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """按需刷新用户在外部修改过的文件、目录或 TMDB ID 范围（自动发现同父目录下改名后的新路径，不默认重跑整任务）。"""
+    task = await db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    from app.services.task_service import TASK_RUNNING_WORKERS
+    if task.status in ("running", "paused", "stopping") or task_id in TASK_RUNNING_WORKERS:
+        raise HTTPException(status_code=409, detail="请在初检结束后刷新修改结果")
+
+    all_rows = list((await db.scalars(select(SeasonRecord).where(SeasonRecord.task_id == task_id))).all())
+    req_ids = set(body.record_ids or [])
+    req_paths = {normalize_dir_path(p) for p in (body.paths or []) if p}
+
+    target_rows: list[SeasonRecord] = []
+    for r in all_rows:
+        if r.id in req_ids or normalize_dir_path(r.season_path) in req_paths or normalize_dir_path(r.show_path) in req_paths:
+            part_rows, _ = await _collect_work_season_records(db, r)
+            for pr in part_rows:
+                if pr not in target_rows:
+                    target_rows.append(pr)
+
+    if not target_rows:
+        raise HTTPException(status_code=400, detail="请指定需要刷新修改结果的剧季记录或路径范围")
+
+    from app.clients.clouddrive2 import CloudDrive2Client
+    from app.clients.moviepilot import MoviePilotClient
+    from app.clients.tmdb import TMDBClient
+    from app.core.inspector import _parse_season_number, run_inspection
+
+    settings = get_settings()
+    cd2 = CloudDrive2Client()
+    mp = MoviePilotClient()
+    tmdb = TMDBClient()
+    refreshed_ids: list[str] = []
+    failed_items: list[dict[str, str]] = []
+    now_dt = datetime.now(timezone.utc)
+
+    try:
+        for rec in target_rows:
+            old_show_path = rec.show_path
+            old_season_path = rec.season_path
+            inspect_show_path = old_show_path
+            inspect_season_path = old_season_path
+
+            # 检查原季路径是否仍在；若用户在外部修改了剧名或 [tmdbid=...]，在父目录下定位新目录
+            try:
+                cur_files = await cd2.list_files(old_season_path, force_refresh=True)
+            except Exception:
+                cur_files = []
+
+            if not cur_files and old_show_path:
+                parent_dir = posixpath.dirname(normalize_dir_path(old_show_path))
+                try:
+                    siblings = await cd2.list_files(parent_dir, force_refresh=True)
+                except Exception:
+                    siblings = []
+                old_clean = re.sub(r"\[.*?\]|\(\d{4}\)", "", rec.show_name or "").strip().casefold()
+                for sib in siblings:
+                    if not sib.get("isDirectory"):
+                        continue
+                    sname = str(sib.get("name") or "")
+                    spath = normalize_dir_path(sib.get("path") or f"{parent_dir}/{sname}")
+                    sclean = re.sub(r"\[.*?\]|\(\d{4}\)", "", sname).strip().casefold()
+                    if old_clean and sclean and (old_clean == sclean or old_clean in sclean or sclean in old_clean):
+                        try:
+                            sub_items = await cd2.list_files(spath, force_refresh=True)
+                        except Exception:
+                            sub_items = []
+                        season_dir_hit = next(
+                            (
+                                it for it in sub_items
+                                if it.get("isDirectory") and _parse_season_number(it.get("name") or "") == rec.season_number
+                            ),
+                            None,
+                        )
+                        if season_dir_hit:
+                            inspect_show_path = spath
+                            inspect_season_path = normalize_dir_path(
+                                season_dir_hit.get("path") or f"{spath}/{season_dir_hit.get('name')}"
+                            )
+                            break
+
+            try:
+                res = await run_inspection(
+                    task_id=rec.task_id,
+                    source_path=inspect_show_path,
+                    cd2_client=cd2,
+                    mp_client=mp,
+                    tmdb_client=tmdb,
+                    archive_root=settings.archive_root,
+                    global_source_root=settings.source_root,
+                    only_season_path=inspect_season_path,
+                    db=db,
+                )
+                diag = next(
+                    (
+                        s for s in res.seasons
+                        if normalize_dir_path(s.season_path) == normalize_dir_path(inspect_season_path)
+                        or s.season_number == rec.season_number
+                    ),
+                    None,
+                )
+            except Exception as exc:
+                diag = None
+                ev_old = _safe_json(getattr(rec, "evidence_json", None), {})
+                ev_old["last_remote_recheck_error"] = f"{type(exc).__name__}: {exc}"
+                rec.evidence_json = json.dumps(ev_old, ensure_ascii=False)
+                failed_items.append({"id": rec.id, "path": old_season_path, "error": str(exc)})
+                continue
+
+            if diag is None or (diag.evidence or {}).get("meta_status") == "fetch_failed":
+                ev_old = _safe_json(getattr(rec, "evidence_json", None), {})
+                err_msg = ((diag.evidence or {}).get("meta_error") if diag else "") or "外部修改路径读取未完成"
+                ev_old["last_remote_recheck_error"] = err_msg
+                rec.evidence_json = json.dumps(ev_old, ensure_ascii=False)
+                failed_items.append({"id": rec.id, "path": inspect_season_path, "error": err_msg})
+                continue
+
+            rec.show_name = diag.show_name
+            rec.show_path = diag.show_path
+            rec.season_path = diag.season_path
+            rec.tmdb_id = str(diag.tmdb_id) if diag.tmdb_id is not None else None
+            rec.total_episodes = diag.total_episodes
+            rec.local_episode_count = diag.local_episode_count
+            rec.recognized_episodes_json = json.dumps(diag.recognized_episodes)
+            rec.missing_episodes_json = json.dumps(diag.missing_episodes)
+            rec.duplicate_episodes_json = json.dumps(diag.duplicate_episodes)
+            rec.status = diag.status
+            rec.status_detail = diag.status_detail
+            rec.archive_target_path = diag.archive_target_path
+            rec.season_finished = diag.season_finished
+            rec.evidence_json = json.dumps(diag.evidence or {}, ensure_ascii=False)
+            rec.conflict_json = json.dumps(diag.conflict or {}, ensure_ascii=False)
+            rec.mapping_json = json.dumps(diag.mapping or {}, ensure_ascii=False)
+            rec.last_checked_at = now_dt
+            refreshed_ids.append(rec.id)
+    finally:
+        await cd2.close()
+        await mp.close()
+        await tmdb.close()
+
+    all_after = list((await db.scalars(select(SeasonRecord).where(SeasonRecord.task_id == task_id))).all())
+    dir_groups = await _rebuild_offline_directory_groups(db, task_id, all_after)
+    task_summary = await refresh_task_summary(task_id, db)
+    await db.commit()
+
+    return {
+        "ok": len(refreshed_ids) > 0 and len(failed_items) == 0,
+        "refreshed_ids": refreshed_ids,
+        "failed_items": failed_items,
+        "directory_groups": dir_groups,
+        "summary": task_summary,
+        "message": (
+            f"已刷新外部修改范围：成功更新 {len(refreshed_ids)} 季"
+            + (f"，{len(failed_items)} 季未完成（保留原有效证据与取证时间）" if failed_items else "")
+        ),
+    }

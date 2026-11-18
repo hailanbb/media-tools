@@ -266,6 +266,10 @@ def consolidate_seasons_to_work_records(
             "download_pushed": 0,
             "airing": 0,
             "anomaly": 0,
+            "anomaly_decision": 0,
+            "anomaly_cleanable": 0,
+            "anomaly_pending_evidence": 0,
+            "held": 0,
             "system_tracking": 0,
             "total_work_seasons": 0,
         }
@@ -285,6 +289,10 @@ def consolidate_seasons_to_work_records(
         "download_pushed": 0,
         "airing": 0,
         "anomaly": 0,
+        "anomaly_decision": 0,
+        "anomaly_cleanable": 0,
+        "anomaly_pending_evidence": 0,
+        "held": 0,
         "system_tracking": 0,
         "total_work_seasons": 0,
     }
@@ -481,12 +489,81 @@ def consolidate_seasons_to_work_records(
         gap_state = base_dict.get("gap_fill_state") or {}
         is_pushed_pending = (best_cat == "download" and gap_state.get("view_bucket") == "pushed_pending")
 
+        # 计算异常剧集唯一互斥子分类与条件式主动作 (v2.5.38)
+        ev_b = dict(base_dict.get("evidence") or {})
+        conf_b = dict(base_dict.get("conflict") or {})
+        dir_grp_b = dict(ev_b.get("directory_group") or {})
+        dir_grp_req = bool(dir_grp_b.get("requires_confirm"))
+        if pending_dir_group_ids and str(dir_grp_b.get("id") or "") in pending_dir_group_ids:
+            dir_grp_req = True
+        m_conf_b = dict(ev_b.get("manual_confirmation") or {})
+        m_contradiction = bool((m_conf_b.get("contradiction") or {}).get("has_contradiction"))
+        meta_st_b = str(ev_b.get("meta_status") or ev_b.get("metadata_status") or "")
+        rec_eps_b = [int(x) for x in (base_dict.get("recognized_episodes") or []) if str(x).isdigit() and int(x) > 0]
+        tot_eps_b = base_dict.get("total_episodes")
+        st_b = str(base_dict.get("status") or "")
+        is_overflow_b = bool(tot_eps_b and rec_eps_b and max(rec_eps_b) > int(tot_eps_b) and st_b not in ("archive_ready", "airing"))
+
+        anomaly_sub = ""
+        primary_action_kind = ""
+        if best_cat == "anomaly":
+            if dir_grp_req or conf_b.get("blocking") or st_b == "identity_review" or m_contradiction or is_overflow_b:
+                anomaly_sub = "decision"
+                primary_action_kind = "confirm_directory" if dir_grp_req else "verify_identity"
+            elif (
+                st_b == "already_archived"
+                and not base_dict["airing_protected"]
+                and base_dict.get("season_finished") is not False
+                and (tot_eps_b is None or int(tot_eps_b or 0) > 0)
+            ):
+                anomaly_sub = "cleanable"
+                primary_action_kind = "clean_redundant"
+            else:
+                anomaly_sub = "pending_evidence"
+                if meta_st_b in ("fetch_failed", "query_failed") or ev_b.get("last_remote_recheck_error"):
+                    primary_action_kind = "retry_failed"
+                elif st_b == "period_review" and bool((ev_b.get("period_evidence") or {}).get("is_segmented")):
+                    primary_action_kind = "safety_hold"
+                elif st_b == "archive_check":
+                    primary_action_kind = "safety_hold"
+                else:
+                    primary_action_kind = "manual_confirm"
+
+        base_dict["anomaly_sub_category"] = anomaly_sub
+        base_dict["primary_action_kind"] = primary_action_kind
+
+        # 检查任务级「本次保留，不再提示」标记
+        hold_info = None
+        for it_r, _, _ in active_items:
+            it_ev = _safe_json(get_record_field(it_r, "evidence_json") or get_record_field(it_r, "evidence"), {})
+            h_obj = (it_ev.get("hold_for_task") or {}) if isinstance(it_ev, dict) else {}
+            if isinstance(h_obj, dict) and h_obj.get("active"):
+                hold_info = h_obj
+                break
+
+        base_dict["is_held_for_task"] = bool(hold_info)
+        base_dict["hold_info"] = hold_info
+        if hold_info:
+            base_dict["original_main_category"] = best_cat
+            base_dict["main_category"] = "held"
+            counts["held"] += 1
+            counts["total_work_seasons"] += 1
+            work_records.append(base_dict)
+            continue
+
         # 计入统计
         counts[best_cat] += 1
         if is_pushed_pending:
             counts["download_pushed"] += 1
-        if best_cat == "anomaly" and (primary_act == "system_tracking" or getattr(primary_rec, "status", None) == "period_review"):
-            counts["system_tracking"] += 1
+        if best_cat == "anomaly":
+            if anomaly_sub == "decision":
+                counts["anomaly_decision"] += 1
+            elif anomaly_sub == "cleanable":
+                counts["anomaly_cleanable"] += 1
+            else:
+                counts["anomaly_pending_evidence"] += 1
+            if primary_act == "system_tracking" or getattr(primary_rec, "status", None) == "period_review":
+                counts["system_tracking"] += 1
         counts["total_work_seasons"] += 1
 
         work_records.append(base_dict)
