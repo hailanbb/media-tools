@@ -868,7 +868,7 @@ async def get_gap_fill_sites_catalog(
 ) -> dict:
     """读取 MoviePilot 站点目录（严格白名单安全脱敏，禁透传 Cookie/Passkey/Token）。"""
     _check_mp_configured()
-    client = _get_mp_client()
+    client = MoviePilotClient()
     try:
         sites = await client.get_sites(sanitize=True)
         from app.services.download_service import get_mp_instance_key
@@ -880,6 +880,8 @@ async def get_gap_fill_sites_catalog(
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"读取 MoviePilot 站点目录失败: {exc}")
+    finally:
+        await client.close()
 
 
 @router.get("/gap-fill/sites/rules")
@@ -888,10 +890,13 @@ async def get_gap_fill_site_rules_endpoint(
 ) -> dict:
     """读取动漫与非动漫两套独立补缺站点规则（若未配置则返回初始草稿）。"""
     _check_mp_configured()
-    client = _get_mp_client()
-    from app.services.download_service import get_gap_fill_site_rules
-    rules = await get_gap_fill_site_rules(db, mp=client)
-    return {"ok": True, **rules}
+    client = MoviePilotClient()
+    try:
+        from app.services.download_service import get_gap_fill_site_rules
+        rules = await get_gap_fill_site_rules(db, mp=client)
+        return {"ok": True, **rules}
+    finally:
+        await client.close()
 
 
 @router.post("/gap-fill/sites/rules")
@@ -901,9 +906,9 @@ async def save_gap_fill_site_rule_endpoint(
 ) -> dict:
     """保存某类别的补缺站点规则（带乐观锁版本校验）。"""
     _check_mp_configured()
-    client = _get_mp_client()
-    from app.services.download_service import save_gap_fill_site_rule
+    client = MoviePilotClient()
     try:
+        from app.services.download_service import save_gap_fill_site_rule
         saved = await save_gap_fill_site_rule(
             db,
             category=body.category,
@@ -917,6 +922,8 @@ async def save_gap_fill_site_rule_endpoint(
         raise HTTPException(status_code=409, detail=str(r_err))
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"保存补缺站点规则失败: {exc}")
+    finally:
+        await client.close()
 
 
 @router.get("/gap-fill/work-preferences")
@@ -924,10 +931,13 @@ async def get_work_preferences_endpoint(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """获取所有作品的人工补缺分类偏好设置。"""
-    client = _get_mp_client()
-    from app.services.download_service import get_gap_fill_work_preferences
-    prefs = await get_gap_fill_work_preferences(db, mp=client)
-    return {"ok": True, "preferences": prefs}
+    client = MoviePilotClient()
+    try:
+        from app.services.download_service import get_gap_fill_work_preferences
+        prefs = await get_gap_fill_work_preferences(db, mp=client)
+        return {"ok": True, "preferences": prefs}
+    finally:
+        await client.close()
 
 
 @router.post("/gap-fill/work-preference")
@@ -936,9 +946,9 @@ async def save_work_preference_endpoint(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """保存用户对某作品的人工补缺分类偏好（跨初检复用）。"""
-    client = _get_mp_client()
-    from app.services.download_service import save_gap_fill_work_preference
+    client = MoviePilotClient()
     try:
+        from app.services.download_service import save_gap_fill_work_preference
         pref = await save_gap_fill_work_preference(
             db,
             tmdb_id=body.tmdb_id,
@@ -948,5 +958,8 @@ async def save_work_preference_endpoint(
         )
         return {"ok": True, "preference": pref}
     except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"保存作品分类偏好失败: {exc}")
+    finally:
+        await client.close()
         raise HTTPException(status_code=400, detail=f"保存作品偏好失败: {exc}")
 
