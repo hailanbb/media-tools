@@ -603,6 +603,7 @@ class TestAiringRetentionLifecycleL01ToL12(unittest.IsolatedAsyncioTestCase):
             last_checked_at=orig_checked_dt,
         )
         with patch("app.api.tasks.resolve_active_season_mapping", new=AsyncMock(return_value=None)), \
+             patch("app.api.tasks.resolve_active_manual_confirmation", new=AsyncMock(return_value=None)), \
              patch("app.api.tasks.get_verified_metadata_snapshot", new=AsyncMock(return_value=airing_meta[1])), \
              patch("app.api.tasks.supersede_changed_identity_records", new=AsyncMock()):
             await _apply_in_place_recalculate(AsyncMock(), rec, fetch_remote=False)

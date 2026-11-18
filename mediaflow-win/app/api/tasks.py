@@ -962,6 +962,96 @@ async def confirm_task_directory_group(
     }
 
 
+class DirectoryGroupMergePreviewRequest(BaseModel):
+    target_path: str = ""
+    source_target_path: str = ""
+    season_number: int = 1
+    selected_prefix: str = ""
+
+
+class DirectoryGroupMergeExecuteRequest(BaseModel):
+    plan_id: str = ""
+    target_path: str = ""
+    source_target_path: str = ""
+    season_number: int = 1
+    selected_prefix: str = ""
+
+
+@router.post("/{task_id}/directory-groups/{group_id}/merge-preview")
+async def preview_task_directory_group_merge(
+    task_id: str,
+    group_id: str,
+    body: DirectoryGroupMergePreviewRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """生成同 TMDB 多目录源端合并与前缀统一的只读预览计划 (M01–M10)。"""
+    task = await db.get(Task, task_id)
+    group = await db.get(DirectoryGroup, group_id)
+    if not task or not group or group.task_id != task_id:
+        raise HTTPException(status_code=404, detail="多目录确认组不存在")
+    from app.services.task_service import TASK_RUNNING_WORKERS
+    if task.status in ("running", "paused", "stopping") or task_id in TASK_RUNNING_WORKERS:
+        raise HTTPException(status_code=409, detail="请在初检结束后合并目录组")
+
+    from app.core.directory_merge import build_directory_merge_plan
+    try:
+        plan = await build_directory_merge_plan(
+            db,
+            task_id,
+            group_id,
+            target_path=body.target_path,
+            source_target_path=body.source_target_path,
+            season_number=body.season_number,
+            selected_prefix=body.selected_prefix,
+        )
+        await db.commit()
+        return {"ok": True, "plan": plan}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/{task_id}/directory-groups/{group_id}/merge-execute")
+async def execute_task_directory_group_merge(
+    task_id: str,
+    group_id: str,
+    body: DirectoryGroupMergeExecuteRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """一次确认执行源端目录合并、前缀重命名、旧目录清理与云盘刷新 (M01–M14)。"""
+    task = await db.get(Task, task_id)
+    group = await db.get(DirectoryGroup, group_id)
+    if not task or not group or group.task_id != task_id:
+        raise HTTPException(status_code=404, detail="多目录确认组不存在")
+    from app.services.task_service import TASK_RUNNING_WORKERS
+    if task.status in ("running", "paused", "stopping") or task_id in TASK_RUNNING_WORKERS:
+        raise HTTPException(status_code=409, detail="请在初检结束后合并目录组")
+
+    from app.core.directory_merge import build_directory_merge_plan, execute_directory_merge
+    try:
+        grp_ev = json.loads(group.evidence_json or "{}") if getattr(group, "evidence_json", None) else {}
+        plan = grp_ev.get("latest_merge_plan")
+        if not plan or (body.plan_id and plan.get("plan_id") != body.plan_id) or not plan.get("can_execute"):
+            plan = await build_directory_merge_plan(
+                db,
+                task_id,
+                group_id,
+                target_path=body.target_path,
+                source_target_path=body.source_target_path,
+                season_number=body.season_number,
+                selected_prefix=body.selected_prefix,
+            )
+
+        res = await execute_directory_merge(
+            db,
+            task_id,
+            group_id,
+            plan_id=plan.get("plan_id", ""),
+        )
+        return res
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 class DirectoryGroupCleanSeasonRequest(BaseModel):
     season_record_id: str
 

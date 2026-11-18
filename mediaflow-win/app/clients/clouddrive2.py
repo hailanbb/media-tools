@@ -337,6 +337,19 @@ class CloudDrive2Client:
             return {"success": True, "resultFilePaths": []}
         return self._decode_file_op_result(frames[0])
 
+    async def rename_file(self, file_path: str, new_name: str) -> dict[str, Any]:
+        """重命名文件/目录。"""
+        norm_path = file_path.rstrip("/")
+        clean_name = new_name.strip()
+        req_pb = _encode_string_field(1, norm_path) + _encode_string_field(2, clean_name)
+        frames = await self._call_rpc("RenameFile", req_pb)
+        if not frames:
+            return {"success": True}
+        res = self._decode_file_op_result(frames[0])
+        if not res.get("success", False):
+            raise RuntimeError(f"CloudDrive2 重命名失败: {res.get('errorMessage') or '未知错误'}")
+        return res
+
     async def delete_file(self, file_path: str) -> dict[str, Any]:
         """删除文件/目录（移至回收站）。"""
         norm_path = file_path.rstrip("/")

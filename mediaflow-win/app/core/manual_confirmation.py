@@ -117,13 +117,19 @@ async def resolve_active_manual_confirmation(
     norm_sh_path = _norm_path(show_path)
     tid_str = str(tmdb_id or "").strip()
 
-    rows = (
-        await db.execute(
+    try:
+        exec_res = await db.execute(
             select(ManualSeasonConfirmation)
             .where(ManualSeasonConfirmation.is_active.is_(True))
             .order_by(ManualSeasonConfirmation.updated_at.desc(), ManualSeasonConfirmation.id.desc())
         )
-    ).scalars().all()
+        if hasattr(exec_res, "scalars"):
+            sc = exec_res.scalars()
+            rows = sc.all() if hasattr(sc, "all") and callable(sc.all) else []
+        else:
+            rows = []
+    except Exception:
+        rows = []
 
     for row in rows:
         row_s_path = _norm_path(row.season_path)

@@ -1132,13 +1132,13 @@
     </form>
   </dialog>
 
-  <!-- 原生无障碍弹窗：同一 TMDB 多目录 / 异名目录组级确认 -->
-  <dialog id="directoryGroupDialog" aria-labelledby="directoryGroupDialogTitle" style="overscroll-behavior: contain;" class="w-[95vw] max-w-2xl m-auto p-0 rounded-2xl bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 border border-slate-200 dark:border-slate-700 shadow-2xl overflow-hidden">
+  <!-- 原生无障碍弹窗：同一 TMDB 多目录 / 异名目录组级确认与源端合并 -->
+  <dialog id="directoryGroupDialog" aria-labelledby="directoryGroupDialogTitle" style="overscroll-behavior: contain;" class="w-[95vw] max-w-3xl m-auto p-0 rounded-2xl bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 border border-slate-200 dark:border-slate-700 shadow-2xl overflow-hidden">
     <div class="flex flex-col max-h-[88dvh]">
       <div class="flex items-center justify-between px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-900">
         <div class="flex items-center gap-2 min-w-0">
           <i class="fa-solid fa-folder-tree text-amber-600 dark:text-amber-400"></i>
-          <h3 id="directoryGroupDialogTitle" class="text-sm font-bold truncate">查看目录差异与确认归档目标</h3>
+          <h3 id="directoryGroupDialogTitle" class="text-sm font-bold truncate">选择主目录并合并 (TMDB 多目录)</h3>
         </div>
         <form method="dialog">
           <button type="submit" aria-label="关闭弹窗" class="w-8 h-8 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-200/60 dark:hover:bg-slate-800 flex items-center justify-center transition">
@@ -1148,10 +1148,11 @@
       </div>
       <div id="directoryGroupDialogBody" class="p-5 overflow-y-auto space-y-3.5 text-xs"></div>
       <div class="px-5 py-3 border-t border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2 bg-slate-50/50 dark:bg-slate-900">
-        <span class="text-[11px] text-slate-500 dark:text-slate-400">安全声明：确认仅保存目标指向或共存标记，绝不自动移动或删除文件。</span>
+        <span class="text-[11px] text-slate-500 dark:text-slate-400">说明：点击「确认并合并目录」将移动文件并统一前缀，全部核验成功后清理旧空目录并刷新网盘。</span>
         <div class="flex items-center gap-2">
-          <button type="button" onclick="submitDirectoryGroupConfirm('intentional_coexist')" class="px-3.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-semibold transition">标记有意共存</button>
-          <button type="button" onclick="submitDirectoryGroupConfirm('use_archive_target')" class="px-4 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold shadow-sm transition">确认目标归档目录</button>
+          <button type="button" onclick="submitDirectoryGroupConfirm('intentional_coexist')" class="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-semibold transition">标记有意共存</button>
+          <button type="button" onclick="submitDirectoryGroupConfirm('use_archive_target')" class="px-3 py-1.5 rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 hover:bg-amber-100 dark:hover:bg-amber-900/60 text-amber-800 dark:text-amber-200 text-xs font-semibold transition" title="仅保存规则指向，绝不自动移动或删除文件">仅保存目标，不移动</button>
+          <button type="button" id="dirGroupMergeExecuteBtn" onclick="submitDirectoryGroupMergeExecute()" class="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-sm transition flex items-center gap-1.5"><i class="fa-solid fa-arrow-down-up-across-line"></i> 确认并合并目录</button>
         </div>
       </div>
     </div>
@@ -4277,6 +4278,8 @@
     }
 
     let _activeDirectoryGroupId = '';
+    let _activeMergePlan = null;
+    let _activeDirGroupSeasonNumber = 1;
 
     function onDirGroupRadioChange() {
       const radios = Array.from(document.querySelectorAll('input[name="dirGroupTargetRadio"]'));
@@ -4299,14 +4302,229 @@
         card.classList.toggle('border-slate-200', !active);
         card.classList.toggle('dark:border-slate-700', !active);
       });
+      if (typeof fetchDirectoryGroupMergePreview === 'function') fetchDirectoryGroupMergePreview();
     }
 
-    function openDirectoryGroupDialog(groupId) {
+    async function fetchDirectoryGroupMergePreview(overridePrefix = '') {
+      const container = document.getElementById('dirGroupMergePreviewContainer');
+      const executeBtn = document.getElementById('dirGroupMergeExecuteBtn');
+      if (!container || !currentTaskId || !_activeDirectoryGroupId) return;
+
+      const checkedRadio = document.querySelector('input[name="dirGroupTargetRadio"]:checked');
+      const customInput = document.getElementById('dirGroupCustomTargetInput');
+      let targetPath = '';
+      if (checkedRadio) {
+        targetPath = checkedRadio.value === '__custom__'
+          ? String((customInput && customInput.value) || '').trim()
+          : String(checkedRadio.value || '').trim();
+      } else if (customInput) {
+        targetPath = String(customInput.value || '').trim();
+      }
+
+      container.innerHTML = `
+        <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 flex items-center justify-center gap-2 text-slate-500 text-xs">
+          <i class="fa-solid fa-spinner fa-spin"></i> 正在生成源端目录合并与前缀统一预览 (M01–M14)...
+        </div>`;
+      if (executeBtn) {
+        executeBtn.disabled = true;
+        executeBtn.classList.add('opacity-50', 'cursor-not-allowed');
+      }
+
+      try {
+        const res = await api(`/api/tasks/${currentTaskId}/directory-groups/${_activeDirectoryGroupId}/merge-preview`, {
+          method: 'POST',
+          body: JSON.stringify({
+            target_path: targetPath,
+            season_number: _activeDirGroupSeasonNumber || 1,
+            selected_prefix: overridePrefix
+          })
+        });
+        const plan = res.plan || {};
+        _activeMergePlan = plan;
+        renderDirectoryGroupMergePreview(plan);
+      } catch (e) {
+        container.innerHTML = `
+          <div class="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300 text-xs">
+            生成合并预览失败: ${escapeHtml(e.message)}
+          </div>`;
+        if (executeBtn) {
+          executeBtn.disabled = true;
+          executeBtn.classList.add('opacity-50', 'cursor-not-allowed');
+        }
+      }
+    }
+
+    function renderDirectoryGroupMergePreview(plan) {
+      const container = document.getElementById('dirGroupMergePreviewContainer');
+      const executeBtn = document.getElementById('dirGroupMergeExecuteBtn');
+      if (!container) return;
+
+      const files = plan.files_to_move || [];
+      const conflicts = plan.block_reasons || [];
+      const canExec = Boolean(plan.can_execute);
+
+      if (executeBtn) {
+        executeBtn.disabled = !canExec;
+        executeBtn.classList.toggle('opacity-50', !canExec);
+        executeBtn.classList.toggle('cursor-not-allowed', !canExec);
+      }
+
+      const prefixSamples = plan.prefix_samples || [];
+      const chosenPrefix = plan.chosen_prefix || '';
+
+      let prefixSelectorHtml = '';
+      if (prefixSamples.length > 1) {
+        prefixSelectorHtml = `
+          <div class="flex items-center gap-2 text-xs">
+            <span class="font-semibold text-slate-700 dark:text-slate-300">目标前缀样本选择:</span>
+            <select onchange="fetchDirectoryGroupMergePreview(this.value)" class="px-2 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 font-mono text-xs">
+              ${prefixSamples.map(p => `<option value="${escapeHtml(p)}" ${p === chosenPrefix ? 'selected' : ''}>${escapeHtml(p)}</option>`).join('')}
+            </select>
+          </div>`;
+      } else {
+        prefixSelectorHtml = `
+          <div class="text-xs text-slate-600 dark:text-slate-300">
+            采用目标前缀: <span class="font-mono font-bold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/60 px-1.5 py-0.5 rounded border border-indigo-200 dark:border-indigo-800">${escapeHtml(chosenPrefix || '默认')}</span>
+          </div>`;
+      }
+
+      const filesRowsHtml = files.length > 0 ? files.map(f => {
+        const isConflict = Boolean(f.is_conflict);
+        return `
+          <div class="p-2 rounded-lg border ${isConflict ? 'border-rose-300 bg-rose-50/70 dark:bg-rose-950/30' : 'border-slate-200 dark:border-slate-700/80 bg-white dark:bg-slate-800/50'} text-xs space-y-1">
+            <div class="flex items-center justify-between gap-2">
+              <span class="font-mono text-slate-500 dark:text-slate-400 break-all line-through">${escapeHtml(f.source_filename)}</span>
+              <span class="text-[10px] px-1.5 py-0.5 rounded font-medium ${isConflict ? 'bg-rose-100 dark:bg-rose-900/60 text-rose-700 dark:text-rose-200' : 'bg-emerald-100 dark:bg-emerald-900/60 text-emerald-700 dark:text-emerald-200'}">${isConflict ? '冲突' : (f.kind === 'video' ? '视频迁入' : '伴生同步')}</span>
+            </div>
+            <div class="flex items-center gap-1.5 font-mono font-semibold ${isConflict ? 'text-rose-700 dark:text-rose-300' : 'text-slate-900 dark:text-white'} break-all">
+              <i class="fa-solid fa-arrow-right text-[10px] text-slate-400"></i>
+              <span>${escapeHtml(f.new_filename)}</span>
+            </div>
+            ${isConflict ? `<div class="text-[11px] text-rose-600 dark:text-rose-400">${escapeHtml(f.conflict_reason)}</div>` : ''}
+          </div>`;
+      }).join('') : '<div class="text-slate-400 text-xs italic">暂无需移动或改名的视频文件</div>';
+
+      const preservedHtml = (plan.assets_to_preserve || []).map(a => `
+        <div class="text-[11px] text-slate-600 dark:text-slate-300 flex items-center justify-between">
+          <span class="font-mono">${escapeHtml(a.file_name)}</span>
+          <span class="text-slate-400">${escapeHtml(a.description)}</span>
+        </div>
+      `).join('');
+
+      const cleanDirsHtml = (plan.directories_to_clean || []).map(d => `
+        <div class="font-mono text-[11px] text-amber-700 dark:text-amber-300 truncate">
+          <i class="fa-regular fa-trash-can text-[10px]"></i> ${escapeHtml(d)}
+        </div>
+      `).join('');
+
+      container.innerHTML = `
+        <div class="p-3.5 rounded-xl border border-indigo-200 dark:border-indigo-800/80 bg-indigo-50/40 dark:bg-indigo-950/20 space-y-3">
+          <div class="flex flex-wrap items-center justify-between gap-2 border-b border-indigo-200/60 dark:border-indigo-800/60 pb-2">
+            <div class="font-bold text-xs text-indigo-900 dark:text-indigo-200 flex items-center gap-1.5">
+              <i class="fa-solid fa-code-merge text-indigo-600 dark:text-indigo-400"></i>
+              <span>源端目录合并与前缀统一预览 (M01–M14)</span>
+            </div>
+            ${plan.is_airing ? `<span class="text-[10px] px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-900/60 text-amber-800 dark:text-amber-200 font-semibold"><i class="fa-solid fa-shield-halved"></i> 连载中 · 合并后继续留源</span>` : ''}
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
+            <div class="p-2 rounded-lg bg-white dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 space-y-0.5">
+              <div class="text-[10px] font-semibold text-slate-500 dark:text-slate-400">本次实际合并到 (源端主目录)</div>
+              <div class="font-mono text-[11px] text-slate-900 dark:text-slate-100 break-all font-semibold">${escapeHtml(plan.source_target_show_path || '')}</div>
+            </div>
+            <div class="p-2 rounded-lg bg-white dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 space-y-0.5">
+              <div class="text-[10px] font-semibold text-slate-500 dark:text-slate-400">未来归档指向 (完结库，本次只保存指向)</div>
+              <div class="font-mono text-[11px] text-slate-900 dark:text-slate-100 break-all">${escapeHtml(plan.archive_target_show_path || '')}</div>
+            </div>
+          </div>
+
+          ${prefixSelectorHtml}
+
+          ${conflicts.length > 0 ? `
+            <div class="p-2.5 rounded-lg bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300 text-xs space-y-1">
+              <div class="font-bold flex items-center gap-1"><i class="fa-solid fa-triangle-exclamation"></i> 存在阻止合并的安全冲突:</div>
+              <ul class="list-disc list-inside space-y-0.5">
+                ${conflicts.map(c => `<li>${escapeHtml(c)}</li>`).join('')}
+              </ul>
+            </div>
+          ` : ''}
+
+          <div class="space-y-1.5">
+            <div class="flex items-center justify-between text-xs">
+              <span class="font-semibold text-slate-700 dark:text-slate-200">待移动与重命名文件清单 (共 ${files.length} 个):</span>
+              <span class="text-[11px] text-slate-500">统一前缀并保留原始季集标记及后缀</span>
+            </div>
+            <div class="space-y-1.5 max-h-48 overflow-y-auto pr-1">${filesRowsHtml}</div>
+          </div>
+
+          ${preservedHtml ? `
+            <div class="p-2 rounded-lg bg-white dark:bg-slate-800/40 border border-slate-200 dark:border-slate-700 space-y-1">
+              <div class="text-[11px] font-semibold text-slate-600 dark:text-slate-300">公共资产与未知附件保全:</div>
+              ${preservedHtml}
+            </div>
+          ` : ''}
+
+          ${cleanDirsHtml ? `
+            <div class="p-2 rounded-lg bg-amber-50/60 dark:bg-amber-950/20 border border-amber-200/80 dark:border-amber-800/50 space-y-1">
+              <div class="text-[11px] font-semibold text-amber-800 dark:text-amber-200">双端核验通过后拟清理的空目录:</div>
+              ${cleanDirsHtml}
+              ${(plan.remaining_seasons || []).length > 0 ? `<div class="text-[10px] text-slate-500">注：旧剧根仍包含其他季度（${escapeHtml(plan.remaining_seasons.join(', '))}），将予以安全保留。</div>` : ''}
+            </div>
+          ` : ''}
+        </div>`;
+    }
+
+    async function submitDirectoryGroupMergeExecute() {
+      if (!currentTaskId || !_activeDirectoryGroupId) return;
+      if (!_activeMergePlan || !_activeMergePlan.can_execute) {
+        alert('当前计划存在冲突或未就绪，禁止执行');
+        return;
+      }
+      const executeBtn = document.getElementById('dirGroupMergeExecuteBtn');
+      const oldHtml = executeBtn ? executeBtn.innerHTML : '';
+      if (executeBtn) {
+        executeBtn.disabled = true;
+        executeBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 正在合并并重命名...';
+      }
+
+      try {
+        const res = await api(`/api/tasks/${currentTaskId}/directory-groups/${_activeDirectoryGroupId}/merge-execute`, {
+          method: 'POST',
+          body: JSON.stringify({
+            plan_id: _activeMergePlan.plan_id,
+            target_path: _activeMergePlan.archive_target_show_path,
+            source_target_path: _activeMergePlan.source_target_show_path,
+            season_number: _activeDirGroupSeasonNumber || 1,
+            selected_prefix: _activeMergePlan.chosen_prefix
+          })
+        });
+
+        const dlg = document.getElementById('directoryGroupDialog');
+        if (dlg && dlg.open) dlg.close();
+
+        const task = taskList.find(t => t.id === currentTaskId);
+        if (task) task._seasonsLoaded = false;
+        await loadTasks();
+        if (task) await selectTask(task.id);
+
+        alert(res.message || '目录合并完成，旧目录已清理');
+      } catch (e) {
+        alert(`执行合并失败: ${e.message}`);
+      } finally {
+        if (executeBtn) {
+          executeBtn.disabled = false;
+          executeBtn.innerHTML = oldHtml;
+        }
+      }
+    }
+
+    function openDirectoryGroupDialog(groupId, seasonNumber) {
       const task = taskList.find(t => t.id === currentTaskId);
       const groups = (task && Array.isArray(task.directoryGroups)) ? task.directoryGroups : [];
       const grp = groups.find(g => g.id === groupId) || groups.find(g => `${g.category_key}:${g.tmdb_id}` === groupId);
       if (!grp) { alert('未找到对应的多目录确认组'); return; }
       _activeDirectoryGroupId = grp.id;
+      _activeDirGroupSeasonNumber = seasonNumber || 1;
       const dlg = document.getElementById('directoryGroupDialog');
       const titleEl = document.getElementById('directoryGroupDialogTitle');
       const bodyEl = document.getElementById('directoryGroupDialogBody');
@@ -4411,8 +4629,10 @@
               </div>
             </label>
           </div>
-        </div>`;
+        </div>
+        <div id="dirGroupMergePreviewContainer" class="pt-2"></div>`;
       if (typeof dlg.showModal === 'function') dlg.showModal();
+      if (typeof fetchDirectoryGroupMergePreview === 'function') fetchDirectoryGroupMergePreview();
     }
 
     async function submitDirectoryGroupConfirm(mode) {
