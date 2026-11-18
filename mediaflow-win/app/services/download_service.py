@@ -762,18 +762,42 @@ def _extract_standalone_episodes(
     missing_set = set(missing_eps)
 
     if by_period:
-        period = re.findall(r"第\s*(\d+)\s*期", title)
-        seasons = meta.get("season_list") or ([meta.get("begin_season")] if meta.get("begin_season") is not None else [])
         if (
-            len(period) != 1
-            or int(period[0]) not in missing_set
-            or segment_number(title)
-            or seasons != [season_num]
-            or (tmdb_id_num and str(m_info.get("tmdb_id") or "") != str(tmdb_id_num))
-            or re.search(r"加更|纯享|花絮|预告|[上中下][篇集部]|期\s*[（(【\[]?\s*[上中下]|特别版|\bpart\b", title)
+            segment_number(title)
+            or (tmdb_id_num and m_info.get("tmdb_id") and str(m_info.get("tmdb_id") or "") != str(tmdb_id_num))
+            or re.search(r"加更|纯享|花絮|预告|[上中下][篇集部]|期\s*[（(【\[]?\s*[上中下]|特别版|\bpart\b", title, re.I)
         ):
             return []
-        return [int(period[0])]
+        seasons = (
+            meta.get("season_list")
+            or ([meta.get("begin_season")] if meta.get("begin_season") is not None else [])
+            or ([meta.get("season")] if meta.get("season") is not None else [])
+        )
+        if not seasons:
+            parsed_s = parse_episode(title).season_number
+            if parsed_s is not None:
+                seasons = [parsed_s]
+        if seasons != [season_num]:
+            return []
+
+        range_m = re.findall(r"第\s*(\d{1,3})\s*[-~～至到]\s*(?:第\s*)?(\d{1,3})\s*期", title)
+        single_m = re.findall(r"第\s*(\d{1,3})\s*期", title)
+        period_nums: list[int] = []
+        if range_m:
+            if len(range_m) != 1:
+                return []
+            p_start, p_end = int(range_m[0][0]), int(range_m[0][1])
+            if not (0 < p_start <= p_end and (p_end - p_start) <= 30):
+                return []
+            period_nums = list(range(p_start, p_end + 1))
+        elif len(single_m) == 1:
+            period_nums = [int(single_m[0])]
+        else:
+            return []
+
+        if not period_nums or not (set(period_nums) <= missing_set):
+            return []
+        return sorted(set(period_nums))
 
     ep_stem = re.sub(r"(?i)part[ ._-]*(?:0?[123]|[abc])(?=[^a-z0-9]|$)", "", title) if parts_mode else title
     parsed = parse_episode(ep_stem)
@@ -1478,7 +1502,13 @@ def _sanitize_reply(reply: Any) -> Any:
     return reply
 
 
-def _classify_reject_outcome(raw_count: int, reject_reasons: list[str], deferred_sp_reason: str) -> tuple[str, str]:
+def _classify_reject_outcome(
+    raw_count: int,
+    reject_reasons: list[str],
+    deferred_sp_reason: str,
+    max_seeders_seen: int = 0,
+    min_seeders: int = 2,
+) -> tuple[str, str]:
     """区分 0 命中 / 做种不足 / 身份不符 / 无合格整包或散集方案。"""
     if raw_count <= 0:
         return "zero_hits", "已检索全部可用站点，本次搜索未返回资源（0 命中）"
@@ -1487,13 +1517,94 @@ def _classify_reject_outcome(raw_count: int, reject_reasons: list[str], deferred
     if reject_reasons:
         uniq = list(dict.fromkeys(reject_reasons))
         if all(r == "做种不足" for r in uniq):
-            return "low_seeders", "检索到候选但做种数均低于最低阈值"
+            return (
+                "low_seeders",
+                f"找到 {raw_count} 个候选，最高 {max_seeders_seen} 人做种，本次要求至少 {min_seeders} 人（低于最低要求 {min_seeders}）",
+            )
         if all(r in ("作品身份不符", "TMDB_ID不符", "季号不符", "映射目标季号不符", "原条目季号与跨条目映射季不一致", "TMDB_ID与映射口径均不符", "关键词结果未命中映射别名") for r in uniq):
             return "wrong_identity", f"检索候选均与目标作品/季号不符已拦截（{'；'.join(uniq[:2])}）"
         if "做种不足" in uniq and len(uniq) == 1:
-            return "low_seeders", "候选做种不足"
-        return "no_qualified_candidate", f"候选未通过筛选：{'；'.join(uniq[:3])}"
-    return "no_qualified_candidate", "未命中覆盖真实缺集的合格方案"
+            return (
+                "low_seeders",
+                f"找到 {raw_count} 个候选，最高 {max_seeders_seen} 人做种，本次要求至少 {min_seeders} 人",
+            )
+        return "no_qualified_candidate", f"找到 {raw_count} 个候选（最高 {max_seeders_seen} 人做种），未通过筛选：{'；'.join(uniq[:3])}"
+    return "no_qualified_candidate", f"找到 {raw_count} 个候选，未命中覆盖真实缺集的合格方案"
+
+
+def _diagnose_episode_failure(
+    local_ep: int,
+    search_ep: int,
+    raw_candidates: list[dict[str, Any]],
+    *,
+    by_period: bool = False,
+    min_seeders: int = 2,
+    fallback_code: str = "no_qualified_candidate",
+    fallback_summary: str = "",
+) -> tuple[str, str]:
+    """针对单集/单期未覆盖情况生成精确到候选数与最高做种数的诊断说明。"""
+    unit_prefix = f"第{local_ep:02d}期" if by_period else f"E{local_ep:02d}"
+    matched_cands: list[dict[str, Any]] = []
+    seen_diag_keys: set[str] = set()
+    for c in raw_candidates:
+        if not isinstance(c, dict):
+            continue
+        diag_key = f"{_candidate_site_id(c)}:{_candidate_stable_key(c)}"
+        if diag_key in seen_diag_keys:
+            continue
+        t = c.get("torrent_info") or {}
+        meta = c.get("meta_info") or {}
+        title = str(t.get("title") or "")
+        ep_list = meta.get("episode_list") or []
+        b_ep = meta.get("begin_episode")
+        e_ep = meta.get("end_episode") or b_ep
+        in_meta = False
+        if ep_list and all(str(x).isdigit() for x in ep_list):
+            in_meta = search_ep in {int(x) for x in ep_list}
+        elif b_ep is not None and str(b_ep).isdigit() and str(e_ep).isdigit():
+            in_meta = int(b_ep) <= search_ep <= int(e_ep)
+
+        in_title = False
+        if by_period:
+            p_single = [int(x) for x in re.findall(r"第\s*(\d{1,3})\s*期", title)]
+            p_range = re.findall(r"第\s*(\d{1,3})\s*[-~～至到]\s*(?:第\s*)?(\d{1,3})\s*期", title)
+            if search_ep in p_single:
+                in_title = True
+            elif any(int(a) <= search_ep <= int(b) for a, b in p_range):
+                in_title = True
+        else:
+            parsed = parse_episode(title)
+            if not parsed.is_extra and not parsed.is_special and search_ep in (parsed.episode_numbers or []):
+                in_title = True
+
+        if in_meta or in_title:
+            seen_diag_keys.add(diag_key)
+            matched_cands.append(c)
+
+    if matched_cands:
+        c_cnt = len(matched_cands)
+        c_max_seeds = max((_candidate_seeders(c) for c in matched_cands), default=0)
+        if c_max_seeds < min_seeders:
+            return (
+                "low_seeders",
+                f"{unit_prefix} 找到 {c_cnt} 个候选，最高 {c_max_seeds} 人做种，本次要求至少 {min_seeders} 人（低于最低要求 {min_seeders}）",
+            )
+        return (
+            "no_qualified_candidate",
+            f"{unit_prefix} 找到 {c_cnt} 个候选（最高 {c_max_seeds} 人做种），但因命名含混、跨集超范围或画质/身份校验未通过而未选用",
+        )
+
+    if not raw_candidates:
+        return "zero_hits", f"{unit_prefix} 本次检索未返回任何候选（0 命中）"
+    if fallback_code == "low_seeders":
+        all_max = max((_candidate_seeders(c) for c in raw_candidates if isinstance(c, dict)), default=0)
+        return (
+            "low_seeders",
+            f"{unit_prefix} 找到 {len(raw_candidates)} 个季级候选，最高 {all_max} 人做种，本次要求至少 {min_seeders} 人（低于最低要求 {min_seeders}）",
+        )
+    if fallback_code == "deferred_overlap" and fallback_summary:
+        return fallback_code, fallback_summary
+    return "zero_hits", f"{unit_prefix} 未命中覆盖该{'期' if by_period else '集'}的候选资源"
 
 
 def _is_torrent_already_queued(
@@ -1546,6 +1657,8 @@ async def execute_gap_fill_download(
     season_record_ids: list[str],
     db: AsyncSession,
     batch_run_id: str | None = None,
+    selected_episodes: list[int] | None = None,
+    episodes_by_record: dict[str, list[int]] | None = None,
 ) -> dict[str, Any]:
     """对选中的季度记录执行补缺检索并推送 MoviePilot 下载（全链路持久化意图与脱敏回执）。"""
     settings = get_settings()
@@ -1755,6 +1868,17 @@ async def execute_gap_fill_download(
                     pass
 
             missing_eps = sorted(set(missing_eps) & set(fresh.missing_episodes))
+            user_eps_raw: list[int] | None = None
+            if isinstance(episodes_by_record, dict) and rec.id in episodes_by_record:
+                user_eps_raw = episodes_by_record.get(rec.id)
+            elif selected_episodes is not None and len(records) == 1:
+                user_eps_raw = selected_episodes
+            if user_eps_raw is not None:
+                user_confirmed_set = {int(x) for x in user_eps_raw if str(x).isdigit()}
+                missing_eps = [ep for ep in missing_eps if ep in user_confirmed_set]
+                if not missing_eps:
+                    skipped.append(f"{clean_name} S{season_num:02d}：所选目标缺号为空或已覆盖，无需下载")
+                    continue
             total_eps = rec.total_episodes or (max(missing_eps) if missing_eps else 0)
             search_total_eps = (
                 int(rec_mapping.get("expected_total_episodes") or total_eps)
@@ -1957,6 +2081,7 @@ async def execute_gap_fill_download(
                 continue
 
             raw_count = len(raw_results)
+            all_raw_candidates: list[dict[str, Any]] = list(raw_results)
             max_seeders_seen = max((_candidate_seeders(c) for c in raw_results), default=0)
 
             # 分别通过独立散集分支与整季包分支评估首轮结果（兼容跨条目映射口径与别名隔离）
@@ -2051,6 +2176,7 @@ async def execute_gap_fill_download(
                         })
                         if fb_list:
                             raw_count += len(fb_list)
+                            all_raw_candidates.extend(fb_list)
                             max_seeders_seen = max(max_seeders_seen, max((_candidate_seeders(c) for c in fb_list), default=0))
                             all_returned_sites = list({s for rc in search_receipts for s in rc.get("returned_sites", [])})
                             fb_st, fb_sp, fb_rej = _evaluate_raw_candidates(
@@ -2162,6 +2288,7 @@ async def execute_gap_fill_download(
                             })
                             if fb_list:
                                 raw_count += len(fb_list)
+                                all_raw_candidates.extend(fb_list)
                                 max_seeders_seen = max(max_seeders_seen, max((_candidate_seeders(c) for c in fb_list), default=0))
                                 all_returned_sites = list({s for rc in search_receipts for s in rc.get("returned_sites", [])})
                                 fb_st, fb_sp, fb_rej = _evaluate_raw_candidates(
@@ -2242,7 +2369,13 @@ async def execute_gap_fill_download(
             if deferred_sp_reason:
                 skipped.append(deferred_sp_reason)
 
-            fail_code, fail_summary = _classify_reject_outcome(raw_count, reject_reasons, deferred_sp_reason)
+            fail_code, fail_summary = _classify_reject_outcome(
+                raw_count,
+                reject_reasons,
+                deferred_sp_reason,
+                max_seeders_seen=max_seeders_seen,
+                min_seeders=min_seeders,
+            )
             sites_diag_obj = {
                 "requested": site_plan.get("requested_label", ""),
                 "returned": all_returned_sites,
@@ -2252,17 +2385,31 @@ async def execute_gap_fill_download(
             if not selected_evals:
                 if not deferred_sp_reason:
                     skipped.append(f"{clean_name} S{season_num:02d}：缺号 {missing_eps} {fail_summary}")
-                await record_unsubmitted_episode_outcomes(
-                    db, rec, identity_key, missing_eps,
-                    batch_run_id=batch_run_id,
-                    outcome_state=fail_code,
-                    outcome_code=fail_code,
-                    reason=fail_summary,
-                    search_tmdb_id=search_tmdb_id or None,
-                    search_season_number=search_season,
-                    numbering_mode=numbering_mode,
-                    diag_summary={"raw_count": raw_count, "max_seeders": max_seeders_seen, "reasons": list(dict.fromkeys(reject_reasons[:5]))},
-                )
+                per_ep_failed: dict[str, dict[str, str]] = {}
+                for ep_m in missing_eps:
+                    s_ep_list = translate_local_to_search_episodes([ep_m], rec_mapping) if is_mapped else [ep_m]
+                    s_ep = s_ep_list[0] if s_ep_list else ep_m
+                    ep_code, ep_reason = _diagnose_episode_failure(
+                        ep_m,
+                        s_ep,
+                        all_raw_candidates,
+                        by_period=by_period,
+                        min_seeders=min_seeders,
+                        fallback_code=fail_code,
+                        fallback_summary=fail_summary,
+                    )
+                    per_ep_failed[str(ep_m)] = {"code": ep_code, "reason": ep_reason}
+                    await record_unsubmitted_episode_outcomes(
+                        db, rec, identity_key, [ep_m],
+                        batch_run_id=batch_run_id,
+                        outcome_state=ep_code,
+                        outcome_code=ep_code,
+                        reason=ep_reason,
+                        search_tmdb_id=search_tmdb_id or None,
+                        search_season_number=search_season,
+                        numbering_mode=numbering_mode,
+                        diag_summary={"raw_count": raw_count, "max_seeders": max_seeders_seen, "reasons": list(dict.fromkeys(reject_reasons[:5]))},
+                    )
                 await record_season_run_snapshot(
                     db, rec, identity_key,
                     batch_run_id=batch_run_id,
@@ -2271,7 +2418,7 @@ async def execute_gap_fill_download(
                     target_episodes=missing_eps,
                     accepted_episodes=[],
                     unverified_episodes=[],
-                    failed_episodes={str(ep): {"code": fail_code, "reason": fail_summary} for ep in missing_eps},
+                    failed_episodes=per_ep_failed,
                     candidate_count=raw_count,
                     max_seeders_seen=max_seeders_seen,
                     min_seeders_required=min_seeders,
@@ -2582,19 +2729,30 @@ async def execute_gap_fill_download(
                 and str(ep) not in season_failed_eps
             ]
             if uncovered_rem:
-                await record_unsubmitted_episode_outcomes(
-                    db, rec, identity_key, uncovered_rem,
-                    batch_run_id=batch_run_id,
-                    outcome_state=fail_code,
-                    outcome_code=fail_code,
-                    reason=fail_summary,
-                    search_tmdb_id=search_tmdb_id or None,
-                    search_season_number=search_season,
-                    numbering_mode=numbering_mode,
-                    diag_summary={"partial_uncovered": uncovered_rem},
-                )
                 for ep_u in uncovered_rem:
-                    season_failed_eps[str(ep_u)] = {"code": fail_code, "reason": fail_summary}
+                    s_ep_list = translate_local_to_search_episodes([ep_u], rec_mapping) if is_mapped else [ep_u]
+                    s_ep = s_ep_list[0] if s_ep_list else ep_u
+                    ep_code, ep_reason = _diagnose_episode_failure(
+                        ep_u,
+                        s_ep,
+                        all_raw_candidates,
+                        by_period=by_period,
+                        min_seeders=min_seeders,
+                        fallback_code=fail_code,
+                        fallback_summary=fail_summary,
+                    )
+                    await record_unsubmitted_episode_outcomes(
+                        db, rec, identity_key, [ep_u],
+                        batch_run_id=batch_run_id,
+                        outcome_state=ep_code,
+                        outcome_code=ep_code,
+                        reason=ep_reason,
+                        search_tmdb_id=search_tmdb_id or None,
+                        search_season_number=search_season,
+                        numbering_mode=numbering_mode,
+                        diag_summary={"partial_uncovered": [ep_u], "raw_count": raw_count, "max_seeders": max_seeders_seen},
+                    )
+                    season_failed_eps[str(ep_u)] = {"code": ep_code, "reason": ep_reason}
 
             if season_accepted_eps and not season_unverified_eps and not season_failed_eps:
                 s_outcome = "accepted"

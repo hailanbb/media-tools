@@ -179,9 +179,13 @@ def diagnose_periods(files, season, mapping, ordinals, total, finished, archive_
     both_missing = sorted((direct_missing & linear_missing) - derivative_periods)
     if both_missing and norm_ordinals:
         missing_str = ", ".join(map(str, both_missing))
+        ambig_deriv = sorted((direct_missing & linear_missing) & derivative_periods)
+        extra_note = ""
+        if ambig_deriv:
+            extra_note = f"（另有第 {', '.join(map(str, ambig_deriv))} 期仅见纯享/加更等衍生文件或段数待核对，已暂缓自动补缺）"
         return (
             "period_missing",
-            detail + f"按期号和分段集号分别核对，两种编号下都缺第 {missing_str} 期。补缺时请按期号选择资源。",
+            detail + f"按期号和分段集号分别核对，两种编号下都缺第 {missing_str} 期。补缺时请按期号选择资源。{extra_note}",
             both_missing,
             sorted((numbered | explicit) & expected)
         )

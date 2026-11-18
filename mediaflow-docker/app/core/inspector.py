@@ -1081,15 +1081,24 @@ async def run_inspection(
                         cached_primary = await get_verified_metadata_snapshot(
                             db, f"tmdb:{int(tmdb_id_num)}:S{season_num}"
                         )
-                    if cached_primary:
+                    if cached_primary and not cached_primary.get("candidate_id"):
                         info = dict(cached_primary)
                         info["stale_cache_reused"] = True
-                elif info.get("total") and db is not None and tmdb_id_num:
+                elif info.get("total") and not info.get("candidate_id") and db is not None and tmdb_id_num:
                     async with db_lock:
                         await save_verified_metadata_snapshot(
                             db, f"tmdb:{int(tmdb_id_num)}:S{season_num}",
                             "tmdb_season", str(tmdb_id_num), season_num, info,
                         )
+
+            # 候选条目的集数不是目录作品的已核实集数，也不能写入其缓存。
+            if not active_mapping and info.get("candidate_id"):
+                meta_evidence.setdefault("candidates", []).append({
+                    "tmdb_id": info["candidate_id"], "season_number": season_num,
+                    "episode_count": info.get("total"), "result": "reference_only",
+                    "reason": "仅供资料核对，尚未确认与目录作品的对应关系",
+                })
+                info = {}
 
             if (not active_mapping and mp_client and info.get("total") and max(all_ep_nums, default=0) > info["total"]
                     and not info.get("douban_checked")):
@@ -1111,8 +1120,15 @@ async def run_inspection(
             if not regular_nums:
                 outlier_nums = []
 
+            source_total_conflict_info: dict[str, Any] | None = None
             if db_tot and tmdb_tot and db_tot != tmdb_tot:
                 smaller, larger = sorted((db_tot, tmdb_tot))
+                consensus_missing = [ep for ep in range(1, smaller + 1) if ep not in set(recognized)]
+                disputed_tail = list(range(smaller + 1, larger + 1))
+                tail_unverified = bool(
+                    info.get("partial_listing")
+                    or (info.get("broadcast_evidence") or {}).get("status") == "evidence_pending"
+                )
                 if is_split:
                     if (info.get("bound") or info.get("partial_listing")) and db_tot == larger:
                         total_eps = db_tot
@@ -1120,12 +1136,38 @@ async def run_inspection(
                         total_eps = larger
                     elif recognized == list(range(1, smaller + 1)):
                         total_eps = smaller
+                elif tail_unverified and consensus_missing and max(recognized, default=0) <= smaller:
+                    total_eps = smaller
+                    season_finished = True
                 elif db_tot > tmdb_tot:
                     total_eps = db_tot
-                if info.get("partial_listing") and not info.get("douban_finished"):
+                if info.get("partial_listing") and not info.get("douban_finished") and not (tail_unverified and consensus_missing):
                     season_finished = False
-                edition_note = (f"（TMDB 收录 {tmdb_tot} 集，豆瓣条目 {info['douban_id']} "
-                                f"收录 {db_tot} 集，本次按 {total_eps} 集核对）")
+                tail_label = "、".join(f"E{e:02d}" for e in disputed_tail)
+                if total_eps == smaller and disputed_tail:
+                    edition_note = (
+                        f"（TMDB 收录 {tmdb_tot} 集，豆瓣条目 {info['douban_id']} 收录 {db_tot} 集；"
+                        f"1–{smaller} 集映射一致可独立补缺，尾集 {tail_label} 因两来源总数冲突且缺分集排播实证暂缓补缺）"
+                    )
+                    tail_basis = f"尾集 {tail_label} 因两来源总数冲突且缺少已核实排播日期暂缓补缺"
+                else:
+                    basis_src = f"豆瓣条目 {info['douban_id']}" if db_tot == total_eps else "TMDB 季收录"
+                    edition_note = (
+                        f"（TMDB 收录 {tmdb_tot} 集，豆瓣条目 {info['douban_id']} "
+                        f"收录 {db_tot} 集，本次按 {total_eps} 集核对；尾集 {tail_label} 依据 {basis_src} 判定）"
+                    )
+                    tail_basis = f"尾集 {tail_label} 依据 {basis_src}（{total_eps} 集口径）纳入核对"
+                source_total_conflict_info = {
+                    "tmdb_total": tmdb_tot,
+                    "douban_total": db_tot,
+                    "douban_id": info.get("douban_id"),
+                    "effective_total": total_eps,
+                    "consensus_max": smaller,
+                    "consensus_missing_episodes": consensus_missing,
+                    "disputed_tail_episodes": disputed_tail,
+                    "tail_deferred": bool(total_eps == smaller and disputed_tail),
+                    "tail_basis": tail_basis,
+                }
 
             set_recognized = set(recognized)
             ep_counter = Counter(n for n in all_ep_nums if n in set_recognized)
@@ -1170,6 +1212,7 @@ async def run_inspection(
                 and not total_eps
                 and not bound_id
                 and not active_mapping
+                and not tmdb_match
                 and not identity_conflict
                 and not season_unlisted_on_valid_primary
                 and not meta_evidence.get("fetch_failed")
@@ -1613,7 +1656,13 @@ async def run_inspection(
                 if trailer_or_e00_files:
                     detail += f"；先导片/预告 {len(trailer_or_e00_files)} 个已单列"
                 detail += "。文件保留在源目录，本轮无需操作。"
-            elif b_status == "evidence_pending" and not identity_conflict and not multi_archive_dirs and status not in ("archive_check", "unknown"):
+            elif (
+                b_status == "evidence_pending"
+                and not identity_conflict
+                and not multi_archive_dirs
+                and status not in ("archive_check", "unknown")
+                and not (source_total_conflict_info and source_total_conflict_info.get("tail_deferred") and missing)
+            ):
                 status = "period_review"
                 season_finished = False
                 missing = []
@@ -1708,12 +1757,22 @@ async def run_inspection(
                 else:
                     meta_status = "no_candidate"
 
-            if info.get("candidate_id") and status != "archive_check" and not identity_conflict:
-                status = "identity_review"
-                identity = f"目录标注 TMDB {tmdb_match.group(1)}" if tmdb_match else "目录缺少作品 ID，名称和年份未能唯一匹配"
-                detail = (f"{identity}，"
-                          f"第 {season_num} 季的 {total_eps} 集来自另一候选作品 {info['candidate_id']}。"
-                          f"请核对片头或地区并修正作品 ID，再初检。{detail if '越界文件' in detail else ''}")
+            if info.get("candidate_id") and not active_mapping:
+                # 无显式 ID 的自愈候选也可能在文件解析之后产生，仍须隔离。
+                meta_evidence.setdefault("candidates", []).append({
+                    "tmdb_id": info["candidate_id"], "season_number": season_num,
+                    "episode_count": total_eps, "result": "reference_only",
+                    "reason": "自动校准候选尚未确认作品对应关系",
+                })
+                total_eps = None
+                season_finished = False
+                edition_note = ""
+                broadcast_evidence_payload.update(status="evidence_pending", schedule_verified=False, total_unknown=True)
+            reference_candidates = unverified_metadata_candidates(meta_evidence, tmdb_id_num, season_num)
+            if reference_candidates and not total_eps and not active_mapping and not identity_conflict:
+                status = "unknown"
+                meta_status = "metadata_unverified"
+                detail = metadata_reference_note(tmdb_id_num, season_num, reference_candidates)
                 missing = []
 
             if identity_conflict:
@@ -1727,6 +1786,8 @@ async def run_inspection(
 
             evidence_payload = {
                 "meta_status": meta_status,
+                "metadata_binding_verified": bool(active_mapping or (info.get("total") and not info.get("candidate_id"))),
+                "source_total_conflict": source_total_conflict_info,
                 "meta_error": meta_evidence.get("meta_error") or "",
                 "stale_cache_reused": bool(info.get("stale_cache_reused")),
                 "matched_work": (
@@ -2946,6 +3007,24 @@ def _merge_season_sources(primary: dict, secondary: dict | None) -> dict:
             "is_split_edition": max(tmdb_total, db_total) >= 1.5 * min(tmdb_total, db_total)}
 
 
+def unverified_metadata_candidates(evidence: dict, tmdb_id, season_number: int) -> list[dict]:
+    """同时识别新参考候选和旧版本误当成主条目资料的候选。"""
+    if evidence.get("metadata_binding_verified"):
+        return []
+    return [c for c in (evidence.get("candidates") or []) if isinstance(c, dict)
+            and str(c.get("season_number")) == str(season_number)
+            and (c.get("result") == "reference_only" or (
+                c.get("result") == "accepted" and str(c.get("tmdb_id")) != str(tmdb_id)))]
+
+
+def metadata_reference_note(tmdb_id, season_number: int, candidates: list[dict]) -> str:
+    candidate = candidates[0]
+    count = candidate.get("episode_count") or "未知"
+    return (f"目录 TMDB {tmdb_id or '未标注'} 的第 {season_number} 季资料尚未核实；"
+            f"搜索候选 TMDB {candidate.get('tmdb_id')} 收录 {count} 集，仅供参考。"
+            "这不代表本地文件属于另一作品，也不据此要求修改目录 ID。请重新核查资料，必要时在详情中核对作品映射。")
+
+
 async def _resolve_show_metadata(
     show_name: str,
     needed_seasons: list[int],
@@ -2957,7 +3036,7 @@ async def _resolve_show_metadata(
 ) -> tuple[int | None, dict[int, dict]]:
     """多层闭环媒体元数据解析引擎：
     Pass 1: 本地指定的 TMDB ID 查询 (若有效则保留；若主条目有效但仅缺部分季，绝不把外剧强行当成同剧)
-    Pass 2: TMDB 标题级多维智能打分检索（主条目失效/未绑定时补齐，或仅采集冲突候选供核对）
+    Pass 2: TMDB 标题级多维智能打分检索（未绑定时匹配；已有目录 ID 时其他候选仅供核对）
     Pass 3: 豆瓣双轨深度检索（兼容拆分版口径与季号拒绝理由记录）
     Pass 4: MoviePilot TMDB 兜底检索
 
@@ -3001,8 +3080,7 @@ async def _resolve_show_metadata(
                     log.warning("TMDB %d 元数据查询失败: %s（保留待重查状态，不清除绑定）", tmdb_id_num, ev["meta_error"])
             else:
                 if log:
-                    log.warning("本地目录指定的 tmdb_id=%d 未获取到任何季信息，重置为待纠偏状态", tmdb_id_num)
-                resolved_id = None
+                    log.warning("目录 TMDB %d 未取得季资料，保留原 ID；搜索结果仅供核对", tmdb_id_num)
 
     if meta_probe.get("work_info"):
         ev["work_info"] = meta_probe["work_info"]
@@ -3101,9 +3179,9 @@ async def _resolve_show_metadata(
                                     s_finished = True
                             except Exception:
                                 pass
-                        # 关键防护：若目录已有有效 TMDB 主条目但仅缺当前季号，绝不把另一作品季数直接覆盖主条目的 total
-                        if primary_valid and tmdb_id_num and str(cid) != str(tmdb_id_num):
-                            ev["candidate_conflicts"].setdefault(sn, []).append({
+                        # 目录已有显式 ID，即使此次未取得资料，也不能借用另一候选的集数。
+                        if tmdb_id_num and str(cid) != str(tmdb_id_num):
+                            candidate_reference = {
                                 "tmdb_id": cid,
                                 "name": cname,
                                 "original_name": detail.get("original_name") or cand.get("original_name") or "",
@@ -3113,14 +3191,16 @@ async def _resolve_show_metadata(
                                 "first_air_date": str(detail.get("first_air_date") or ""),
                                 "status": detail.get("status") or "",
                                 "score": cand["score"],
-                            })
+                            }
+                            if primary_valid:
+                                ev["candidate_conflicts"].setdefault(sn, []).append(candidate_reference)
                             ev["candidates"].append({
                                 "tmdb_id": cid,
                                 "name": cname,
                                 "season_number": sn,
                                 "episode_count": cnt,
-                                "result": "rejected_as_primary",
-                                "reason": f"主条目 TMDB {tmdb_id_num} 已有效但未收录 S{sn:02d}，候选 {cid} 仅留作冲突对照",
+                                "result": "rejected_as_primary" if primary_valid else "reference_only",
+                                "reason": f"目录 TMDB {tmdb_id_num} 尚无本季可用资料；候选仅供核对，不用于判定文件归属或本季集数",
                             })
                             continue
 

@@ -601,6 +601,8 @@ class _GapFillRequest(BaseModel):
     season_record_ids: list[str] = []
     record_ids: list[str] = []
     batch_run_id: str | None = None
+    selected_episodes: list[int] | None = None
+    episodes_by_record: dict[str, list[int]] | None = None
 
     def get_target_ids(self) -> list[str]:
         return self.season_record_ids or self.record_ids
@@ -619,7 +621,13 @@ async def download_gap_fill(
 
     from app.services.download_service import execute_gap_fill_download
     try:
-        return await execute_gap_fill_download(target_ids, db, batch_run_id=body.batch_run_id)
+        return await execute_gap_fill_download(
+            target_ids,
+            db,
+            batch_run_id=body.batch_run_id,
+            selected_episodes=body.selected_episodes,
+            episodes_by_record=body.episodes_by_record,
+        )
     except Exception as e:
         return {"ok": False, "message": f"补缺推送异常: {str(e)[:200]}", "errors": [str(e)]}
 

@@ -1,6 +1,31 @@
 # MediaFlow 版本管理
 
-当前应用版本为 v2.5.36，发布日期为 2026-11-18。
+当前源码版本为 v2.5.38，修订日期为 2026-11-18。
+
+v2.5.38 重点落实《MediaFlow真缺集待补模块需求与交互方案-v2.5.38.md》全部优化规范（覆盖 D01–D09 验收场景）：
+1. **逐集/逐期诊断精度、综艺连期选种与单季自选集号推送（`app/services/download_service.py` + `app/api/moviepilot.py`）**：
+   - 新增单集/单期未覆盖精确诊断 `_diagnose_episode_failure`：按稳定标识去重统计覆盖目标集号的候选数量与最高做种数，生成如 `E09 找到 3 个候选，最高 1 人做种，本次要求至少 2 人（低于最低要求 2）` 的明确原因（D04）；
+   - 升级综艺按期选种 `_extract_standalone_episodes(by_period=True)`：支持 `第7-10期` 等连期范围资源与显式季号解析，同时自动跳过带分段（`上/中/下`）或衍生标记（`加更/纯享`）的含混候选，不因个别含混种子提示整季人工核对（D01）；
+   - 支持单季推送前用户自选缩小本轮目标集号（`selected_episodes` / `episodes_by_record`），按 `本轮目标 = 用户确认缺号 ∩ 最新确认缺号 - 在途/待确认项` 执行推送，未勾选集继续留在待补清单。
+2. **双来源总集数冲突解耦与分段综艺缺期/含混期分离（`app/core/inspector.py` + `app/core/segments.py`）**：
+   - 当 TMDB 与豆瓣总集数冲突（如 8 集 vs 9 集）且尾集排播未证实（`partial_listing` / `evidence_pending`）时，对两来源一致范围（1–8 集）内的确认缺号独立开放补缺，尾集（如 `E09`）单列记录于 `evidence.source_total_conflict` 并展示具体季级依据或暂缓原因，杜绝整季卡死在 `period_review`（D02）；
+   - 分段综艺在确认缺失期数（`both_missing`）之外若另含衍生或段数待核对期数，在保持确认缺期可补的同时于状态说明中单列暂缓期数。
+3. **对账单次未命中防重保護、挂载延迟复核与前后端字段契约对齐（`app/services/gap_fill_tracker.py` + `app/api/tasks.py` + `app/api/archive.py`）**：
+   - 将 `POST /api/tasks/{task_id}/reconcile-gap-fill` 默认 `force_release_missing` 调整为 `False`，并在 `reconcile_gap_fill_records` 中维护 `reconcile_miss_count`：单次队列未命中保持在途观察防重，连续 ≥ 2 次对账未命中或 MP 历史明确取消才退回待补；MP 历史显示整理完成但挂载延迟未见实文件时保持 `transfer_pending` 待核实（D08）；
+   - 统一 `compute_season_gap_fill_view` 返回字段契约（同时提供 `episode`/`episode_number`、`outcome`/`outcome_code`、`reason`/`sanitized_reason` 及 `unverified_count`、`only_unverified_pending`），修复详情表格集号显示 `E00` 与原因显示 `-` 的缺陷；
+   - 在 `preview_delete_source_season` 中补充 `archive_impact="none"` 与归档端零影响说明（D09）。
+4. **前端双页签语义、卡片按钮去重、交互式推送确认框与三端覆盖详情（`frontend/index.html` + `tests/`）**：
+   - 首页分类卡显示 `N 季待补 · M 季等待入库/回执`；等待页在仅含超时未确认项时自动显示「提交待确认」，卡片实物覆盖数按源端+归档+可信 Emby 并集计算，绝不因已提交下载请求而虚增（D07）；
+   - 消除等待页卡片「详情」与「补缺详情」双按钮重复渲染，等待页统一收敛为单个「查看进度」按钮且隐藏删源按钮；待补页根据状态动态显示「推送补缺」「推送剩余 N 集/期」或「重新搜索」；
+   - 升级 `downloadModal` 支持单季集号勾选确认、已排除在途项、站点与做种门槛及整季包规则（`>3 集优先整季包，≤3 集优先省容量散集`）展示，升级 `openGapFillDetail` 展示「三端实物覆盖与缺号核定依据」卡片；
+   - 新增 `tests/test_v2538_gap_fill_module.py` 验收测试套件并扩充 `tests/test_frontend_logic.js`，全套 16 组自动化测试矩阵 100% 通过。
+
+v2.5.37 修复候选资料误报与异常列表连载条目操作不一致：
+1. 目录明确标注 TMDB ID 时，其他搜索候选仅作参考，不借用集数、完结状态，不写入原 ID 的已核实季缓存；候选命中不再描述为「文件来自另一作品」。
+2. 旧候选资料误报经只读重算转为「作品资料待核实」，保留原 ID 和实际集号；真实文件显式 ID 冲突及已确认映射继续按原规则处理。
+3. 异常列表里的连载目录组仍保持异常主分类，同时携带连载保护状态和多目录合并进度；隐藏不可用的「已手动处理」，主操作直达「确认目录」，并提供只读「重新核查」。
+4. 重新核查覆盖同卡所有关联目录，核查失败保留旧判断；扫描中阻止并发核算。修复核查异常路径引用未定义日志对象的问题。
+5. 上述规则已整合到 [异常剧集模块需求与交互方案 v2.5.37](MediaFlow异常剧集模块需求与交互方案-v2.5.37.md)，原 v2.5.34 方案已更名；本地验证范围与环境限制详见 [修正说明](MediaFlow异常误报与连载条目操作修正-v2.5.37.md)。
 
 v2.5.36 重点落实《MediaFlow连载留源模块需求与交互方案-v2.5.34.md》全部优化规范（覆盖 L01–L12 验收场景）：
 1. **季级播出证据扩充与 180 天/旧布尔推定解耦（`app/core/inspector.py` + `app/core/segments.py`）**：

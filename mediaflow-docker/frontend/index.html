@@ -114,7 +114,7 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.36</span>
+              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.38</span>
             </div>
             <!-- 完善后的命名 -->
             <p class="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">智能媒体库整理与归档工作台</p>
@@ -928,14 +928,15 @@
         </div>
         <button onclick="closeModal('downloadModal')" class="text-slate-400 hover:text-slate-600"><i class="fa-solid fa-xmark"></i></button>
       </div>
+      <div id="downloadModalTargetSummary" class="space-y-2 text-xs p-3.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700"></div>
       <div class="space-y-2 text-xs p-3.5 rounded-xl bg-blue-50/60 dark:bg-blue-950/30 text-slate-700 dark:text-slate-300 font-mono border border-blue-100 dark:border-blue-900/40">
         <div class="font-bold text-blue-700 dark:text-blue-400 mb-1 flex items-center gap-1.5">
           <i class="fa-solid fa-arrows-spin"></i> 标准化补缺工作流已就绪：
         </div>
         <p id="downloadModalSeedersNote">1. <b>精准检索</b>：自动从 MoviePilot 索引 PT 站检索健康做种源（动态门槛校验，优先同档省容量）。</p>
-        <p>2. <b>能效评估</b>：根据缺失集分布与资源覆盖，智能决策下载<b>整季全集</b>还是<b>定向补齐散集</b>。</p>
-        <p>3. <b>媒体整理前置解绑</b>：自动联动 MoviePilot 媒体整理（<code>/api/v1/history/transfer</code>），执行<b>「仅删除转移记录」</b>（绝对不误删实体文件），避免因历史记录存在而跳过入库！</p>
-        <p>4. <b>提交下载</b>：推送入库并持久化审计日志。</p>
+        <p>2. <b>能效评估</b>：根据缺失集分布与资源覆盖，缺集 &gt; 3 集优先验证<b>整季包</b>，缺集 ≤ 3 集优先<b>省容量散集</b>（散集补不全时允许验证整季包）。</p>
+        <p>3. <b>媒体整理前置解绑</b>：自动联动 MoviePilot 媒体整理（<code>/api/v1/history/transfer</code>），仅针对真实缺号执行<b>「仅删除转移记录」</b>（保护已有正片与合集文件）。</p>
+        <p>4. <b>提交下载</b>：先落盘推送意图再提交 MP，持久化脱敏回执与审计日志。</p>
       </div>
       <div class="flex justify-end gap-2 pt-2">
         <button onclick="closeModal('downloadModal')" class="px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-xs">取消</button>
@@ -1568,8 +1569,8 @@
       }
       const dlInitPushed = task.counts.download_pushed || 0;
       document.getElementById('catCountDownload').innerHTML = dlInitPushed > 0
-        ? `${task.counts.download} <span class="text-xs font-normal">季待补 · ${dlInitPushed}已推</span>`
-        : `${task.counts.download} <span class="text-xs font-normal">季需补</span>`;
+        ? `${task.counts.download} <span class="text-xs font-normal">季待补 · ${dlInitPushed} 季等待入库/回执</span>`
+        : `${task.counts.download} <span class="text-xs font-normal">季待补</span>`;
       document.getElementById('catCountAiring').innerHTML = `${task.counts.airing} <span class="text-xs font-normal">季连载</span>`;
 
       // 从后端加载季度明细数据：只要存在已发布的结果或已手动停止，均可按已发布明细加载
@@ -1642,6 +1643,10 @@
             const uniqueCount = posRecEps.length;
             const airingView = s.airing_view || (evidence && evidence.broadcast_evidence) || null;
             let statusText = `${uniqueCount}/${total || '未知'}集`;
+            if (s.airing_protected && catKey === 'anomaly' && airingView?.status_text) {
+              statusText = airingView.status_text;
+              note = [airingView.card_summary, evidence?.directory_group?.requires_confirm ? '同作品多目录待确认；确认后继续留源跟踪。' : note].filter(Boolean).join(' ');
+            }
             if (catKey === 'airing') {
               actionType = 'skip';
               actionText = '留源';
@@ -1660,6 +1665,15 @@
                   statusText = `合计 ${combinedPos}/${total || '未知'}集 · 本次增量 ${uniqueCount} 集`;
                 }
               }
+              if (catKey === 'download' && s.status !== 'period_missing') {
+                const msEps = (evidence && evidence.mediaserver_check && evidence.mediaserver_check.trusted_match !== false && Array.isArray(evidence.mediaserver_check.season_episodes))
+                  ? evidence.mediaserver_check.season_episodes.filter(e => Number(e) > 0)
+                  : [];
+                const threeEndSet = new Set([...posRecEps.map(Number), ...dualArcEps.map(Number), ...msEps.map(Number)]);
+                const physMissArr = (gapState && Array.isArray(gapState.physical_missing_episodes)) ? gapState.physical_missing_episodes : missing;
+                const physCovCnt = total ? Math.max(threeEndSet.size, Math.max(0, total - physMissArr.length)) : threeEndSet.size;
+                statusText = `已覆盖 ${physCovCnt}/${total || '未知'}集`;
+              }
               if (['period_missing', 'period_review'].includes(s.status)) {
                 statusText = s.status === 'period_missing' ? `确认缺 ${missing.length} 期 / 全 ${total} 期` : `全 ${total || '未知'} 期 · 证据待决，安全保留`;
               }
@@ -1675,10 +1689,23 @@
             if (catKey === 'download' && gapState && gapState.view_bucket === 'pushed_pending') {
               targetCatKey = 'download_pushed';
               actionType = 'inspect_gap_detail';
-              actionText = '补缺详情';
-              statusText += `（已推 ${(gapState.pushed_episodes || []).length} 集待入库）`;
-            } else if (catKey === 'download' && gapState && Array.isArray(gapState.pushed_episodes) && gapState.pushed_episodes.length > 0) {
-              statusText += `（待补 ${(gapState.actionable_missing_episodes || []).length} · 已推 ${gapState.pushed_episodes.length}）`;
+              actionText = '查看进度';
+              const pLen = (gapState.pushed_episodes || []).length;
+              const uLen = gapState.unverified_count ?? (gapState.unverified_episodes || []).length ?? 0;
+              statusText += (uLen > 0 && uLen === pLen)
+                ? `（已提交 ${pLen} 集待确认）`
+                : `（已推 ${pLen} 集等待入库/回执）`;
+            } else if (catKey === 'download') {
+              const actEps = (gapState && Array.isArray(gapState.actionable_missing_episodes)) ? gapState.actionable_missing_episodes : missing;
+              const pEps = (gapState && Array.isArray(gapState.pushed_episodes)) ? gapState.pushed_episodes : [];
+              const lrOut = gapState && gapState.last_run ? gapState.last_run.outcome_status : '';
+              const uWord = s.status === 'period_missing' ? '期' : '集';
+              if (pEps.length > 0 && actEps.length > 0) {
+                actionText = `推送剩余 ${actEps.length} ${uWord}`;
+                statusText += `（待补 ${actEps.length} · 已推 ${pEps.length}）`;
+              } else if (['zero_hits', 'low_seeders', 'no_qualified_candidate', 'wrong_identity', 'search_error', 'submit_error', 'rejected'].includes(lrOut)) {
+                actionText = '重新搜索';
+              }
             }
 
             task.categories[targetCatKey].push({
@@ -1723,8 +1750,8 @@
           const dlLoadedTodo = (task.categories.download || []).length;
           const dlLoadedPushed = (task.categories.download_pushed || []).length;
           document.getElementById('catCountDownload').innerHTML = dlLoadedPushed > 0
-            ? `${dlLoadedTodo} <span class="text-xs font-normal">季待补 · ${dlLoadedPushed}已推</span>`
-            : `${dlLoadedTodo} <span class="text-xs font-normal">季需补</span>`;
+            ? `${dlLoadedTodo} <span class="text-xs font-normal">季待补 · ${dlLoadedPushed} 季等待入库/回执</span>`
+            : `${dlLoadedTodo} <span class="text-xs font-normal">季待补</span>`;
         } catch (e) {
           if (fetchSeq === _selectTaskSeq && currentTaskId === taskId) {
             task._seasonsLoadError = true;
@@ -2664,7 +2691,7 @@
         });
         const noResourceGapItems = downloadTodoItems.filter(it => {
           const lr = it.gapFillState?.last_run;
-          return lr && ['zero_hits', 'low_seeders', 'rejected'].includes(lr.outcome_status);
+          return lr && ['zero_hits', 'low_seeders', 'no_qualified_candidate', 'wrong_identity', 'deferred_overlap', 'rejected'].includes(lr.outcome_status);
         });
         const partialGapItems = downloadTodoItems.filter(it => {
           const g = it.gapFillState;
@@ -2675,10 +2702,19 @@
           return lr && ['search_error', 'submit_error'].includes(lr.outcome_status);
         });
         const minSeeders = (typeof configRoots !== 'undefined' && configRoots && configRoots.gap_fill_min_seeders != null) ? configRoots.gap_fill_min_seeders : 2;
+        const allPushedUnverified = downloadPushedItems.length > 0 && downloadPushedItems.every(it => {
+          const g = it.gapFillState;
+          const pLen = (g?.pushed_episodes || []).length;
+          const uLen = g?.unverified_count ?? (g?.unverified_episodes || []).length ?? 0;
+          return pLen > 0 && uLen === pLen;
+        });
+        const waitingTabLabel = allPushedUnverified
+          ? `提交待确认 (${downloadPushedItems.length})`
+          : `等待入库／回执 (${downloadPushedItems.length})`;
 
         if (selectAll) selectAll.disabled = (activeGapTab === 'pushed_pending');
         if (selectAllLabel) {
-          selectAllLabel.textContent = activeGapTab === 'pushed_pending' ? "已推送等待入库（防重复推送）" : "全选待补缺项";
+          selectAllLabel.textContent = activeGapTab === 'pushed_pending' ? "等待入库或回执确认（防重复推送）" : "全选待补缺项";
         }
         batchContainer.innerHTML = `
           <div class="space-y-1.5 w-full">
@@ -2688,7 +2724,7 @@
                   真缺集待补 (${downloadTodoItems.length})
                 </button>
                 <button type="button" role="tab" data-gap-tab="pushed_pending" aria-selected="${activeGapTab === 'pushed_pending' ? 'true' : 'false'}" tabindex="${activeGapTab === 'pushed_pending' ? '0' : '-1'}" onclick="switchGapFillTab('pushed_pending')" class="px-3 py-1 rounded-lg text-xs font-semibold transition ${activeGapTab === 'pushed_pending' ? 'bg-white dark:bg-slate-900 text-indigo-600 dark:text-indigo-400 shadow-sm' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'}">
-                  已推送待入库 (${downloadPushedItems.length})
+                  ${waitingTabLabel}
                 </button>
               </div>
               <button type="button" onclick="reconcileCurrentTaskGapFill()" class="px-3 py-2 rounded-lg border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 text-xs font-semibold hover:bg-indigo-100 dark:hover:bg-indigo-900/50 transition flex items-center gap-1.5" title="向 MoviePilot 队列、历史与双库核对已推送分集状态">
@@ -2849,17 +2885,18 @@
         const mp = item.mapping || (item.raw && item.raw.mapping) || {};
         const rawObj = item.raw || {};
         const rawStatus = rawObj.status || '';
-        const isAiringCard = currentCategory === 'airing' || item.mainCategory === 'airing' || rawObj.main_category === 'airing';
+        const isAiringCard = currentCategory === 'airing' || item.mainCategory === 'airing' || rawObj.main_category === 'airing' || rawObj.airing_protected || rawStatus === 'airing' || ['airing', 'upcoming'].includes(ev.broadcast_evidence?.status);
         const airingView = item.airingView || rawObj.airing_view || (ev && ev.broadcast_evidence) || null;
 
         // 标签附加
         let anomalyTagHtml = '';
         const evMetaStatus = (ev && (ev.meta_status || ev.metadata_status)) || '';
-        if (item.isAnomaly && !isAiringCard) {
+        if (item.isAnomaly && (!isAiringCard || currentCategory === 'anomaly')) {
           if (item.anomalySubtype === 'file_check') {
             anomalyTagHtml = '<span class="text-xs text-amber-700">目录或文件待核实</span>';
           } else if (item.anomalySubtype === 'unknown_meta') {
             const metaLabelMap = {
+              metadata_unverified: '作品资料待核实（非文件错配）',
               fetch_failed: '查询失败（TMDB/豆瓣超时或异常）',
               not_listed: '主条目未收录本季',
               no_candidate: '元数据未收录',
@@ -2879,7 +2916,7 @@
         const conflictBadgeLabel = (conf && conf.kind === 'ambiguous_title')
           ? '重名待确认'
           : ((conf && conf.kind === 'mixed_works') ? '混放作品拦截' : '归属冲突拦截');
-        const conflictBadgeHtml = (!isAiringCard && conf && conf.blocking)
+        const conflictBadgeHtml = (conf && conf.blocking)
           ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-rose-50 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 font-semibold border border-rose-200 dark:border-rose-800">${escapeHtml(conflictBadgeLabel)}</span>`
           : '';
         const dirGrp = (ev && ev.directory_group) || null;
@@ -2926,7 +2963,7 @@
         }
 
         const hasEvDetails = Boolean(ev && (ev.meta_status || ev.meta_error || (ev.release_evidence && ev.release_evidence.dominant_release_title) || (ev.mediaserver_check && (ev.mediaserver_check.checked || ev.mediaserver_check.error))));
-        const showDetailBtn = isAiringCard || currentCategory === 'archive' || currentCategory === 'download' || currentCategory === 'anomaly' || Boolean(item.isAnomaly) || ['identity_review', 'unknown', 'review_needed', 'period_review', 'download_needed', 'period_missing'].includes(rawStatus) || Boolean(conf && conf.blocking) || Boolean(gapState && gapState.episodes && gapState.episodes.length > 0) || hasEvDetails || Boolean(mp && mp.target_tmdb_id);
+        const showDetailBtn = (item.actionType !== 'inspect_gap_detail') && (isAiringCard || currentCategory === 'archive' || currentCategory === 'download' || currentCategory === 'anomaly' || Boolean(item.isAnomaly) || ['identity_review', 'unknown', 'review_needed', 'period_review', 'download_needed', 'period_missing'].includes(rawStatus) || Boolean(conf && conf.blocking) || Boolean(gapState && gapState.episodes && gapState.episodes.length > 0) || hasEvDetails || Boolean(mp && mp.target_tmdb_id));
         const disableCheck = isAiringCard || currentCategory === 'anomaly' || ['inspect_info', 'inspect_gap_detail', 'clean_redundant'].includes(item.actionType) || (currentCategory === 'download' && activeGapTab === 'pushed_pending');
 
         let archiveModeBadgeHtml = '';
@@ -2985,18 +3022,18 @@
                   <span>${isAiringCard ? '查看详情' : '详情'}</span>
                 </button>
               ` : ''}
-              ${!isAiringCard && (currentCategory === 'anomaly' || item.actionType === 'inspect_info' || (conf && conf.blocking)) ? `
+              ${!isAiringCard && rawObj.can_mark_handled !== false && evMetaStatus !== 'metadata_unverified' && item.actionType !== 'system_tracking' && (currentCategory === 'anomaly' || item.actionType === 'inspect_info' || (conf && conf.blocking)) ? `
                 <button onclick="markSeasonHandled('${item.id}', this)" class="px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 text-slate-600 dark:text-slate-300 text-xs font-semibold disabled:opacity-50">
                   <i class="fa-solid fa-check mr-1"></i>已手动处理
                 </button>
               ` : ''}
-              ${(!isAiringCard && currentCategory === 'anomaly' && item.isAnomaly && item.anomalySubtype === 'unknown_meta') ? `
+              ${(!isAiringCard && evMetaStatus !== 'metadata_unverified' && currentCategory === 'anomaly' && item.isAnomaly && item.anomalySubtype === 'unknown_meta') ? `
                 <button onclick="promptDeleteSourceShow('${item.id}')" class="px-2.5 py-1.5 rounded-lg border border-rose-200 dark:border-rose-800 bg-rose-50 dark:bg-rose-950/40 text-rose-600 dark:text-rose-400 text-xs font-semibold hover:bg-rose-100 dark:hover:bg-rose-900/40 transition flex items-center gap-1 shadow-sm" title="彻底删除源端整个剧集目录及其所有文件，并在删除后立即强制刷新源目录">
                   <i class="fa-solid fa-trash-can text-xs"></i>
                   <span>删除源端</span>
                 </button>
               ` : ''}
-              ${(!isAiringCard && (currentCategory === 'download' || (currentCategory !== 'archive' && currentCategory !== 'review' && ['download_needed', 'period_missing'].includes(rawStatus)))) ? `
+              ${(!isAiringCard && item.actionType !== 'inspect_gap_detail' && !(currentCategory === 'download' && activeGapTab === 'pushed_pending') && (currentCategory === 'download' || (currentCategory !== 'archive' && currentCategory !== 'review' && ['download_needed', 'period_missing'].includes(rawStatus)))) ? `
                 <button onclick="openDeleteSourceSeasonModal('${item.id}')" class="px-2.5 py-1.5 rounded-lg border border-rose-200 dark:border-rose-800 bg-rose-50 dark:bg-rose-950/40 text-rose-600 dark:text-rose-400 text-xs font-semibold hover:bg-rose-100 dark:hover:bg-rose-900/40 transition flex items-center gap-1 shadow-sm" title="放弃本次补缺，彻底删除源端该季目录及其文件，移入回收站并移出待补清单">
                   <i class="fa-solid fa-trash-can text-xs"></i>
                   <span>删除源端（本季）</span>
@@ -3008,7 +3045,11 @@
                   <span>清理预览</span>
                 </button>
               ` : ''}
-              ${isAiringCard ? `<span class="text-xs text-slate-500">${(airingView && airingView.status === 'upcoming') ? '待首播 · 文件保留在源目录' : '连载中，文件已留在源目录'}</span>` : (item.actionType === 'clean_redundant') ? `
+              ${(currentCategory === 'anomaly' || isAiringCard) ? `
+                ${dirGrp && dirGrp.requires_confirm ? `<button type="button" onclick="openDirectoryGroupDialog('${escapeHtml(dirGrp.id || '')}')" class="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold" title="仅确认后续归档目标，连载期间不搬移或删除文件">确认目录</button>` : ''}
+                <button type="button" onclick="recheckSeasonEvidence('${item.id}', this)" class="px-2.5 py-1.5 rounded-lg border border-indigo-200 text-indigo-700 dark:text-indigo-300 text-xs font-semibold disabled:opacity-50" title="读取最新目录和季资料，更新判断；不搬移、删除或推送下载" ${['running', 'paused', 'stopping'].includes(task.status) ? 'disabled' : ''}>重新核查</button>
+              ` : ''}
+              ${isAiringCard ? `<span class="text-xs text-slate-500">${(airingView && airingView.status === 'upcoming') ? '待首播 · 文件保留在源目录' : '连载中，文件已留在源目录'}</span>` : evMetaStatus === 'metadata_unverified' ? `<span class="text-xs text-slate-500">资料待核实 · 文件安全保留</span>` : (item.actionType === 'clean_redundant') ? `
                 <button onclick="cleanSourceRedundantSingle('${item.id}')" class="px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-700 text-white text-xs font-semibold shadow-sm transition flex items-center gap-1.5">
                   <i class="fa-solid fa-trash-can text-xs"></i>
                   <span>删除源端（本季）</span>
@@ -3566,8 +3607,78 @@
         openModal('cleanRedundantModal');
         document.getElementById('cleanRedundantTitle').textContent = `清理源端冗余确认: ${name}`;
       } else if (type.startsWith('download')) {
+        prepareDownloadModal([recordId], name);
         openModal('downloadModal');
-        document.getElementById('downloadModalTitle').textContent = `补缺/修复确认: ${name}`;
+      }
+    }
+
+    function prepareDownloadModal(recordIds, singleName) {
+      const titleEl = document.getElementById('downloadModalTitle');
+      const summaryEl = document.getElementById('downloadModalTargetSummary');
+      const task = tasksData.find(t => t.id === currentTaskId);
+      const minSeeders = (typeof configRoots !== 'undefined' && configRoots && configRoots.gap_fill_min_seeders != null) ? configRoots.gap_fill_min_seeders : 2;
+      const findRec = (rid) => {
+        if (!task || !task.categories) return null;
+        for (const list of Object.values(task.categories)) {
+          const hit = (list || []).find(x => x.id === rid);
+          if (hit) return hit;
+        }
+        return null;
+      };
+      if (recordIds.length === 1) {
+        const it = findRec(recordIds[0]);
+        if (titleEl) titleEl.textContent = `补缺/修复确认: ${singleName || (it ? `${it.show} ${it.season}` : recordIds[0])}`;
+        if (!summaryEl) return;
+        const g = (it && it.gapFillState) || {};
+        const isPeriod = it && it.raw && it.raw.status === 'period_missing';
+        const fmtEp = (n) => isPeriod ? `第${String(n).padStart(2, '0')}期` : `E${String(n).padStart(2, '0')}`;
+        const actionable = (Array.isArray(g.actionable_missing_episodes) && g.actionable_missing_episodes.length > 0)
+          ? g.actionable_missing_episodes
+          : ((it && Array.isArray(it.missing)) ? it.missing : []);
+        const pushed = Array.isArray(g.pushed_episodes) ? g.pushed_episodes : [];
+        const packRule = actionable.length > 3
+          ? `缺 ${actionable.length} ${isPeriod ? '期' : '集'} (&gt;3)，优先验证整季包，无整包回退散集`
+          : `缺 ${actionable.length} ${isPeriod ? '期' : '集'} (≤3)，优先省容量散集，散集补不全时允许验证整季包`;
+        const checkboxesHtml = actionable.map(ep => `
+          <label class="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-white dark:bg-slate-900 border border-blue-200 dark:border-blue-800 text-[11px] font-mono cursor-pointer">
+            <input type="checkbox" name="dlEpisodeCheck" value="${ep}" checked class="rounded text-blue-600 focus:ring-blue-500">
+            <span>${fmtEp(ep)}</span>
+          </label>
+        `).join('');
+        summaryEl.innerHTML = `
+          <div class="font-bold text-slate-800 dark:text-slate-100">本轮单季推送目标与范围确认（可取消勾选暂不推送的缺号）：</div>
+          <div class="flex flex-wrap gap-1.5 pt-0.5">${checkboxesHtml || '<span class="text-slate-400">当前无待推送缺号</span>'}</div>
+          <div class="text-[11px] text-slate-600 dark:text-slate-300 space-y-0.5 pt-1 border-t border-slate-200 dark:border-slate-700">
+            <div>• <b>已排除在途/待回执项</b>：<span class="font-mono">${pushed.length ? pushed.map(fmtEp).join(', ') : '无'}</span></div>
+            <div>• <b>检索站点与门槛</b>：默认启用站点 + 天空 / 观众扩展站点 · 最低做种数 ≥ <b>${minSeeders}</b></div>
+            <div>• <b>选种策略</b>：${packRule}</div>
+          </div>
+        `;
+      } else {
+        if (titleEl) titleEl.textContent = `批量补缺推送确认（共 ${recordIds.length} 季）`;
+        if (!summaryEl) return;
+        let totalUnits = 0;
+        const rowsHtml = recordIds.map(rid => {
+          const it = findRec(rid);
+          const g = (it && it.gapFillState) || {};
+          const isPeriod = it && it.raw && it.raw.status === 'period_missing';
+          const fmtEp = (n) => isPeriod ? `第${String(n).padStart(2, '0')}期` : `E${String(n).padStart(2, '0')}`;
+          const actionable = (Array.isArray(g.actionable_missing_episodes) && g.actionable_missing_episodes.length > 0)
+            ? g.actionable_missing_episodes
+            : ((it && Array.isArray(it.missing)) ? it.missing : []);
+          const pushed = Array.isArray(g.pushed_episodes) ? g.pushed_episodes : [];
+          totalUnits += actionable.length;
+          const label = it ? `${it.show} ${it.season}` : rid;
+          return `<div class="flex items-center justify-between gap-2 text-[11px] py-0.5 border-b border-slate-100 dark:border-slate-800 last:border-0">
+            <span class="font-semibold truncate">${escapeHtml(label)}</span>
+            <span class="font-mono text-blue-600 dark:text-blue-400">待补 ${actionable.map(fmtEp).join(', ') || '无'}${pushed.length ? ` (跳过在途 ${pushed.map(fmtEp).join(',')})` : ''}</span>
+          </div>`;
+        }).join('');
+        summaryEl.innerHTML = `
+          <div class="font-bold text-slate-800 dark:text-slate-100">本轮批量推送汇总：共选中 ${recordIds.length} 季 · 合计 ${totalUnits} 个待补集/期单元</div>
+          <div class="max-h-36 overflow-y-auto space-y-0.5 pr-1">${rowsHtml}</div>
+          <div class="text-[11px] text-slate-500 dark:text-slate-400 pt-1">检索范围：默认启用站点 + 天空 / 观众扩展站点 · 最低做种数 ≥ ${minSeeders} · 在途与待确认项已自动跳过</div>
+        `;
       }
     }
 
@@ -3580,7 +3691,12 @@
       openArchivePreviewModal(checked, null);
     }
     function executeBatchReview() { currentActionRecordId = null; openModal('reviewModal'); }
-    function executeBatchDownload() { currentActionRecordId = null; openModal('downloadModal'); }
+    function executeBatchDownload() {
+      currentActionRecordId = null;
+      const checked = [...document.querySelectorAll('input[name="itemCheck"]:checked')].map(cb => cb.value);
+      prepareDownloadModal(checked, null);
+      openModal('downloadModal');
+    }
 
     function openModal(id) { document.getElementById(id).classList.remove('hidden'); }
     function closeModal(id) { document.getElementById(id).classList.add('hidden'); }
@@ -3611,6 +3727,32 @@
       }
       const activeBtn = document.querySelector(`#batchActionContainer [role="tab"][data-gap-tab="${currentGapView}"]`);
       if (activeBtn) activeBtn.focus();
+    }
+
+    async function recheckSeasonEvidence(recordId, btn) {
+      const taskId = currentTaskId;
+      const item = findItemByRecordId(recordId);
+      if (!taskId || !item || (btn && btn.disabled)) return;
+      const recordIds = Array.from(new Set([
+        recordId, ...(item.raw?.participating_record_ids || []),
+        ...(item.associatedRecords || []).map(r => r.id)
+      ].filter(Boolean)));
+      const originalHtml = btn ? btn.innerHTML : '';
+      if (btn) { btn.disabled = true; btn.textContent = '正在核查…'; }
+      try {
+        const res = await api(`/api/tasks/${taskId}/recalculate`, {
+          method: 'POST', body: JSON.stringify({record_ids: recordIds, fetch_remote: true})
+        });
+        const task = taskList.find(t => t.id === taskId);
+        if (task) task._seasonsLoaded = false;
+        await loadTasks();
+        if (currentTaskId === taskId) await selectTask(taskId);
+        alert(res.message || '核查结束，请查看更新后的分类与依据。');
+      } catch (e) {
+        alert(`重新核查失败，原有文件保留：${e.message}`);
+      } finally {
+        if (btn && btn.isConnected) { btn.disabled = false; btn.innerHTML = originalHtml; }
+      }
     }
 
     async function recheckEmbyForSeason(recordId, btn) {
@@ -3920,7 +4062,7 @@
       const ev = item.evidence || (item.raw && item.raw.evidence) || {};
       const conf = item.conflict || (item.raw && item.raw.conflict) || {};
       const mp = item.mapping || (item.raw && item.raw.mapping) || {};
-      const isAiring = currentCategory === 'airing' || item.mainCategory === 'airing' || item.raw?.main_category === 'airing' || item.raw?.status === 'airing';
+      const isAiring = currentCategory === 'airing' || item.mainCategory === 'airing' || item.raw?.main_category === 'airing' || item.raw?.airing_protected || item.raw?.status === 'airing' || ['airing', 'upcoming'].includes(ev.broadcast_evidence?.status);
       const airingView = item.airingView || item.raw?.airing_view || (ev && ev.broadcast_evidence) || null;
       if (titleEl) {
         titleEl.textContent = isAiring
@@ -4027,6 +4169,14 @@
       const confMsg = (conf && (conf.message || conf.reason)) || ev.conflict_reason || '';
       const metaStatusVal = ev.meta_status || ev.metadata_status || '';
       const metaErrVal = ev.meta_error || ev.metadata_error || '';
+      const referenceCandidates = (ev.candidates || []).filter(c => c.result === 'reference_only' || (c.result === 'accepted' && String(c.tmdb_id) !== String(item.tmdbId)));
+      if (referenceCandidates.length && metaStatusVal === 'metadata_unverified') {
+        parts.push(`<div class="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/30 text-xs space-y-2">
+          <div class="font-bold">候选资料参考 · 未确认对应关系</div>
+          <div>候选集数不计入本季总集数；搜索命中不代表文件属于另一作品。</div>
+          ${referenceCandidates.map(c => `<div>TMDB ${escapeHtml(c.tmdb_id)} · ${escapeHtml(c.name || '候选条目')} · S${String(c.season_number || 1).padStart(2, '0')} · ${escapeHtml(c.episode_count || '未知')} 集</div>`).join('')}
+        </div>`);
+      }
       const msCheck = (ev && ev.mediaserver_check && (ev.mediaserver_check.checked || ev.mediaserver_check.error)) ? ev.mediaserver_check : null;
       const hasRealConflict = Boolean((conf && conf.blocking) || confMsg || epMatches.length > 0);
       if (hasRealConflict || (ev.candidates && ev.candidates.length > 0) || relEv.dominant_release_title || metaStatusVal || uniqueAliases.length > 0 || msCheck) {
@@ -4063,31 +4213,62 @@
       }
 
       const eps = Array.isArray(gap.episodes) ? gap.episodes : [];
-      if (!isAiring && (eps.length > 0 || (gap.actionable_missing_episodes && gap.actionable_missing_episodes.length > 0) || (gap.pushed_episodes && gap.pushed_episodes.length > 0))) {
-        const todoStr = (gap.actionable_missing_episodes || []).map(e => `E${String(e).padStart(2, '0')}`).join(', ') || '无';
-        const pushedStr = (gap.pushed_episodes || []).map(e => `E${String(e).padStart(2, '0')}`).join(', ') || '无';
-        const rows = eps.map(ep => `
+      const isPeriodItem = item.raw && item.raw.status === 'period_missing';
+      const fmtUnit = (n) => isPeriodItem ? `第${String(n || 0).padStart(2, '0')}期` : `E${String(n || 0).padStart(2, '0')}`;
+      const stConflict = ev && ev.source_total_conflict ? ev.source_total_conflict : null;
+      if (!isAiring && (eps.length > 0 || (gap.actionable_missing_episodes && gap.actionable_missing_episodes.length > 0) || (gap.pushed_episodes && gap.pushed_episodes.length > 0) || ['download_needed', 'period_missing'].includes(item.raw?.status))) {
+        const bEvGap = (ev && ev.broadcast_evidence) || {};
+        const srcCov = Array.isArray(bEvGap.source_episodes) ? bEvGap.source_episodes : ((item.raw && item.raw.recognized_episodes) || []);
+        const arcCov = Array.isArray(bEvGap.archived_episodes) ? bEvGap.archived_episodes : ((ev && ev.dual_archive_info && ev.dual_archive_info.archived_episodes) || []);
+        const embyCov = (msCheck && msCheck.trusted_match !== false && Array.isArray(msCheck.season_episodes)) ? msCheck.season_episodes : [];
+        const allPhysCov = Array.from(new Set([...srcCov, ...arcCov, ...embyCov].map(Number).filter(n => n > 0))).sort((a, b) => a - b);
+        const physMissing = Array.isArray(gap.physical_missing_episodes) ? gap.physical_missing_episodes : (item.missing || []);
+        const todoStr = (gap.actionable_missing_episodes || []).map(fmtUnit).join(', ') || '无';
+        const pushedStr = (gap.pushed_episodes || []).map(fmtUnit).join(', ') || '无';
+        const lrGap = gap.last_run || null;
+        const lrSites = (lrGap && lrGap.sites_summary) ? lrGap.sites_summary : {};
+        const lastOutcomeVal = gap.last_outcome || (lrGap && lrGap.outcome_status) || '-';
+        const rows = eps.map(ep => {
+          const epNo = ep.episode ?? ep.episode_number ?? 0;
+          const epOut = ep.outcome_code || ep.outcome || ep.state || '-';
+          const epRsn = ep.reason || ep.sanitized_reason || '-';
+          return `
           <tr class="border-t border-slate-200 dark:border-slate-700">
-            <td class="py-1.5 px-2 font-mono font-semibold">E${String(ep.episode_number || 0).padStart(2, '0')}</td>
-            <td class="py-1.5 px-2 font-mono">${escapeHtml(ep.outcome || '-')}</td>
+            <td class="py-1.5 px-2 font-mono font-semibold">${fmtUnit(epNo)}</td>
+            <td class="py-1.5 px-2 font-mono">${escapeHtml(epOut)}</td>
             <td class="py-1.5 px-2">${escapeHtml(ep.site || '-')}</td>
             <td class="py-1.5 px-2 max-w-[200px] truncate" title="${escapeHtml(ep.torrent_title || '')}">${escapeHtml(ep.torrent_title || '-')}</td>
-            <td class="py-1.5 px-2 text-slate-600 dark:text-slate-300">${escapeHtml(ep.sanitized_reason || '-')}</td>
+            <td class="py-1.5 px-2 text-slate-600 dark:text-slate-300">${escapeHtml(epRsn)}</td>
           </tr>
-        `).join('');
+        `;
+        }).join('');
         parts.push(`
           <div class="space-y-2">
+            <div class="p-3 rounded-xl bg-blue-50/60 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800/60 text-xs space-y-1">
+              <div class="font-bold text-blue-900 dark:text-blue-200">三端实物覆盖与缺号核定依据</div>
+              <div class="text-slate-600 dark:text-slate-300">
+                源端识别: <span class="font-mono">${srcCov.length}</span> · 归档已存: <span class="font-mono">${arcCov.length}</span> · Emby可信已入库: <span class="font-mono">${embyCov.length}</span>
+                → <b>三端并集已覆盖 <span class="font-mono">${allPhysCov.length}/${item.totalEpisodes || '?'}</span></b>
+              </div>
+              <div class="text-slate-600 dark:text-slate-300">
+                物理确认缺号: <span class="font-mono text-rose-600 dark:text-rose-400">${physMissing.map(fmtUnit).join(', ') || '无'}</span>
+              </div>
+              ${stConflict ? `<div class="text-amber-700 dark:text-amber-300">双来源总集数对比: TMDB ${stConflict.tmdb_total} 集 vs 豆瓣 ${stConflict.douban_total} 集 · ${escapeHtml(stConflict.tail_basis || '')}</div>` : ''}
+              ${lrGap ? `<div class="text-slate-600 dark:text-slate-300 pt-1 border-t border-blue-200/60 dark:border-blue-800/50">
+                上次检索站点: <span class="font-mono">${escapeHtml(lrSites.requested || '全部启用站点')}</span>（命中返回: <span class="font-mono">${escapeHtml((lrSites.returned || []).join(', ') || '无')}</span>） · 候选数: <b>${lrGap.candidate_count ?? 0}</b> · 最高做种: <b>${lrGap.max_seeders_seen ?? 0}</b>（要求 ≥ ${lrGap.min_seeders_required ?? 2}）
+              </div>` : ''}
+            </div>
             <div class="flex flex-wrap gap-3 text-xs">
               <span><b>仍待补:</b> <span class="font-mono text-blue-600 dark:text-blue-400">${escapeHtml(todoStr)}</span></span>
               <span><b>已推送待入库:</b> <span class="font-mono text-indigo-600 dark:text-indigo-400">${escapeHtml(pushedStr)}</span></span>
-              <span><b>最近结果:</b> <span class="font-mono">${escapeHtml(gap.last_outcome || '-')}</span></span>
+              <span><b>最近结果:</b> <span class="font-mono">${escapeHtml(lastOutcomeVal)}</span></span>
             </div>
             ${rows ? `
               <div class="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-700">
                 <table class="w-full text-left border-collapse text-[11px]">
                   <thead class="bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
                     <tr>
-                      <th class="py-1.5 px-2">集数</th>
+                      <th class="py-1.5 px-2">集/期号</th>
                       <th class="py-1.5 px-2">状态</th>
                       <th class="py-1.5 px-2">站点</th>
                       <th class="py-1.5 px-2">种子标题（脱敏）</th>
@@ -4102,7 +4283,7 @@
       }
 
       // 纠正本季识别 / 单季映射入口收拢（连载留源详情保持只读，不渲染映射修改或删源入口 L05）
-      const needsOrHasMapping = !isAiring && (
+      const needsOrHasMapping = (!isAiring || (currentCategory === 'anomaly' && conf.blocking)) && (
         Boolean(mp && mp.target_tmdb_id) ||
         Boolean(conf && conf.blocking) ||
         ['identity_review', 'unknown', 'review_needed', 'period_review'].includes(item.raw?.status) ||
@@ -4852,12 +5033,23 @@
     }
 
     async function confirmDownloadDone() {
-      closeModal('downloadModal');
       const ids = currentActionRecordId ? [currentActionRecordId] : [...document.querySelectorAll('input[name="itemCheck"]:checked')].map(cb => cb.value);
+      let singleSelectedEps = null;
+      if (currentActionRecordId) {
+        const epChecks = [...document.querySelectorAll('#downloadModalTargetSummary input[name="dlEpisodeCheck"]')];
+        if (epChecks.length > 0) {
+          singleSelectedEps = epChecks.filter(cb => cb.checked).map(cb => Number(cb.value)).filter(n => n > 0);
+          if (singleSelectedEps.length === 0) {
+            alert('请至少勾选 1 个本轮需要补缺的集号/期号');
+            return;
+          }
+        }
+      }
+      closeModal('downloadModal');
       if (ids.length === 0) { alert('未选择任何需要补缺的剧集'); return; }
 
       const targetTaskId = currentTaskId;
-      const items = ids.map(id => ({ id, name: findShowDisplayName(id) }));
+      const items = ids.map(id => ({ id, name: findShowDisplayName(id), selectedEpisodes: singleSelectedEps }));
 
       await runBatchPipeline({
         title: `批量推送 MoviePilot 补缺任务 (${items.length} 项)`,
@@ -4872,13 +5064,17 @@
         processItem: async (item, i, total, appendLog, abortSignal, batchId) => {
           appendLog(`<span class="text-slate-400">[${getNowTimestamp()}] 🔍 正在检索 MP 补缺做种: <b>【${escapeHtml(item.name)}】</b>...</span>`);
           try {
+            const payload = {
+              season_record_ids: [item.id],
+              record_ids: [item.id],
+              batch_run_id: batchId
+            };
+            if (Array.isArray(item.selectedEpisodes) && item.selectedEpisodes.length > 0) {
+              payload.selected_episodes = item.selectedEpisodes;
+            }
             const res = await api('/api/moviepilot/download-gap-fill', {
               method: 'POST',
-              body: JSON.stringify({
-                season_record_ids: [item.id],
-                record_ids: [item.id],
-                batch_run_id: batchId
-              }),
+              body: JSON.stringify(payload),
               signal: abortSignal
             });
 

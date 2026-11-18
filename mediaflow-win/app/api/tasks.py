@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import posixpath
 import uuid
 from datetime import datetime, timezone
@@ -34,7 +35,7 @@ from app.core.identity_resolver import (
     reevaluate_offline_conflict,
     resolve_active_season_mapping,
 )
-from app.core.inspector import diagnose_season
+from app.core.inspector import diagnose_season, metadata_reference_note, unverified_metadata_candidates
 from app.database import get_db
 from app.models.directory_group import DirectoryGroup
 from app.models.operation import OperationLog
@@ -52,6 +53,7 @@ from app.services.gap_fill_tracker import (
 )
 
 router = APIRouter()
+log = logging.getLogger(__name__)
 
 
 def _task_to_out(task: Task) -> TaskOut:
@@ -339,6 +341,11 @@ async def _apply_in_place_recalculate(
             diag = None
 
     now_dt = datetime.now(timezone.utc)
+    if fetch_remote and (diag is None or (diag.evidence or {}).get("meta_status") == "fetch_failed"):
+        evidence = _safe_json(getattr(rec, "evidence_json", None), {})
+        evidence["last_remote_recheck_error"] = remote_error or ((diag.evidence or {}).get("meta_error") if diag else "") or "未取得本季核查结果"
+        rec.evidence_json = json.dumps(evidence, ensure_ascii=False)
+        return False
     if diag is not None:
         rec.tmdb_id = diag.tmdb_id
         rec.total_episodes = diag.total_episodes
@@ -374,7 +381,13 @@ async def _apply_in_place_recalculate(
             )
         cached_tot = int(cached_m.get("total") or cached_m.get("episode_count") or 0) if cached_m else 0
         tot = active_map.get("expected_total_episodes") or (cached_tot if cached_tot > 0 else rec.total_episodes)
-        default_fin = rec.season_finished if rec.season_finished is not None else True
+        b_ev = (evidence or {}).get("broadcast_evidence") if isinstance(evidence, dict) else None
+        was_verified_airing = (
+            rec.status == "airing"
+            or (isinstance(b_ev, dict) and b_ev.get("status") in ("airing", "upcoming"))
+            or (rec.season_finished is False and rec.total_episodes is not None and rec.status not in ("identity_review", "unknown"))
+        )
+        default_fin = False if was_verified_airing else True
         finished = bool(
             (cached_m or {}).get("finished", default_fin) if cached_m else default_fin
         )
@@ -451,6 +464,25 @@ async def _apply_in_place_recalculate(
         rec.conflict_json = "{}"
         conflict_cleared = True
 
+    # 旧版本曾将搜索候选的集数缓存到目录 ID 下；离线重算不能把这类
+    # identity_review 直接升级为可归档。仅新的远程核实/有效映射可解除。
+    reference_candidates = unverified_metadata_candidates(evidence, rec.tmdb_id, rec.season_number)
+    if reference_candidates:
+        rec.status = "unknown"
+        rec.total_episodes = None
+        rec.season_finished = False
+        rec.missing_episodes_json = "[]"
+        rec.status_detail = metadata_reference_note(rec.tmdb_id, rec.season_number, reference_candidates)
+        evidence["meta_status"] = "metadata_unverified"
+        evidence["broadcast_evidence"] = {
+            "status": "evidence_pending", "schedule_verified": False,
+            "missing_evidence_reason": "候选资料尚未确认与目录作品对应",
+        }
+        evidence["matched_work"] = {**(evidence.get("matched_work") or {}), "seasons_present": []}
+        evidence["last_recalculated_at"] = now_dt.isoformat()
+        rec.evidence_json = json.dumps(evidence, ensure_ascii=False)
+        return True
+
     cached_season = (
         (
             await get_verified_metadata_snapshot(db, f"tmdb:{int(tid_int)}:S{rec.season_number}")
@@ -459,6 +491,8 @@ async def _apply_in_place_recalculate(
         if tid_int
         else None
     )
+    if cached_season and cached_season.get("candidate_id"):
+        cached_season = None
     cached_tot = int(cached_season.get("total") or cached_season.get("episode_count") or 0) if cached_season else 0
     tot = cached_tot if cached_tot > 0 else rec.total_episodes
     finished = bool(cached_season.get("finished", rec.season_finished)) if cached_season else bool(rec.season_finished)
@@ -661,6 +695,10 @@ async def _run_task_reevaluate_impl(
     task_id: str,
     req: RecalculateRequest,
 ) -> dict[str, Any]:
+    from app.services.task_service import TASK_RUNNING_WORKERS
+    task = await db.get(Task, task_id)
+    if task and (task.status in ("running", "paused", "stopping") or task_id in TASK_RUNNING_WORKERS):
+        raise HTTPException(status_code=409, detail="请在初检结束后重新核查")
     stmt = select(SeasonRecord).where(SeasonRecord.task_id == task_id)
     all_rows = list((await db.execute(stmt)).scalars().all())
     target_set = set(req.record_ids) if req.record_ids else None
@@ -672,6 +710,7 @@ async def _run_task_reevaluate_impl(
     updated_count = 0
     preserved_handled = 0
     changes: list[dict[str, Any]] = []
+    remote_failures: list[dict[str, str]] = []
     for rec in all_rows:
         if target_set is not None and rec.id not in target_set:
             continue
@@ -694,6 +733,9 @@ async def _run_task_reevaluate_impl(
                         "detail": rec.status_detail,
                     }
                 )
+        elif req.fetch_remote:
+            ev = _safe_json(rec.evidence_json, {})
+            remote_failures.append({"id": rec.id, "error": ev.get("last_remote_recheck_error") or "核查未完成"})
 
     if target_set is not None and len(target_set) == 1:
         groups = list((await db.scalars(select(DirectoryGroup).where(DirectoryGroup.task_id == task_id))).all())
@@ -713,9 +755,12 @@ async def _run_task_reevaluate_impl(
             expired_hint = "；部分剧季旧播期已跨过今日，建议点击「重新初检」更新"
             break
     mode_prefix = "已用上次初检资料重新核算" if not req.fetch_remote else "已完成远程重查与重新核算"
+    if remote_failures:
+        mode_prefix = f"本次有 {len(remote_failures)} 季核查未完成，已保留原判断与文件"
     return {
         "ok": True,
         "updated_count": updated_count,
+        "remote_failures": remote_failures,
         "preserved_handled": preserved_handled,
         "before_counts": before_counts,
         "after_counts": after_counts,
@@ -723,7 +768,7 @@ async def _run_task_reevaluate_impl(
         "directory_groups": dir_groups,
         "summary": task_summary,
         "message": (
-            f"{mode_prefix}：已完成只读归属重评估与核算（重算 {updated_count} 季，状态/冲突变更 {len(changes)} 项，"
+            f"{mode_prefix}（重算 {updated_count} 季，状态/冲突变更 {len(changes)} 项，"
             f"保留已处理记录 {preserved_handled} 季，多目录待确认组 {task_summary.get('pending_directory_groups', 0)} 个）{expired_hint}"
         ),
     }
@@ -1151,7 +1196,7 @@ async def delete_season_mapping(
 
 class ReconcileGapFillRequest(BaseModel):
     season_record_ids: list[str] = []
-    force_release_missing: bool = True
+    force_release_missing: bool = False
 
 
 @router.post("/{task_id}/reconcile-gap-fill")
@@ -1200,9 +1245,10 @@ async def mark_season_handled(task_id: str, record_id: str, db: AsyncSession = D
     from app.services.task_service import TASK_RUNNING_WORKERS
     if task.status in ("running", "paused") or task_id in TASK_RUNNING_WORKERS:
         raise HTTPException(status_code=409, detail="请在初检结束后标记手动处理")
-    from app.core.season_classifier import get_record_work_main_category
-    work_cat = await get_record_work_main_category(db, rec)
-    if rec.status == "airing" or work_cat == "airing":
+    from app.core.season_classifier import get_record_work_context
+    work = await get_record_work_context(db, rec)
+    work_cat = work.get("main_category")
+    if work.get("airing_protected"):
         raise HTTPException(status_code=409, detail="连载留源剧季无需且不可标记为手动处理")
     recognized = json.loads(rec.recognized_episodes_json or "[]")
     is_anomaly = (

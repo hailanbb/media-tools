@@ -226,16 +226,20 @@ class TestInspectionEngine(unittest.TestCase):
         mock_tmdb.get_tv_detail.side_effect = get_tv_detail_mock
 
         async def run():
+            evidence = {}
             resolved_id, seasons = await _resolve_show_metadata(
                 show_name="三时三餐 (2014) [tmdbid=211502]",
                 needed_seasons=[1],
                 tmdb_id_num=211502,
                 mp_client=mock_mp,
                 tmdb_client=mock_tmdb,
+                evidence_out=evidence,
             )
-            # 因为 2014 年份匹配，68156 得分更高，必须优先被选中
-            self.assertEqual(resolved_id, 68156)
-            self.assertEqual(seasons[1]["total"], 11)
+            # 年份评分只决定参考顺序，不能覆盖显式目录 ID 或借用候选集数。
+            self.assertEqual(resolved_id, 211502)
+            self.assertNotIn(1, seasons)
+            self.assertEqual(evidence["candidates"][0]["tmdb_id"], 68156)
+            self.assertEqual(evidence["candidates"][0]["result"], "reference_only")
 
         asyncio.run(run())
 

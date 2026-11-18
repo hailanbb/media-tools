@@ -500,6 +500,9 @@ class TestSeasonClassifier(unittest.TestCase):
         self.assertEqual(c_l07_inv["airing"], 0)
         self.assertEqual(c_l07_inv["anomaly"], 1)
         self.assertEqual(w_l07_inv[0]["main_category"], "anomaly")
+        self.assertTrue(w_l07_inv[0]["airing_protected"])
+        self.assertFalse(w_l07_inv[0]["can_mark_handled"])
+        self.assertEqual(w_l07_inv[0]["airing_view"]["source_episodes"], [1, 2, 3, 4, 5, 6])
 
 
 if __name__ == "__main__":

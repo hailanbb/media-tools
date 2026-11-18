@@ -748,5 +748,101 @@ class IdentityAndMappingAcceptanceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(r_c.status, "archive_ready")
 
 
+    async def test_candidate_count_does_not_establish_file_identity_or_pollute_cache(self):
+        show = "性爱治疗师 (2025) [tmdbid=315775]"
+        path = f"/qa/src/{show}"
+        season_path = f"{path}/Season 1"
+        cd2 = FakeCD2({
+            "/qa/src": [_dir(show, path)],
+            path: [_dir("Season 1", season_path)],
+            season_path: [_file(f"Therapy.2025.S01E{n:02d}.mkv", f"{season_path}/Therapy.2025.S01E{n:02d}.mkv") for n in range(1, 5)],
+        })
+        candidate = {"id": 315653, "name": "性爱治疗师", "first_air_date": "2025-01-01",
+                     "seasons": [{"season_number": 1, "episode_count": 4, "air_date": "2025-01-01"}]}
+        tmdb = FakeTMDB(shows={315653: candidate}, search_map={"性爱治疗师": [candidate]})
+        async with async_session() as db:
+            result = await run_inspection(task_id="candidate-test", source_path="/qa/src", cd2_client=cd2,
+                                          tmdb_client=tmdb, archive_root="/qa/dst", global_source_root="/qa/src", db=db)
+            rec = result.seasons[0]
+            self.assertEqual(str(rec.tmdb_id), "315775")
+            self.assertEqual(rec.recognized_episodes, [1, 2, 3, 4])
+            self.assertIsNone(rec.total_episodes)
+            self.assertFalse(rec.season_finished)
+            self.assertEqual(rec.status, "unknown")
+            self.assertEqual(rec.evidence["meta_status"], "metadata_unverified")
+            self.assertFalse(rec.conflict.get("blocking"))
+            self.assertIn("不代表本地文件属于另一作品", rec.status_detail)
+            cached = await db.scalar(select(MetadataCache).where(MetadataCache.cache_key == "tmdb:315775:S1"))
+            self.assertIsNone(cached)
+
+    async def test_legacy_candidate_recalculate_stays_unverified_until_primary_verified(self):
+        from app.api.tasks import _apply_in_place_recalculate
+        from app.core.identity_resolver import save_verified_metadata_snapshot
+        from app.core.inspector import InspectionResult, SeasonDiagnosis
+        async with async_session() as db:
+            db.add(Task(id="legacy", name="Legacy", source_path="/qa/src", status="completed"))
+            rec = SeasonRecord(id="legacy-candidate", task_id="legacy", show_name="Therapy [tmdbid=315775]",
+                               show_path="/qa/src/Therapy", season_path="/qa/src/Therapy/Season 1",
+                               tmdb_id="315775", season_number=1, total_episodes=4, local_episode_count=4,
+                               recognized_episodes_json="[1,2,3,4]", status="identity_review", season_finished=True,
+                               evidence_json=json.dumps({"candidates": [{"tmdb_id": 315653, "season_number": 1,
+                                                                         "episode_count": 4, "result": "accepted"}]}))
+            db.add(rec)
+            await db.flush()
+            await save_verified_metadata_snapshot(db, "tmdb:315775:S1", "tmdb_season", "315775", 1,
+                                                  {"total": 4, "finished": True, "candidate_id": 315653})
+            for _ in range(2):
+                self.assertTrue(await _apply_in_place_recalculate(db, rec))
+                self.assertEqual(rec.status, "unknown")
+                self.assertIsNone(rec.total_episodes)
+                self.assertFalse(rec.season_finished)
+            # 远程核查未取得本季时保留原记录，不把旧缓存重算包装成成功。
+            old_detail = rec.status_detail
+            with patch("app.core.inspector.run_inspection", side_effect=RuntimeError("fixture unavailable")):
+                self.assertFalse(await _apply_in_place_recalculate(db, rec, fetch_remote=True))
+            self.assertEqual(rec.status_detail, old_detail)
+            self.assertIn("last_remote_recheck_error", json.loads(rec.evidence_json))
+            verified = SeasonDiagnosis(show_name=rec.show_name, show_path=rec.show_path,
+                                       season_number=1, season_path=rec.season_path,
+                                       tmdb_id="315775", total_episodes=4, local_episode_count=4,
+                                       recognized_episodes=[1, 2, 3, 4], season_finished=True,
+                                       status="archive_ready", status_detail="已核实原作品本季四集齐全",
+                                       evidence={"meta_status": "ok", "metadata_binding_verified": True})
+            with patch("app.core.inspector.run_inspection", return_value=InspectionResult(
+                task_id=rec.task_id, source_path=rec.show_path, seasons=[verified]
+            )):
+                self.assertTrue(await _apply_in_place_recalculate(db, rec, fetch_remote=True))
+            self.assertEqual(rec.status, "archive_ready")
+            self.assertEqual(rec.tmdb_id, "315775")
+            self.assertNotIn("last_remote_recheck_error", json.loads(rec.evidence_json))
+
+    async def test_airing_anomaly_group_disallows_handled_for_every_member(self):
+        async with async_session() as db:
+            db.add(Task(id="air-group", name="BOSS", source_path="/qa/src", status="completed"))
+            for rid, status, eps in (("boss-a", "airing", "[1]"), ("boss-b", "identity_review", "[2]")):
+                db.add(SeasonRecord(id=rid, task_id="air-group", show_name="BOSS", show_path=f"/qa/src/{rid}",
+                                    season_path=f"/qa/src/{rid}/Season 1", tmdb_id="326975", season_number=1,
+                                    status=status, total_episodes=12, local_episode_count=1, season_finished=False,
+                                    recognized_episodes_json=eps,
+                                    evidence_json=json.dumps({"directory_group": {"requires_confirm": True, "id": "boss-group"}})))
+            await db.commit()
+        response = await self.http.get("/api/tasks/air-group/seasons")
+        self.assertEqual(response.status_code, 200, response.text)
+        work = response.json()[0]
+        self.assertEqual(work["main_category"], "anomaly")
+        self.assertTrue(work["airing_protected"])
+        self.assertFalse(work["can_mark_handled"])
+        self.assertEqual(work["airing_view"]["source_episodes"], [1, 2])
+        for rid in ("boss-a", "boss-b"):
+            response = await self.http.post(f"/api/tasks/air-group/seasons/{rid}/handled")
+            self.assertEqual(response.status_code, 409, response.text)
+        async with async_session() as db:
+            task = await db.get(Task, "air-group")
+            task.status = "running"
+            await db.commit()
+        response = await self.http.post("/api/tasks/air-group/recalculate", json={"record_ids": ["boss-a"], "fetch_remote": True})
+        self.assertEqual(response.status_code, 409)
+
+
 if __name__ == "__main__":
     unittest.main()

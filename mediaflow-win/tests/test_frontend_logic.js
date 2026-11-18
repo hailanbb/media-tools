@@ -544,6 +544,40 @@ console.log("===================================================================
     assert(!airingDetailHtml.includes('openDeleteSourceSeasonModal'), '连载详情弹窗严禁出现放弃并删除本季按钮');
     assert(!airingDetailHtml.includes('openSeasonMappingModal'), '连载详情弹窗严禁出现改绑映射按钮');
 
+    // 异常列表中的连载目录组同样受保护，不能只按当前页判断可操作性。
+    const airingAnomaly = {
+      ...airingItemNormal, id: 'boss-anomaly', mainCategory: 'anomaly',
+      actionType: 'inspect_info', isAnomaly: true, anomalySubtype: 'file_check',
+      raw: {status: 'airing', main_category: 'anomaly'},
+      evidence: {directory_group: {id: 'boss-group', requires_confirm: true}}
+    };
+    sampleTask.categories.anomaly = [airingAnomaly];
+    dgContext.currentCategory = 'anomaly';
+    vm.runInContext('renderEpisodesList()', dgContext);
+    const bossHtml = getDgNode('episodeItemContainer').innerHTML;
+    assert(!bossHtml.includes('markSeasonHandled'), '异常模块中的连载原始状态也不得出现手动处理');
+    assert(bossHtml.includes("openDirectoryGroupDialog('boss-group')"), '多目录条目主操作应直达确认目录');
+    assert(bossHtml.includes("recheckSeasonEvidence('boss-anomaly', this)"), '提供只读重新核查');
+    assert(!bossHtml.includes('handleSingleAction'), '连载异常不能泄露写文件主操作');
+    sampleTask.status = 'running';
+    vm.runInContext('renderEpisodesList()', dgContext);
+    assert(/recheckSeasonEvidence[^>]+disabled/.test(getDgNode('episodeItemContainer').innerHTML), '初检进行中禁用再次核查');
+    sampleTask.status = 'completed';
+
+    // 候选资料不确定时不引导校准总集数、删源或结案。
+    sampleTask.categories.anomaly = [{...airingAnomaly, id: 'candidate-reference',
+      raw: {status: 'unknown', main_category: 'anomaly'}, airingView: null,
+      actionType: 'calibrate', anomalySubtype: 'unknown_meta',
+      evidence: {meta_status: 'metadata_unverified'}}];
+    vm.runInContext('renderEpisodesList()', dgContext);
+    const candidateHtml = getDgNode('episodeItemContainer').innerHTML;
+    assert(candidateHtml.includes('作品资料待核实（非文件错配）'));
+    assert(candidateHtml.includes('recheckSeasonEvidence'));
+    for (const action of ['markSeasonHandled', 'promptDeleteSourceShow', 'handleSingleAction']) {
+      assert(!candidateHtml.includes(action), `未核实候选资料不能引导 ${action}`);
+    }
+    dgContext.currentCategory = 'airing';
+
     // 4. 验证零条完整核查 vs 扫描中止 vs 加载失败的不同反馈 (L11)
     sampleTask.categories.airing = [];
     sampleTask.status = 'completed';
@@ -559,7 +593,130 @@ console.log("===================================================================
     sampleTask._seasonsLoadError = true;
     vm.runInContext('renderEpisodesList()', dgContext);
     assert(getDgNode('episodeItemContainer').innerHTML.includes('重试加载'), '接口加载失败时必须提供重试加载入口');
+    sampleTask._seasonsLoadError = false;
+    sampleTask.status = 'completed';
 
-    console.log('✓ 连载留源 L01-L12 前端只读契约、防泄露、分端详情与空态/中止区分测试全部通过');
+    // ======================================================================
+    // 验证 v2.5.38 真缺集待补模块前端契约 (D01-D09)
+    // ======================================================================
+    const gapTodoPartialItem = {
+      id: 'gap-rookie-s3',
+      show: '菜鸟老警',
+      season: 'S03',
+      statusText: '已覆盖 11/14集（待补 1 · 已推 2）',
+      mainCategory: 'download',
+      actionType: 'download',
+      actionText: '推送剩余 1 集',
+      pathA: '/src/菜鸟老警/Season 3',
+      pathB: '/dst/菜鸟老警/Season 3',
+      note: '缺第 3, 7, 9 集',
+      missing: [3, 7, 9],
+      totalEpisodes: 14,
+      evidence: {
+        broadcast_evidence: { source_episodes: [1, 2, 4, 5, 6, 8, 10, 11], archived_episodes: [12, 13, 14] },
+        source_total_conflict: { tmdb_total: 14, douban_total: 15, tail_basis: '尾集 E15 因两来源总数冲突暂缓补缺' }
+      },
+      gapFillState: {
+        view_bucket: 'todo',
+        physical_missing_episodes: [3, 7, 9],
+        actionable_missing_episodes: [9],
+        pushed_episodes: [3, 7],
+        unverified_count: 0,
+        last_outcome: 'partial',
+        last_run: {
+          outcome_status: 'partial',
+          summary_text: '部分推送（受理 [3, 7]；未成功 [9]）',
+          candidate_count: 5,
+          max_seeders_seen: 6,
+          min_seeders_required: 2,
+          sites_summary: { requested: '4:彩虹岛', returned: ['4:彩虹岛'] }
+        },
+        episodes: [
+          { episode: 3, episode_number: 3, state: 'queued', outcome: 'accepted', outcome_code: 'accepted', site: '彩虹岛', torrent_title: 'The.Rookie.S03E03.1080p', reason: 'MP已受理', sanitized_reason: 'MP已受理' },
+          { episode: 9, episode_number: 9, state: 'todo', outcome: 'low_seeders', outcome_code: 'low_seeders', site: '', torrent_title: '', reason: 'E09 找到 3 个候选，最高 1 人做种，本次要求至少 2 人', sanitized_reason: 'E09 找到 3 个候选，最高 1 人做种，本次要求至少 2 人' }
+        ]
+      },
+      raw: { status: 'download_needed', main_category: 'download', total_episodes: 14, recognized_episodes: [1, 2, 4, 5, 6, 8, 10, 11] }
+    };
+    const gapPushedUnverifiedItem = {
+      id: 'gap-unv-s1',
+      show: '超时待确认剧',
+      season: 'S01',
+      statusText: '已覆盖 4/6集（已提交 2 集待确认）',
+      mainCategory: 'download',
+      actionType: 'inspect_gap_detail',
+      actionText: '查看进度',
+      pathA: '/src/超时待确认剧/Season 1',
+      note: '缺第 5, 6 集',
+      missing: [5, 6],
+      totalEpisodes: 6,
+      gapFillState: {
+        view_bucket: 'pushed_pending',
+        physical_missing_episodes: [5, 6],
+        actionable_missing_episodes: [],
+        pushed_episodes: [5, 6],
+        unverified_episodes: [5, 6],
+        unverified_count: 2,
+        only_unverified_pending: true,
+        episodes: [
+          { episode: 5, episode_number: 5, state: 'submitted_unverified', outcome: 'timeout_unverified', outcome_code: 'timeout_unverified', reason: '请求超时待确认', sanitized_reason: '请求超时待确认' }
+        ]
+      },
+      raw: { status: 'download_needed', main_category: 'download', total_episodes: 6 }
+    };
+
+    sampleTask.categories.download = [gapTodoPartialItem];
+    sampleTask.categories.download_pushed = [gapPushedUnverifiedItem];
+    dgContext.currentCategory = 'download';
+    dgContext.currentGapView = 'todo';
+    dgContext.findItemByRecordId = id => (id === 'gap-rookie-s3' ? gapTodoPartialItem : (id === 'gap-unv-s1' ? gapPushedUnverifiedItem : null));
+    vm.runInContext('renderEpisodesList()', dgContext);
+    const gapBatchBarHtml = getDgNode('batchActionContainer').innerHTML;
+    const gapTodoCardsHtml = getDgNode('episodeItemContainer').innerHTML;
+    assert(gapBatchBarHtml.includes('提交待确认 (1)'), '当等待页仅剩超时待确认请求时，页签应显示「提交待确认」');
+    assert(gapTodoCardsHtml.includes('推送剩余 1 集'), '部分已推的待补季按钮应显示「推送剩余 N 集」');
+
+    // 切到等待页：只显示单个「查看进度」按钮，不重复渲染「详情」按钮，且不显示「删除源端（本季）」
+    dgContext.currentGapView = 'pushed_pending';
+    vm.runInContext('renderEpisodesList()', dgContext);
+    const gapPushedCardsHtml = getDgNode('episodeItemContainer').innerHTML;
+    assert(gapPushedCardsHtml.includes('查看进度'), '等待页卡片应显示「查看进度」');
+    assert(!gapPushedCardsHtml.includes('<span>详情</span>'), '等待页卡片不得同时重复渲染第二个「详情」按钮');
+    assert(!gapPushedCardsHtml.includes('openDeleteSourceSeasonModal'), '等待页卡片仅提供核对与查看进度，不渲染删除源端（本季）');
+
+    // 验证详情弹窗渲染三端实物覆盖与 E09 精确低做种原因
+    vm.runInContext(sourceWithCr('openGapFillDetail') + ";openGapFillDetail('gap-rookie-s3')", dgContext);
+    const gapDetailHtml = getDgNode('gapFillDetailBody').innerHTML;
+    assert(gapDetailHtml.includes('三端实物覆盖与缺号核定依据'), '补缺详情弹窗必须包含三端实物覆盖卡片');
+    assert(gapDetailHtml.includes('E09'), '补缺详情表格必须正确显示 E09 集号而非 E00');
+    assert(gapDetailHtml.includes('E09 找到 3 个候选，最高 1 人做种，本次要求至少 2 人'), '补缺详情必须显示精确到候选数与最高做种数的低做种原因');
+
+    console.log('✓ 连载留源 L01-L12 与真缺集待补 D01-D09 前端契约测试全部通过');
   }
 }
+
+// 实际执行只读核查处理器：覆盖同卡关联目录，并在失败后恢复按钮。
+(async () => {
+  const vm = require('node:vm');
+  const handler = htmlContent.match(/async function recheckSeasonEvidence\([^]*?\n    \}/)[0];
+  const item = {raw: {participating_record_ids: ['boss-a', 'boss-b']}, associatedRecords: [{id: 'boss-b'}]};
+  const calls = [];
+  const button = {disabled: false, innerHTML: '重新核查', isConnected: true};
+  const ctx = {currentTaskId: 'task-boss', taskList: [{id: 'task-boss', _seasonsLoaded: true}],
+    findItemByRecordId: () => item, alert: message => calls.push(message),
+    api: async (url, options) => {calls.push({url, body: JSON.parse(options.body)}); return {message: '核查完成'};},
+    loadTasks: async () => {}, selectTask: async id => calls.push(id)};
+  vm.createContext(ctx);
+  vm.runInContext(handler, ctx);
+  await ctx.recheckSeasonEvidence('boss-a', button);
+  assert.deepStrictEqual(calls[0].body.record_ids, ['boss-a', 'boss-b']);
+  assert.strictEqual(calls[0].body.fetch_remote, true);
+  assert.strictEqual(ctx.taskList[0]._seasonsLoaded, false);
+  assert.strictEqual(button.disabled, false);
+  ctx.api = async () => {throw new Error('fixture timeout');};
+  await ctx.recheckSeasonEvidence('boss-a', button);
+  assert(calls.some(c => typeof c === 'string' && c.includes('原有文件保留')));
+  assert.strictEqual(button.innerHTML, '重新核查');
+  assert.strictEqual(button.disabled, false);
+  console.log('✓ 重新核查覆盖关联目录、失败回执及按钮恢复通过');
+})().catch(error => {console.error(error); process.exitCode = 1;});

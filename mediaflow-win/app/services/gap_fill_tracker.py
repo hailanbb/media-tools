@@ -482,17 +482,28 @@ async def compute_season_gap_fill_view(
                 continue
             for ep in cov:
                 if ep in physical_missing and ep not in legacy_inferred_eps:
+                    reason_txt = "由历史补缺日志推断（建议点「核对入库」确认队列/实文件）"
                     legacy_inferred_eps[ep] = {
                         "episode": ep,
+                        "episode_number": ep,
                         "state": "submitted_unverified",
+                        "outcome": "legacy_inferred",
                         "outcome_code": "legacy_inferred",
-                        "reason": "由历史补缺日志推断（建议点「核对入库」确认队列/实文件）",
+                        "reason": reason_txt,
+                        "sanitized_reason": reason_txt,
                         "torrent_title": sanitize_text_no_secrets(str(d.get("title") or "")),
                         "site": str(d.get("site") or ""),
                         "size_bytes": int(d.get("size_bytes") or 0),
+                        "seeders": int(d.get("seeds") or 0),
                         "seeds": int(d.get("seeds") or 0),
                         "is_legacy_inferred": True,
                     }
+
+    run_failed_map: dict[str, Any] = {}
+    if run_row:
+        parsed_failed = _parse_json_safe(run_row.failed_episodes_json, {})
+        if isinstance(parsed_failed, dict):
+            run_failed_map = parsed_failed
 
     blocking_eps: list[int] = []
     queued_eps: list[int] = []
@@ -527,11 +538,15 @@ async def compute_season_gap_fill_view(
             elif eff_code == "mp_cancelled_freed":
                 cancelled_freed_eps.append(ep_num)
 
+            clean_reason = sanitize_text_no_secrets(eff_reason)
             episodes_detail.append({
                 "episode": ep_num,
+                "episode_number": ep_num,
                 "state": eff_state,
+                "outcome": eff_code,
                 "outcome_code": eff_code,
-                "reason": eff_reason,
+                "reason": clean_reason,
+                "sanitized_reason": clean_reason,
                 "mp_download_id": row.mp_download_id,
                 "torrent_hash": row.torrent_hash,
                 "torrent_title": sanitize_text_no_secrets(row.torrent_title),
@@ -547,11 +562,24 @@ async def compute_season_gap_fill_view(
             unverified_eps.append(ep_num)
             episodes_detail.append(item)
         elif ep_num in phys_set:
+            f_entry = run_failed_map.get(str(ep_num)) or run_failed_map.get(ep_num)
+            if isinstance(f_entry, dict):
+                todo_code = str(f_entry.get("code") or f_entry.get("outcome_code") or "todo")
+                todo_reason = sanitize_text_no_secrets(str(f_entry.get("reason") or "待补缺失集"))
+            elif isinstance(f_entry, str) and f_entry.strip():
+                todo_code = str(run_row.outcome_status if run_row else "todo")
+                todo_reason = sanitize_text_no_secrets(f_entry.strip())
+            else:
+                todo_code = "todo"
+                todo_reason = "待补缺失集"
             episodes_detail.append({
                 "episode": ep_num,
+                "episode_number": ep_num,
                 "state": "todo",
-                "outcome_code": "todo",
-                "reason": "待补缺失集",
+                "outcome": todo_code,
+                "outcome_code": todo_code,
+                "reason": todo_reason,
+                "sanitized_reason": todo_reason,
                 "mp_download_id": "",
                 "torrent_hash": "",
                 "torrent_title": "",
@@ -591,13 +619,23 @@ async def compute_season_gap_fill_view(
             "updated_at": run_row.updated_at.isoformat() if run_row.updated_at else None,
         }
 
+    pushed_sorted = sorted(set(blocking_eps))
+    queued_sorted = sorted(set(queued_eps))
+    unverified_sorted = sorted(set(unverified_eps))
+
     return {
         "identity_key": identity_key,
         "physical_missing_episodes": physical_missing,
         "actionable_missing_episodes": actionable_missing,
-        "pushed_episodes": sorted(set(blocking_eps)),
-        "queued_episodes": sorted(set(queued_eps)),
-        "unverified_episodes": sorted(set(unverified_eps)),
+        "pushed_episodes": pushed_sorted,
+        "queued_episodes": queued_sorted,
+        "unverified_episodes": unverified_sorted,
+        "pushed_count": len(pushed_sorted),
+        "queued_count": len(queued_sorted),
+        "unverified_count": len(unverified_sorted),
+        "todo_count": len(actionable_missing),
+        "only_unverified_pending": bool(pushed_sorted and len(unverified_sorted) == len(pushed_sorted)),
+        "last_outcome": run_row.outcome_status if run_row else None,
         "reconciled_in_library_episodes": sorted(set(reconciled_in_lib_eps)),
         "cancelled_freed_episodes": sorted(set(cancelled_freed_eps)),
         "view_bucket": view_bucket,
@@ -872,6 +910,10 @@ async def reconcile_gap_fill_records(
                     row.state = "queued"
                     row.outcome_code = "accepted"
                     row.reason = "MoviePilot 下载队列正在处理中"
+                    row_diag = _parse_json_safe(row.search_diag_json, {})
+                    if isinstance(row_diag, dict) and row_diag.get("reconcile_miss_count"):
+                        row_diag["reconcile_miss_count"] = 0
+                        row.search_diag_json = json.dumps(row_diag, ensure_ascii=False)
                     summary["still_pending"] += 1
                     continue
 
@@ -880,6 +922,10 @@ async def reconcile_gap_fill_records(
                     row.state = "transfer_pending"
                     row.outcome_code = "accepted"
                     row.reason = "已进入 MoviePilot 媒体整理队列，等待网盘实文件入库"
+                    row_diag = _parse_json_safe(row.search_diag_json, {})
+                    if isinstance(row_diag, dict) and row_diag.get("reconcile_miss_count"):
+                        row_diag["reconcile_miss_count"] = 0
+                        row.search_diag_json = json.dumps(row_diag, ensure_ascii=False)
                     summary["still_pending"] += 1
                     continue
 
@@ -908,17 +954,27 @@ async def reconcile_gap_fill_records(
                     continue
 
                 # 队列、整理队列、转移成功记录均未命中 + 实体缺失：
-                # 针对 submitted_unverified / intent_submitting 保留观察期（300 秒）：
-                # 处于观察期内且未显式指定 force_release_missing 时，不因单次队列抖动误放回待补
+                # 1. 针对 submitted_unverified / intent_submitting 保留观察期（300 秒）
+                # 2. 单次队列未命中不能立即重推（需连续 >= 2 次对账未命中或显式 force_release_missing）
+                row_diag = _parse_json_safe(row.search_diag_json, {})
+                if not isinstance(row_diag, dict):
+                    row_diag = {}
+                miss_count = int(row_diag.get("reconcile_miss_count") or 0) + 1
+                row_diag["reconcile_miss_count"] = miss_count
+                row.search_diag_json = json.dumps(row_diag, ensure_ascii=False)
+
                 row_age = now_dt.timestamp() - _dt_ts(row.updated_at or row.created_at)
                 in_observation_window = row.state in ("submitted_unverified", "intent_submitting") and row_age < 300
-                if in_observation_window and not force_release_missing:
-                    row.reason = f"提交回执待确认中（已提交 {int(max(0, row_age))} 秒，对账观察期 300 秒），保持在途锁定防重"
+                if not force_release_missing and (in_observation_window or miss_count < 2):
+                    if in_observation_window:
+                        row.reason = f"提交回执待确认中（已提交 {int(max(0, row_age))} 秒，对账观察期 300 秒），保持在途锁定防重"
+                    else:
+                        row.reason = "单次队列对账未命中，保持在途观察防重（再次核对仍未命中将自动退回待补）"
                     summary["still_pending"] += 1
-                elif force_release_missing or row.state in ("submitted_unverified", "intent_submitting"):
+                elif force_release_missing or miss_count >= 2 or row.state in ("submitted_unverified", "intent_submitting"):
                     row.state = "cancelled_or_failed"
                     row.outcome_code = "mp_cancelled_freed"
-                    row.reason = "MP 队列已无在途下载且双库未见实文件（已过观察期或主动释放），已自动退回待补"
+                    row.reason = "MP 队列已无在途下载且双库未见实文件（已过观察期或连续对账未命中），已自动退回待补"
                     summary["released_to_todo"] += 1
                 else:
                     summary["still_pending"] += 1

@@ -3141,6 +3141,8 @@ async def preview_delete_source_season(
         "target_delete_path": target_delete_path,
         "active_other_seasons_count": len(active_other_seasons),
         "archive_target_path": rec.archive_target_path or "",
+        "archive_impact": "none",
+        "archive_impact_note": "仅删除源端本季范围，归档库与同剧其他季目录不受影响",
         "total_files": len(files_list),
         "total_size_bytes": total_size,
         "total_size_display": _fmt_bytes(total_size),

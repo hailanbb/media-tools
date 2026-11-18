@@ -4,7 +4,10 @@
 
 [![Windows](https://img.shields.io/badge/Windows-Native-0078d4.svg?style=flat-square&logo=windows)](#)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776ab.svg?style=flat-square&logo=python)](#)
-[![Version](https://img.shields.io/badge/Release-v2.5.36-6366f1.svg?style=flat-square)](#)
+[![Version](https://img.shields.io/badge/Release-v2.5.38-6366f1.svg?style=flat-square)](#)
+
+v2.5.38：全面完善「真缺集待补」模块（覆盖 D01–D09 验收场景）：支持综艺连期范围选种与含混候选跳过、双来源总集数冲突时前段缺号独立补缺与尾集依据单列、逐集低做种精确候选数/做种数诊断、单季推送前自选集号、单次队列对账未命中防重保护、等待页「提交待确认／等待入库」语义区分与按钮去重，以及三端实物覆盖详情展示。模块方案见 [真缺集待补模块需求与交互方案](MediaFlow真缺集待补模块需求与交互方案-v2.5.38.md)。
+v2.5.37：修正候选作品集数被当作文件归属证据的误报；异常列表中的连载季改用「确认目录」「重新核查」与详情，隐藏不可用的手动处理按钮。模块方案见 [异常剧集需求与交互方案](MediaFlow异常剧集模块需求与交互方案-v2.5.37.md)，实现记录见 [异常误报与连载交互修正](MediaFlow异常误报与连载条目操作修正-v2.5.37.md)。
 
 ---
 

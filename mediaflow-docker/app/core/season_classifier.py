@@ -56,6 +56,7 @@ TERMINAL_STATUSES = {
 
 # 属于元数据异常的 meta_status
 ANOMALY_META_STATUSES = {
+    "metadata_unverified",
     "fetch_failed",
     "not_listed",
     "no_candidate",
@@ -81,6 +82,12 @@ def get_record_field(rec: Any, field_name: str, default: Any = None) -> Any:
     if isinstance(rec, dict):
         return rec.get(field_name, default)
     return getattr(rec, field_name, default)
+
+
+def is_airing_protected(rec: Any) -> bool:
+    evidence = _safe_json(get_record_field(rec, "evidence_json") or get_record_field(rec, "evidence"), {})
+    return (get_record_field(rec, "status") == "airing"
+            or (evidence.get("broadcast_evidence") or {}).get("status") in ("airing", "upcoming"))
 
 
 def classify_single_record(
@@ -435,6 +442,8 @@ def consolidate_seasons_to_work_records(
             }
 
         base_dict["main_category"] = best_cat
+        base_dict["airing_protected"] = best_cat == "airing" or any(is_airing_protected(it[0]) for it in active_items)
+        base_dict["can_mark_handled"] = best_cat == "anomaly" and not base_dict["airing_protected"]
         base_dict["action_type"] = primary_act
         base_dict["is_primary_work_record"] = True
         base_dict["associated_records"] = associated
@@ -464,6 +473,9 @@ def consolidate_seasons_to_work_records(
                 **airing_view,
             }
             base_dict["evidence"] = ev_dict
+        elif base_dict["airing_protected"]:
+            # 多目录等异常仍留在异常模块，但展示合并后的播出覆盖并保护连载文件。
+            base_dict["airing_view"] = _build_airing_view(active_items, base_dict)
 
         # 检查是否全部已推送待入库
         gap_state = base_dict.get("gap_fill_state") or {}
@@ -765,7 +777,7 @@ def _build_airing_view(
     }
 
 
-async def get_record_work_main_category(db: Any, rec: Any) -> str:
+async def get_record_work_context(db: Any, rec: Any) -> dict:
     """查询指定物理剧季记录在所属任务中按作品季归并后的唯一主分类 (L05 写入安全门禁)."""
     from sqlalchemy import select
     from app.models.season import SeasonRecord
@@ -775,7 +787,7 @@ async def get_record_work_main_category(db: Any, rec: Any) -> str:
     rec_id = get_record_field(rec, "id")
     if not task_id or db is None:
         cat, _ = classify_single_record(rec)
-        return cat
+        return {"main_category": cat, "airing_protected": cat == "airing" or is_airing_protected(rec)}
 
     stmt = select(SeasonRecord).where(
         SeasonRecord.task_id == task_id,
@@ -784,7 +796,7 @@ async def get_record_work_main_category(db: Any, rec: Any) -> str:
     rows = list((await db.execute(stmt)).scalars().all())
     if not rows:
         cat, _ = classify_single_record(rec)
-        return cat
+        return {"main_category": cat, "airing_protected": cat == "airing" or is_airing_protected(rec)}
 
     dg_stmt = select(DirectoryGroup.id).where(
         DirectoryGroup.task_id == task_id,
@@ -795,8 +807,12 @@ async def get_record_work_main_category(db: Any, rec: Any) -> str:
     target_wkey = build_work_key(rec)
     for w in work_recs:
         if w.get("id") == rec_id or rec_id in (w.get("participating_record_ids") or []):
-            return str(w.get("main_category") or "")
+            return w
         if build_work_key(w) == target_wkey:
-            return str(w.get("main_category") or "")
+            return w
     cat, _ = classify_single_record(rec, pending_dg_ids)
-    return cat
+    return {"main_category": cat, "airing_protected": cat == "airing" or is_airing_protected(rec)}
+
+
+async def get_record_work_main_category(db: Any, rec: Any) -> str:
+    return str((await get_record_work_context(db, rec)).get("main_category") or "")
