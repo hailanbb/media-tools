@@ -1,6 +1,22 @@
 # MediaFlow 版本管理
 
-当前源码版本为 v2.5.40，修订日期为 2026-11-18。
+当前源码版本为 v2.5.41，修订日期为 2026-11-18。
+
+v2.5.41 重点落实《MediaFlow电影订阅智能清理需求与交互方案-v2.5.40.md》与《MediaFlow剧集订阅智能清理需求与交互方案-v2.5.39.md》（覆盖 F01–F15 与 T01–T06 全场景）：
+1. **电影与电视剧双轨分离订阅治理引擎（`app/core/subscription_cleaner.py` + `app/services/subscription_service.py`）**：
+   - 彻底解耦电影与电视剧的业务模型，取消电影自动注入季号 `S01` 或强制季集号的缺陷；`identity` 与 `resource_check` 区分媒体类型，电影采用 `media_type="movie"` 及纯片名关键词全网检索；
+   - 突破盲目按年份拦截的盲区（F01、F02、F10）：当年（2026）或上一年电影只要核实已入库完整文件且满足目标版本，可安全进入退订；解耦 `state=P`，待定状态老片无入库证据不误判已完成，避免虚报与误退订；
+   - 院线与家庭发行窗口期绝对保护（F07）：未定档、已定档待上映、院线上映中（数字版待发售）的影片严格锁定保护，清晰展示具体发行阶段与依据；
+   - 目标版本与收藏意图保护（F08、F09、F11）：用户要求高阶规格（如 4K 原盘）但库中只有常规数字版时标记「目标版本仍待满足」继续保留；洗版监控 (`best_version=1`) 与白名单关键字坚决拦截；手动添加老片默认保留用户收藏意图；
+   - 物理安全与写门禁严格隔离（F04）：电影订阅暂不支持联动删除源视频文件，仅支持取消订阅，彻底杜绝误关联 `SeasonRecord` 或误删剧季源目录；活动下载核对季号与任务状态，正常做种任务不阻塞退订；
+2. **TMDB 与 MoviePilot 客户端电影能力全面补齐（`app/clients/tmdb.py` + `app/clients/moviepilot.py`）**：
+   - TMDB 客户端增加 `fetch_movie_detail`、`fetch_movie_release_dates`（按地区与类型分类解析首映、院线、数字版、实体蓝光）、`fetch_movie_aliases` 与 `fetch_search_movie`；
+   - MoviePilot 客户端增加 `check_mediaserver_movie_exists`（实时对接 `POST /api/v1/mediaserver/notexists` 与 `GET /api/v1/mediaserver/exists` 电影存在性校验），增加 `update_subscription_status`（支持 `PUT /api/v1/subscribe/status/{subid}?state={S|R|P}` 状态变更）；
+3. **订阅治理接口与批量交互全面升级（`app/api/moviepilot.py` + `frontend/index.html`）**：
+   - 新增单项状态变更接口 `POST/PUT /api/moviepilot/subscriptions/{sub_id}/status` 与批量变更接口 `POST /api/moviepilot/subscriptions/batch-status`，支持一键置为 `S` 暂停观察或 `R` 恢复追更；
+   - 新增实时查库核验接口 `GET /api/moviepilot/subscriptions/{sub_id}/mediaserver-check`；
+   - 前端智能清理助手升级：移除电影卡片与预案弹窗中的「退订并清理源视频」按钮；恢复「确认执行退订」一键批处理能力，支持真正批量退订计划确认与对账防重；
+   - 新增 `tests/test_v2540_subscription_cleaner.py` 专项验收套件，全套 16 组自动化测试 100% 通过。
 
 v2.5.40 重点落实《MediaFlow异常剧集模块需求与交互方案-v2.5.39.md》第 6.5 节（同 TMDB 多目录实际归并、统一前缀、同名资产保全与 CD2 强制刷新，覆盖 M01–M14 验收场景）：
 1. **同 TMDB 多目录源端实际合并与前缀统一引擎（`app/core/directory_merge.py` + `app/clients/clouddrive2.py` + `app/api/tasks.py` + `frontend/index.html`，覆盖 M01–M14 验收场景）**：

@@ -110,6 +110,16 @@ def _check_mp_configured() -> None:
 class BatchDeleteSubscriptionsRequest(BaseModel):
     sub_ids: list[int]
     titles: list[str] | None = None
+    force: bool = False  # 是否强制跳过保护检查（用于用户明确确认的人工清理）
+
+
+class SubscriptionStatusUpdateRequest(BaseModel):
+    state: str  # "S" (暂停) | "R" (追更) | "P" (待定)
+
+
+class BatchUpdateStatusRequest(BaseModel):
+    sub_ids: list[int]
+    state: str  # "S" | "R" | "P"
 
 
 class SubscriptionCleanPreviewRequest(BaseModel):
@@ -144,7 +154,7 @@ async def list_subscriptions(media_type: str | None = None) -> dict:
                 "lack_episodes": diag.lack_episodes,
                 "state": diag.state,
                 "username": diag.username,
-                "tmdb_id": s.get("tmdbid"),
+                "tmdb_id": s.get("tmdbid") or s.get("tmdb_id"),
                 "poster": s.get("backdrop") or s.get("poster") or "",
                 
                 # 智能清理决策字段
@@ -158,6 +168,9 @@ async def list_subscriptions(media_type: str | None = None) -> dict:
                 "is_protected": diag.is_protected,
                 "is_short_tv": diag.is_short_tv,
                 "is_douban_sync": diag.is_douban_sync,
+                "release_stage": diag.release_stage,
+                "in_library_status": diag.in_library_status,
+                "version_target_satisfied": diag.version_target_satisfied,
             })
 
         # 统计汇总
@@ -177,6 +190,122 @@ async def list_subscriptions(media_type: str | None = None) -> dict:
             "clean_eligible_total": overall["clean_eligible"],
             "subscriptions": items_out,
         }
+    finally:
+        await mp.close()
+
+
+@router.post("/subscriptions/{sub_id}/status", response_model=StatusResponse)
+@router.put("/subscriptions/{sub_id}/status", response_model=StatusResponse)
+async def update_single_subscription_status(
+    sub_id: int,
+    body: SubscriptionStatusUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+) -> StatusResponse:
+    """变更单个订阅状态（如置为 S 暂停观察，或置为 R 恢复追更）。"""
+    _check_mp_configured()
+    mp = MoviePilotClient()
+    from app.models.operation import OperationLog
+    try:
+        res = await mp.update_subscription_status(sub_id, body.state)
+        state_name = "暂停观察 (S)" if body.state == "S" else ("活跃追更 (R)" if body.state == "R" else f"待定 ({body.state})")
+        op_log = OperationLog(
+            action="update_subscription_status",
+            status="completed",
+            detail_json=json.dumps({"sub_id": sub_id, "state": body.state, "state_name": state_name}, ensure_ascii=False),
+        )
+        db.add(op_log)
+        await db.commit()
+        return StatusResponse(ok=True, message=f"已成功将订阅 #{sub_id} 变更为 {state_name}")
+    except Exception as exc:
+        return StatusResponse(ok=False, message=f"变更订阅状态失败: {exc}")
+    finally:
+        await mp.close()
+
+
+@router.post("/subscriptions/batch-status", response_model=StatusResponse)
+async def batch_update_subscription_status(
+    body: BatchUpdateStatusRequest,
+    db: AsyncSession = Depends(get_db),
+) -> StatusResponse:
+    """批量变更订阅状态（如将无源候选批量置为 S 暂停观察）。"""
+    if not body.sub_ids:
+        return StatusResponse(ok=False, message="未选择任何订阅")
+
+    _check_mp_configured()
+    mp = MoviePilotClient()
+    from app.models.operation import OperationLog
+    success_count = 0
+    fail_count = 0
+    errors: list[str] = []
+
+    try:
+        for sid in body.sub_ids:
+            try:
+                await mp.update_subscription_status(sid, body.state)
+                success_count += 1
+            except Exception as e:
+                fail_count += 1
+                errors.append(f"订阅 #{sid}: {e}")
+
+        state_name = "暂停观察 (S)" if body.state == "S" else ("活跃追更 (R)" if body.state == "R" else f"待定 ({body.state})")
+        if success_count > 0:
+            op_log = OperationLog(
+                action="batch_update_subscription_status",
+                status="completed",
+                detail_json=json.dumps({"sub_ids": body.sub_ids, "state": body.state, "success_count": success_count}, ensure_ascii=False),
+            )
+            db.add(op_log)
+            await db.commit()
+
+        msg = f"批量变更状态完成：成功 {success_count} 项设置为 {state_name}"
+        if fail_count > 0:
+            msg += f"，失败 {fail_count} 项"
+        return StatusResponse(ok=success_count > 0, message=msg)
+    finally:
+        await mp.close()
+
+
+@router.get("/subscriptions/{sub_id}/mediaserver-check")
+async def check_subscription_mediaserver(sub_id: int) -> dict:
+    """实时核查单个订阅在媒体服务器中的入库实情（区分电视剧季集映射与电影入库）。"""
+    _check_mp_configured()
+    from app.services.subscription_service import subscription, is_movie_sub
+    mp = MoviePilotClient()
+    try:
+        sub = await subscription(mp, sub_id)
+        if not sub:
+            raise HTTPException(404, "订阅不存在")
+
+        tid = int(sub.get("tmdbid") or sub.get("tmdb_id") or 0)
+        title = str(sub.get("name") or sub.get("title") or "")
+        year = str(sub.get("year") or "")
+        is_movie = is_movie_sub(sub)
+
+        if not tid:
+            return {"ok": False, "in_library": False, "message": "订阅无有效 TMDB ID，无法查库"}
+
+        if is_movie:
+            chk = await mp.check_mediaserver_movie_exists(tid, title=title, year=year)
+            return {
+                "ok": chk.get("checked", False),
+                "media_type": "movie",
+                "in_library": chk.get("exists", False),
+                "details": chk,
+                "message": "媒体服务器中已存在该电影完整条目" if chk.get("exists") else "媒体服务器中未见该电影",
+            }
+        else:
+            chk = await mp.check_mediaserver_exists_remote(tid, title=title, year=year, media_type="电视剧")
+            eps_map = chk.get("season_episodes", {})
+            season = int(sub.get("season") or 1)
+            season_eps = eps_map.get(season, [])
+            return {
+                "ok": chk.get("checked", False),
+                "media_type": "tv",
+                "season": season,
+                "in_library_episodes": season_eps,
+                "count": len(season_eps),
+                "message": f"S{str(season).padStart if False else str(season).zfill(2)} 已入库 {len(season_eps)} 集" if season_eps else "媒体服务器中未见该季入库集数",
+            }
     finally:
         await mp.close()
 
@@ -201,33 +330,33 @@ async def preview_subscription_cleanup(body: SubscriptionCleanPreviewRequest) ->
             # 2. 差异化策略规则匹配
             if body.media_type == "movie":
                 if body.mode == "safe":
-                    # 仅已完成入库电影
-                    mode_desc = "电影安全清理 (仅已入库完成)"
+                    # 仅已完成入库电影 (场景 F01, F02, F10)
+                    mode_desc = "电影安全清理 (仅已核实入库完成)"
                     if diag.clean_rule == "completed":
                         matched.append(diag)
                 elif body.mode == "old_zombie":
-                    # 仅往年老片长期无源死种
+                    # 仅往年老片长期无源死种 (场景 F03, F14)
                     mode_desc = "往年下映老片无源清理"
                     if diag.clean_rule == "zombie":
                         matched.append(diag)
                 elif body.mode == "douban":
                     # 豆瓣榜单推选无源
-                    mode_desc = "豆瓣推选无源清理"
-                    if diag.is_douban_sync and diag.clean_confidence in ("high", "medium"):
+                    mode_desc = "豆瓣推选长期无源清理"
+                    if diag.is_douban_sync and diag.clean_rule in ("douban_stale", "zombie", "completed"):
                         matched.append(diag)
-                else:  # deep 电影全量建议清理
-                    mode_desc = "电影深度清理 (已入库 + 往年死种，严禁清理2026待映)"
-                    if diag.clean_confidence in ("high", "medium"):
+                else:  # deep 电影全量建议清理 (严格排除待映保护与手动收藏意图)
+                    mode_desc = "电影深度清理 (已入库 + 往年死种，锁定待映与收藏)"
+                    if diag.clean_rule in ("completed", "zombie", "douban_stale") and not diag.is_protected:
                         matched.append(diag)
 
             elif body.media_type == "tv":
                 if body.mode == "safe":
-                    # 仅全季完结无缺集
+                    # 仅全季完结无缺集 (场景 T01, T02)
                     mode_desc = "电视剧安全清理 (仅全季已齐完结)"
                     if diag.clean_rule == "completed":
                         matched.append(diag)
                 elif body.mode == "short_tv":
-                    # 仅短剧/微短剧虚标停滞
+                    # 仅短剧/微短剧虚标停滞 (场景 T06)
                     mode_desc = "短剧/微短剧停滞清理"
                     if diag.clean_rule == "short_tv_stalled":
                         matched.append(diag)
@@ -236,9 +365,9 @@ async def preview_subscription_cleanup(body: SubscriptionCleanPreviewRequest) ->
                     mode_desc = "剧集中途断更停滞清理"
                     if diag.clean_rule in ("stalled", "zombie"):
                         matched.append(diag)
-                else:  # deep 电视剧全量建议清理
+                else:  # deep 电视剧全量建议清理 (排除连载中和洗版保护)
                     mode_desc = "电视剧深度清理 (全季完结 + 短剧停滞 + 断更停滞)"
-                    if diag.clean_confidence in ("high", "medium"):
+                    if diag.clean_confidence in ("high", "medium") and not diag.is_protected:
                         matched.append(diag)
 
             else:  # all 全量模式
@@ -248,7 +377,7 @@ async def preview_subscription_cleanup(body: SubscriptionCleanPreviewRequest) ->
                         matched.append(diag)
                 else:
                     mode_desc = "全局深度清理 (含停滞与往年死种，保护新片与连载)"
-                    if diag.clean_confidence in ("high", "medium"):
+                    if diag.clean_confidence in ("high", "medium") and not diag.is_protected:
                         matched.append(diag)
 
         clean_items = [
@@ -265,7 +394,9 @@ async def preview_subscription_cleanup(body: SubscriptionCleanPreviewRequest) ->
                 "clean_reason": m.clean_reason,
                 "is_short_tv": m.is_short_tv,
                 "username": m.username,
-                "progress": f"{m.completed_episodes}/{m.total_episodes or '?'}",
+                "release_stage": m.release_stage,
+                "in_library_status": m.in_library_status,
+                "progress": f"{m.completed_episodes}/{m.total_episodes or '?'}" if m.media_type == "tv" else (m.year or "电影"),
             }
             for m in matched
         ]
@@ -320,7 +451,7 @@ async def batch_delete_subscriptions(
             try:
                 from app.services.subscription_service import subscription
                 current_sub = await subscription(mp, sid)
-                if not current_sub or diagnose_subscription(current_sub).is_protected:
+                if not current_sub or (not getattr(body, "force", False) and diagnose_subscription(current_sub).is_protected):
                     raise ValueError("订阅已不存在或处于保护状态，请重新核查")
                 await mp.delete_subscription(sid)
                 mp_deleted = True

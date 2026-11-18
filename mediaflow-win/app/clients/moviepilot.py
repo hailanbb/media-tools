@@ -112,8 +112,8 @@ class MoviePilotClient:
     async def get_tmdb_episodes(self, tmdb_id: int, season: int) -> list[dict]:
         return await self._get(f"/api/v1/tmdb/{tmdb_id}/{season}")
 
-    async def get_media_info(self, tmdb_id: int) -> dict:
-        return await self._get(f"/api/v1/media/tmdb:{tmdb_id}", type_name="电视剧")
+    async def get_media_info(self, tmdb_id: int, type_name: str = "电视剧") -> dict:
+        return await self._get(f"/api/v1/media/tmdb:{tmdb_id}", type_name=type_name)
 
     # ── 资源搜索 ──────────────────────────────────────────
     @staticmethod
@@ -132,11 +132,15 @@ class MoviePilotClient:
         season: int | None = None,
         title: str | None = None,
         sites: list[int] | tuple[int, ...] | set[int] | str | None = None,
+        media_type: str = "tv",
     ) -> list[dict]:
         sites_param = self._format_sites_param(sites)
+        is_movie = media_type in ("movie", "电影")
+        mtype_str = "电影" if is_movie else "电视剧"
+
         if tmdb_id and tmdb_id > 0:
-            params: dict[str, Any] = {"mtype": "电视剧"}
-            if season is not None:
+            params: dict[str, Any] = {"mtype": mtype_str}
+            if not is_movie and season is not None:
                 params["season"] = season
             if title:
                 params["title"] = title
@@ -145,7 +149,7 @@ class MoviePilotClient:
             res = await self._get(f"/api/v1/search/media/tmdb:{tmdb_id}", **params)
         else:
             keyword = title or ""
-            if season is not None:
+            if not is_movie and season is not None:
                 keyword = f"{keyword} S{str(season).zfill(2)}"
             params = {"keyword": keyword}
             if sites_param:
@@ -180,6 +184,30 @@ class MoviePilotClient:
         if isinstance(res, dict) and res.get("success") is False:
             raise RuntimeError(res.get("message") or "MoviePilot 退订业务处理失败")
         return res
+
+    async def update_subscription_status(self, sub_id: int, state: str) -> dict:
+        """更新订阅状态（R 运行中, S 暂停, P 待定）。"""
+        state_code = str(state).upper().strip()
+        if state_code not in ("R", "S", "P"):
+            raise ValueError(f"未知的订阅状态代码: {state}")
+        try:
+            # 优先调用状态专有端点 PUT /api/v1/subscribe/status/{subid}?state={state}
+            res = await self._client.put(
+                f"{self.origin}/api/v1/subscribe/status/{sub_id}",
+                params={"state": state_code},
+                headers=self._headers(),
+            )
+            res.raise_for_status()
+            return res.json()
+        except Exception:
+            # 降级端点：PUT /api/v1/subscribe/ 提交字典更新
+            res = await self._client.put(
+                f"{self.origin}/api/v1/subscribe/",
+                json={"id": sub_id, "state": state_code},
+                headers=self._headers(),
+            )
+            res.raise_for_status()
+            return res.json()
 
     # ── 转移队列 ──────────────────────────────────────────
     async def get_transfer_queue(self) -> list[dict]:
@@ -492,6 +520,62 @@ class MoviePilotClient:
             return {"checked": True, "season_episodes": season_episodes, "error": ""}
         except Exception as exc:
             return {"checked": False, "season_episodes": {}, "error": f"{type(exc).__name__}: {exc}"}
+
+    async def check_mediaserver_movie_exists(
+        self,
+        tmdb_id: int,
+        title: str = "",
+        year: str = "",
+    ) -> dict[str, Any]:
+        """通过 MoviePilot 实时核查媒体服务器内电影是否存在（适配 notexists 与 exists 语义）。"""
+        if not self.origin:
+            return {"checked": False, "exists": False, "error": "MoviePilot 未配置"}
+        tid = int(tmdb_id)
+        if not title:
+            try:
+                info = await self.get_media_info(tid, type_name="电影")
+                if isinstance(info, dict):
+                    title = str(info.get("title") or info.get("en_title") or "")
+                    if not year:
+                        year = str(info.get("year") or "")[:4]
+            except Exception:
+                pass
+
+        payload: dict[str, Any] = {
+            "tmdb_id": tid,
+            "title": str(title or ""),
+            "type": "电影",
+        }
+        if year and str(year)[:4].isdigit():
+            payload["year"] = str(year)[:4]
+
+        # 1. 优先尝试 POST /api/v1/mediaserver/notexists
+        # MoviePilot v2.15.6 契约：对于电影，若已在媒体库存在，则返回空列表 []；若缺失则返回含未入库项的列表
+        try:
+            res = await self._post("/api/v1/mediaserver/notexists", json=payload)
+            if isinstance(res, dict) and res.get("success") is not False:
+                data = res.get("data") if "data" in res else res
+                if isinstance(data, list):
+                    exists = (len(data) == 0)
+                    return {"checked": True, "exists": exists, "method": "notexists", "error": ""}
+        except Exception:
+            pass
+
+        # 2. 备选尝试 GET /api/v1/mediaserver/exists (本地索引查询)
+        try:
+            params = {"tmdbid": tid, "type": "电影"}
+            res = await self._get("/api/v1/mediaserver/exists", **params)
+            if isinstance(res, dict):
+                data = res.get("data")
+                if isinstance(data, dict) and "item" in data:
+                    exists = bool(data.get("item"))
+                    return {"checked": True, "exists": exists, "method": "exists_index", "error": ""}
+                if isinstance(data, bool):
+                    return {"checked": True, "exists": data, "method": "exists_index", "error": ""}
+        except Exception as exc:
+            return {"checked": False, "exists": False, "error": f"{type(exc).__name__}: {exc}"}
+
+        return {"checked": False, "exists": False, "error": "未取得有效电影入库检验数据"}
 
     # ── 系统 ──────────────────────────────────────────────
     async def get_system_info(self) -> dict:

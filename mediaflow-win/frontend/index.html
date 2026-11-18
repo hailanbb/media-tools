@@ -114,7 +114,7 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.40</span>
+              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.41</span>
             </div>
             <!-- 完善后的命名 -->
             <p class="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">智能媒体库整理与归档工作台</p>
@@ -6243,9 +6243,13 @@
 
             <div class="flex flex-col items-end space-y-2 flex-shrink-0">
               ${confBadge}
-              <button onclick="triggerDeleteSingleSub(${s.id})" class="text-slate-400 hover:text-red-500 text-xs p-1 transition" title="立即退订此条目">
-                <i class="fa-solid fa-trash-can"></i>
-              </button>
+              <div class="flex items-center gap-2 pt-1">
+                ${s.state === 'R' ? `<button onclick="toggleSubStatus(${s.id}, 'S')" class="text-[11px] text-amber-600 hover:text-amber-700 transition" title="置为暂停观察">暂停</button>` : `<button onclick="toggleSubStatus(${s.id}, 'R')" class="text-[11px] text-indigo-600 hover:text-indigo-700 transition" title="恢复活跃追更">恢复</button>`}
+                <button onclick="checkSubMediaServer(${s.id})" class="text-[11px] text-slate-500 hover:text-indigo-600 transition" title="查库核验">查库</button>
+                <button onclick="triggerDeleteSingleSub(${s.id})" class="text-slate-400 hover:text-red-500 text-xs p-1 transition" title="立即退订此条目">
+                  <i class="fa-solid fa-trash-can"></i>
+                </button>
+              </div>
             </div>
           </div>
         `;
@@ -6386,7 +6390,9 @@
           })
         });
         currentPreviewData = res;
-        if (confirmBtn) confirmBtn.style.display = 'none';
+        if (confirmBtn) {
+          confirmBtn.style.display = res.matched_count > 0 ? 'flex' : 'none';
+        }
 
         // 更新卡片上的匹配计数
         const targetCountId = mode === 'safe' ? 'modeCountSafe' : (mode === 'short_tv' ? 'modeCountShortTv' : (mode === 'old_zombie' ? 'modeCountOldZombie' : 'modeCountDeep'));
@@ -6415,27 +6421,37 @@
           return;
         }
 
-        listEl.innerHTML = res.to_clean.map((item, idx) => `
+        listEl.innerHTML = res.to_clean.map((item, idx) => {
+          const isMovie = item.media_type === 'movie';
+          let actionsHtml = `
+            <button onclick="checkSubResource(${item.id})" class="text-indigo-600 hover:underline">核查资源</button>
+            <button onclick="checkSubMediaServer(${item.id})" class="text-slate-600 hover:underline">查库</button>
+            <button onclick="planSubOperation(${item.id}, false)" class="text-amber-600 hover:underline">仅退订</button>
+          `;
+          if (!isMovie) {
+            actionsHtml += `<button onclick="planSubOperation(${item.id}, true)" class="text-rose-600 hover:underline">退订并清理源视频</button>`;
+          }
+
+          return `
           <div class="p-2 rounded-lg bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800 flex items-center justify-between text-xs">
             <div class="flex items-center space-x-2 min-w-0">
               <span class="text-[10px] text-slate-400 w-5">${idx + 1}.</span>
               <span class="font-semibold text-slate-800 dark:text-slate-200 truncate">${item.name} (${item.year || '-'})</span>
-              <span class="text-[10px] px-1.5 py-0.2 rounded ${item.media_type === 'movie' ? 'bg-purple-50 text-purple-600 dark:bg-purple-950/60 dark:text-purple-400' : 'bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400'} font-mono">
-                ${item.media_type === 'movie' ? '电影' : `S${String(item.season || 1).padStart(2, '0')}`}
+              <span class="text-[10px] px-1.5 py-0.2 rounded ${isMovie ? 'bg-purple-50 text-purple-600 dark:bg-purple-950/60 dark:text-purple-400' : 'bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400'} font-mono">
+                ${isMovie ? '电影' : `S${String(item.season || 1).padStart(2, '0')}`}
               </span>
               ${item.is_short_tv ? '<span class="text-[10px] px-1.5 py-0.2 rounded bg-purple-100 dark:bg-purple-900 text-purple-700 dark:text-purple-300 font-mono">短剧</span>' : ''}
             </div>
             <div class="flex items-center space-x-2 flex-shrink-0">
               <span class="text-[10px] text-slate-500 dark:text-slate-400 font-mono truncate max-w-xs">${escapeHtml(item.clean_reason)}</span>
-              <button onclick="checkSubResource(${item.id})" class="text-indigo-600">核查资源</button>
-              <button onclick="planSubOperation(${item.id}, false)" class="text-amber-600">仅退订</button>
-              <button onclick="planSubOperation(${item.id}, true)" class="text-rose-600">退订并清理源视频</button>
+              ${actionsHtml}
               <span class="text-[10px] px-1.5 py-0.5 rounded-full font-bold ${item.clean_confidence === 'high' ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-400' : 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-400'}">
                 待核查
               </span>
             </div>
           </div>
-        `).join('');
+          `;
+        }).join('');
       } catch (e) {
         if (listEl) {
           listEl.innerHTML = `<div class="p-4 text-center text-red-500 text-xs">预审加载失败: ${e.message}</div>`;
@@ -6517,7 +6533,66 @@
       } catch (e) { alert(e.message); }
     }
 
-    function confirmBatchCleanSubs() { alert('请逐条核查资源并选择退订方式'); }
+    async function confirmBatchCleanSubs() {
+      if (!currentPreviewData || !currentPreviewData.to_clean || currentPreviewData.to_clean.length === 0) {
+        alert('当前没有可退订的条目');
+        return;
+      }
+      const count = currentPreviewData.matched_count;
+      const modeName = currentPreviewData.mode_name;
+      const mediaName = currentMediaTab === 'movie' ? '电影' : '电视剧';
+      const promptText = `【${mediaName}批量退订确认】\n模式：${modeName}\n数量：共 ${count} 项\n\n确认退订后，系统将仅在 MoviePilot 中取消上述条目的订阅追更，绝对不会删除已有媒体文件、下载任务或做种任务。\n\n确认立即执行批量退订？`;
+
+      if (!confirm(promptText)) return;
+
+      const confirmBtn = document.getElementById('modalConfirmCleanBtn');
+      const btnText = document.getElementById('modalConfirmBtnText');
+      if (confirmBtn) {
+        confirmBtn.disabled = true;
+        if (btnText) btnText.textContent = `正在执行 (${count}项)...`;
+      }
+
+      try {
+        const subIds = currentPreviewData.to_clean.map(x => x.id);
+        const titles = currentPreviewData.to_clean.map(x => x.name);
+        const res = await api('/api/moviepilot/subscriptions/batch-delete', {
+          method: 'POST',
+          body: JSON.stringify({ sub_ids: subIds, titles: titles, force: false })
+        });
+        alert(res.message || '批量退订完成');
+        closeModal('subCleanModal');
+        await loadSubscriptions();
+      } catch (err) {
+        alert('批量退订执行遇到异常: ' + err.message);
+      } finally {
+        if (confirmBtn) confirmBtn.disabled = false;
+      }
+    }
+
+    async function toggleSubStatus(id, state) {
+      try {
+        const res = await api('/api/moviepilot/subscriptions/' + id + '/status', {
+          method: 'POST',
+          body: JSON.stringify({ state: state })
+        });
+        alert(res.message);
+        await loadSubscriptions();
+      } catch (e) {
+        alert('变更状态失败: ' + e.message);
+      }
+    }
+
+    async function checkSubMediaServer(id) {
+      try {
+        const res = await api('/api/moviepilot/subscriptions/' + id + '/mediaserver-check');
+        const detailStr = res.in_library_episodes && res.in_library_episodes.length
+          ? '\n已入库集数: ' + res.in_library_episodes.join(', ')
+          : '';
+        alert(res.message + detailStr);
+      } catch (e) {
+        alert('查库失败: ' + e.message);
+      }
+    }
 
     async function loadTransferQueue() {
       const container = document.getElementById('transferQueueContainer');
