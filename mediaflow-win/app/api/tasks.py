@@ -187,7 +187,9 @@ def _safe_json(raw: str | None, default: Any) -> Any:
 
 
 async def _serialize_season_record(db: AsyncSession, r: SeasonRecord) -> dict[str, Any]:
+    from app.core.season_classifier import resolve_record_gap_category
     gap_view = await compute_season_gap_fill_view(db, r)
+    gap_cat_info = await resolve_record_gap_category(db, r)
     return {
         "id": r.id,
         "show_name": r.show_name,
@@ -208,6 +210,9 @@ async def _serialize_season_record(db: AsyncSession, r: SeasonRecord) -> dict[st
         "conflict": _safe_json(getattr(r, "conflict_json", None), {}),
         "mapping": _safe_json(getattr(r, "mapping_json", None), {}),
         "gap_fill_state": gap_view,
+        "gap_category": gap_cat_info.get("category") or "pending",
+        "gap_category_source": gap_cat_info.get("source") or "pending",
+        "gap_category_reason": gap_cat_info.get("reason") or "",
         "last_checked_at": r.last_checked_at.isoformat() if getattr(r, "last_checked_at", None) else None,
     }
 

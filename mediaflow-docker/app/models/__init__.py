@@ -2,6 +2,7 @@
 
 from app.models.directory_group import DirectoryGroup
 from app.models.gap_fill import GapFillEpisode, GapFillSeasonRun
+from app.models.gap_fill_site_rule import GapFillSiteRule, GapFillWorkPreference
 from app.models.manual_confirmation import ManualSeasonConfirmation
 from app.models.metadata_cache import MetadataCache
 from app.models.operation import OperationLog
@@ -19,4 +20,6 @@ __all__ = [
     "GapFillEpisode",
     "GapFillSeasonRun",
     "DirectoryGroup",
+    "GapFillSiteRule",
+    "GapFillWorkPreference",
 ]

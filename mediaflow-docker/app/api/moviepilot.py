@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.clients.moviepilot import MoviePilotClient
 from app.config import get_settings
 from app.core.subscription_cleaner import diagnose_subscription, evaluate_subscriptions
+from datetime import datetime, timezone
 import json
 import logging
 import re
@@ -734,6 +735,7 @@ class _GapFillRequest(BaseModel):
     batch_run_id: str | None = None
     selected_episodes: list[int] | None = None
     episodes_by_record: dict[str, list[int]] | None = None
+    confirmed_categories: dict[str, str] | None = None
 
     def get_target_ids(self) -> list[str]:
         return self.season_record_ids or self.record_ids
@@ -758,6 +760,7 @@ async def download_gap_fill(
             batch_run_id=body.batch_run_id,
             selected_episodes=body.selected_episodes,
             episodes_by_record=body.episodes_by_record,
+            confirmed_categories=body.confirmed_categories,
         )
     except Exception as e:
         return {"ok": False, "message": f"补缺推送异常: {str(e)[:200]}", "errors": [str(e)]}
@@ -842,3 +845,108 @@ async def mark_gap_fill_aborted(
     await refresh_task_summary(body.task_id, db)
     await db.commit()
     return {"ok": True, "marked_count": marked, "message": f"已记录 {marked} 季尚未启动（本次未执行）"}
+
+
+# ── 补缺站点管理与动漫/非动漫独立规则 (v2.5.40 规范) ───────────────
+
+class _GapFillSiteRuleSaveRequest(BaseModel):
+    category: str
+    selected_site_ids: list[int | str] = []
+    status: str = "active"
+    expected_version: int | None = None
+
+
+class _GapFillWorkPreferenceRequest(BaseModel):
+    tmdb_id: str | None = None
+    show_name: str = ""
+    category: str
+
+
+@router.get("/gap-fill/sites/catalog")
+async def get_gap_fill_sites_catalog(
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """读取 MoviePilot 站点目录（严格白名单安全脱敏，禁透传 Cookie/Passkey/Token）。"""
+    _check_mp_configured()
+    client = _get_mp_client()
+    try:
+        sites = await client.get_sites(sanitize=True)
+        from app.services.download_service import get_mp_instance_key
+        return {
+            "ok": True,
+            "sites": sites,
+            "instance_key": get_mp_instance_key(client),
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"读取 MoviePilot 站点目录失败: {exc}")
+
+
+@router.get("/gap-fill/sites/rules")
+async def get_gap_fill_site_rules_endpoint(
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """读取动漫与非动漫两套独立补缺站点规则（若未配置则返回初始草稿）。"""
+    _check_mp_configured()
+    client = _get_mp_client()
+    from app.services.download_service import get_gap_fill_site_rules
+    rules = await get_gap_fill_site_rules(db, mp=client)
+    return {"ok": True, **rules}
+
+
+@router.post("/gap-fill/sites/rules")
+async def save_gap_fill_site_rule_endpoint(
+    body: _GapFillSiteRuleSaveRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """保存某类别的补缺站点规则（带乐观锁版本校验）。"""
+    _check_mp_configured()
+    client = _get_mp_client()
+    from app.services.download_service import save_gap_fill_site_rule
+    try:
+        saved = await save_gap_fill_site_rule(
+            db,
+            category=body.category,
+            selected_site_ids=body.selected_site_ids,
+            status=body.status,
+            expected_version=body.expected_version,
+            mp=client,
+        )
+        return {"ok": True, "rule": saved}
+    except RuntimeError as r_err:
+        raise HTTPException(status_code=409, detail=str(r_err))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"保存补缺站点规则失败: {exc}")
+
+
+@router.get("/gap-fill/work-preferences")
+async def get_work_preferences_endpoint(
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """获取所有作品的人工补缺分类偏好设置。"""
+    client = _get_mp_client()
+    from app.services.download_service import get_gap_fill_work_preferences
+    prefs = await get_gap_fill_work_preferences(db, mp=client)
+    return {"ok": True, "preferences": prefs}
+
+
+@router.post("/gap-fill/work-preference")
+async def save_work_preference_endpoint(
+    body: _GapFillWorkPreferenceRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """保存用户对某作品的人工补缺分类偏好（跨初检复用）。"""
+    client = _get_mp_client()
+    from app.services.download_service import save_gap_fill_work_preference
+    try:
+        pref = await save_gap_fill_work_preference(
+            db,
+            tmdb_id=body.tmdb_id,
+            show_name=body.show_name,
+            category=body.category,
+            mp=client,
+        )
+        return {"ok": True, "preference": pref}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"保存作品偏好失败: {exc}")
+

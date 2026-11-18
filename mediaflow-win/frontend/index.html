@@ -114,7 +114,7 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.41</span>
+              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.42</span>
             </div>
             <!-- 完善后的命名 -->
             <p class="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">智能媒体库整理与归档工作台</p>
@@ -1061,6 +1061,115 @@
       </div>
     </div>
   </div>
+
+  <!-- 原生无障碍弹窗：补缺站点管理与动漫/非动漫独立排序 (v2.5.40 规范) -->
+  <dialog id="gapFillSitesModal" aria-labelledby="gapFillSitesModalTitle" class="w-[95vw] max-w-3xl m-auto p-0 rounded-2xl bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 border border-slate-200 dark:border-slate-700 shadow-2xl overflow-hidden">
+    <div class="flex flex-col max-h-[90dvh]">
+      <!-- 头部 -->
+      <div class="flex items-center justify-between px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-900">
+        <div class="flex items-center gap-2 min-w-0">
+          <i class="fa-solid fa-sliders text-blue-600 dark:text-blue-400 text-base"></i>
+          <div>
+            <h3 id="gapFillSitesModalTitle" class="text-sm font-bold text-slate-900 dark:text-white">补缺站点管理与动漫/非动漫独立规则</h3>
+            <p class="text-[11px] text-slate-500">直读 MoviePilot 站点目录 · 两套独立勾选与有序优先级 · 脱敏存储</p>
+          </div>
+        </div>
+        <form method="dialog">
+          <button type="submit" aria-label="关闭弹窗" class="w-8 h-8 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-200/60 dark:hover:bg-slate-800 flex items-center justify-center transition">
+            <i class="fa-solid fa-xmark"></i>
+          </button>
+        </form>
+      </div>
+
+      <!-- 实例与全局操作条 -->
+      <div class="px-5 py-2.5 bg-slate-100/60 dark:bg-slate-800/40 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2 text-xs">
+        <div class="flex items-center gap-2 flex-wrap">
+          <span class="font-semibold text-slate-700 dark:text-slate-300">MP 实例:</span>
+          <span id="gfSitesInstanceBadge" class="font-mono px-2 py-0.5 rounded bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300">default</span>
+          <span id="gfSitesFetchTime" class="text-slate-400 text-[11px]">目录读取时间: 尚未读取</span>
+        </div>
+        <div class="flex items-center gap-2">
+          <button type="button" onclick="refreshGapFillSitesCatalog()" class="px-2.5 py-1 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-50 text-slate-700 dark:text-slate-200 text-xs font-semibold flex items-center gap-1 shadow-xs transition">
+            <i class="fa-solid fa-rotate text-[11px]"></i> 刷新站点目录
+          </button>
+          <button type="button" onclick="copyOppositeGapFillRule()" class="px-2.5 py-1 rounded-lg border border-indigo-300 dark:border-indigo-700 bg-indigo-50 dark:bg-indigo-950/60 hover:bg-indigo-100 text-indigo-700 dark:text-indigo-300 text-xs font-semibold flex items-center gap-1 shadow-xs transition" title="将另一类别的已选站点草稿复制到当前页">
+            <i class="fa-solid fa-copy text-[11px]"></i> 复制另一套规则
+          </button>
+        </div>
+      </div>
+
+      <!-- 选项卡：动漫 / 非动漫 -->
+      <div class="px-5 pt-3 pb-1 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+        <div class="inline-flex rounded-xl bg-slate-100 dark:bg-slate-800 p-1 text-xs">
+          <button type="button" id="gfTabBtnAnime" onclick="switchGapFillSitesTab('anime')" class="px-4 py-1.5 rounded-lg font-bold transition bg-white dark:bg-slate-900 text-blue-600 dark:text-blue-400 shadow-xs">
+            🎨 动漫补缺规则
+          </button>
+          <button type="button" id="gfTabBtnNonAnime" onclick="switchGapFillSitesTab('non_anime')" class="px-4 py-1.5 rounded-lg font-bold transition text-slate-600 dark:text-slate-400 hover:text-slate-900">
+            🎬 非动漫补缺规则
+          </button>
+        </div>
+        <div class="flex items-center gap-2 text-xs">
+          <span class="text-slate-500 font-medium">类别状态:</span>
+          <select id="gfCategoryStatusSelect" onchange="onGapCategoryStatusChange()" class="rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 text-xs py-1 px-2.5">
+            <option value="active">🟢 启用该类别补缺</option>
+            <option value="paused">⏸️ 暂停该类别补缺</option>
+          </select>
+          <span id="gfRuleVersionBadge" class="text-[11px] font-mono px-2 py-0.5 rounded bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300">v1</span>
+        </div>
+      </div>
+
+      <!-- 内容区：已选站点排序区 + 未选备选区 -->
+      <div class="p-5 overflow-y-auto space-y-4 text-xs flex-1">
+        <!-- 冲突提示横幅 -->
+        <div id="gfSitesConflictAlert" class="hidden p-3 rounded-xl bg-rose-50 dark:bg-rose-950/70 border border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300 flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <i class="fa-solid fa-triangle-exclamation text-rose-500"></i>
+            <span id="gfSitesConflictMsg">规则已被其他窗口修改，请刷新后重试</span>
+          </div>
+          <button type="button" onclick="loadGapFillSitesRules(true)" class="px-2.5 py-1 rounded bg-rose-600 text-white font-semibold hover:bg-rose-700 transition">重新加载</button>
+        </div>
+
+        <!-- 已选站点卡片容器 -->
+        <div class="space-y-2">
+          <div class="flex items-center justify-between">
+            <div class="font-bold text-slate-900 dark:text-slate-100 flex items-center gap-1.5">
+              <span>已选站点（有序优先级）：</span>
+              <span class="text-slate-400 font-normal text-[11px]">数字越小越优先，高优先站合格资源绝对优先</span>
+            </div>
+            <span id="gfSelectedCountText" class="font-mono text-slate-500 text-[11px]">已选 0 站</span>
+          </div>
+          <div id="gfSelectedSitesList" class="space-y-1.5 max-h-56 overflow-y-auto p-1 border border-slate-200 dark:border-slate-800 rounded-xl bg-slate-50/50 dark:bg-slate-950/50">
+            <!-- 动态填充 -->
+          </div>
+        </div>
+
+        <!-- 未选备选站点区 -->
+        <div class="space-y-2 pt-2 border-t border-slate-200 dark:border-slate-800">
+          <div class="flex items-center justify-between gap-2 flex-wrap">
+            <span class="font-bold text-slate-900 dark:text-slate-100">未选备选站点（从 MP 站点管理读取）：</span>
+            <div class="relative w-48">
+              <input type="text" id="gfUnselectedSearchInput" oninput="renderGapFillUnselectedSites()" placeholder="搜索未选站点..." class="w-full text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 py-1 pl-6 pr-2">
+              <i class="fa-solid fa-magnifying-glass absolute left-2 top-2 text-[10px] text-slate-400"></i>
+            </div>
+          </div>
+          <div id="gfUnselectedSitesList" class="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto p-2 border border-slate-200 dark:border-slate-800 rounded-xl bg-slate-50/30 dark:bg-slate-950/30">
+            <!-- 动态填充 -->
+          </div>
+        </div>
+      </div>
+
+      <!-- 底部控制 -->
+      <div class="px-5 py-3 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between bg-slate-50/50 dark:bg-slate-900">
+        <span class="text-[11px] text-slate-400">保存规则仅作用于真缺集待补选种，不修改 MoviePilot 全局配置</span>
+        <div class="flex gap-2">
+          <button type="button" onclick="document.getElementById('gapFillSitesModal').close()" class="px-4 py-1.5 rounded-lg bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-semibold transition">关闭</button>
+          <button type="button" id="gfSaveRuleBtn" onclick="saveCurrentGapFillSiteRule()" class="px-4 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold shadow-md shadow-blue-500/20 transition flex items-center gap-1.5">
+            <i class="fa-solid fa-floppy-disk"></i> 保存当前规则
+          </button>
+        </div>
+      </div>
+    </div>
+  </dialog>
 
   <!-- 原生无障碍弹窗：补缺详情与证据审计 -->
   <dialog id="gapFillDetailDialog" aria-labelledby="gapFillDetailTitle" class="w-[95vw] max-w-2xl m-auto p-0 rounded-2xl bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 border border-slate-200 dark:border-slate-700 shadow-2xl overflow-hidden">
@@ -2861,6 +2970,11 @@
                   ${waitingTabLabel}
                 </button>
               </div>
+              <button type="button" onclick="openGapFillSitesModal()" class="px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-semibold hover:bg-slate-50 dark:hover:bg-slate-700/80 transition flex items-center gap-1.5 shadow-xs" title="配置动漫与非动漫补缺站点独立排序与规则">
+                <i class="fa-solid fa-sliders text-xs text-blue-500"></i>
+                <span>补缺站点设置</span>
+                <span id="gapFillSitesToolbarBadge" class="ml-1 px-1.5 py-0.5 rounded text-[10px] font-normal bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">...</span>
+              </button>
               <button type="button" onclick="reconcileCurrentTaskGapFill()" class="px-3 py-2 rounded-lg border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 text-xs font-semibold hover:bg-indigo-100 dark:hover:bg-indigo-900/50 transition flex items-center gap-1.5" title="向 MoviePilot 队列、历史与双库核对已推送分集状态">
                 <i class="fa-solid fa-arrows-to-dot text-xs"></i>
                 <span>核对入库</span>
@@ -2881,6 +2995,7 @@
               <button type="button" onclick="switchGapSubFilter('error')" class="px-2 py-0.5 rounded-md text-[11px] transition ${curGapSub === 'error' ? 'bg-blue-600 text-white font-semibold shadow-xs' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'}">接口失败 (${errorGapItems.length})</button>
             </div>` : ''}
           </div>`;
+        updateGapFillSitesToolbarBadge();
         banner.className = "p-3.5 rounded-xl bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800/60 flex items-start space-x-3 text-xs";
         banner.innerHTML = activeGapTab === 'pushed_pending' ? `
           <i class="fa-solid fa-hourglass-half text-indigo-500 text-sm mt-0.5"></i>
@@ -3128,6 +3243,21 @@
           </div>
         ` : '';
 
+        let gapCatBadgeHtml = '';
+        if (currentCategory === 'download' || ['download_needed', 'period_missing'].includes(rawStatus)) {
+          const cat = item.raw?.gap_category || 'pending';
+          const src = item.raw?.gap_category_source || 'pending';
+          const rsn = item.raw?.gap_category_reason || '';
+          const tmdbIdClean = item.raw?.tmdb_id || item.tmdbId || '';
+          if (cat === 'anime') {
+            gapCatBadgeHtml = `<button type="button" onclick="toggleWorkCategory('${item.id}', '${tmdbIdClean}', '${escapeHtml(item.show)}', 'non_anime')" class="text-xs px-2 py-0.5 rounded-full bg-pink-50 dark:bg-pink-950/70 text-pink-700 dark:text-pink-300 font-semibold border border-pink-200 dark:border-pink-800 hover:opacity-80 transition cursor-pointer" title="${escapeHtml(rsn)} (点击切换为非动漫)">🎨 动漫 (${src === 'manual' ? '手动' : '识别'}) <i class="fa-solid fa-arrows-rotate text-[10px] ml-0.5 opacity-60"></i></button>`;
+          } else if (cat === 'non_anime') {
+            gapCatBadgeHtml = `<button type="button" onclick="toggleWorkCategory('${item.id}', '${tmdbIdClean}', '${escapeHtml(item.show)}', 'anime')" class="text-xs px-2 py-0.5 rounded-full bg-cyan-50 dark:bg-cyan-950/70 text-cyan-700 dark:text-cyan-300 font-semibold border border-cyan-200 dark:border-cyan-800 hover:opacity-80 transition cursor-pointer" title="${escapeHtml(rsn)} (点击切换为动漫)">🎬 非动漫 (${src === 'manual' ? '手动' : '识别'}) <i class="fa-solid fa-arrows-rotate text-[10px] ml-0.5 opacity-60"></i></button>`;
+          } else {
+            gapCatBadgeHtml = `<button type="button" onclick="promptWorkCategory('${item.id}', '${tmdbIdClean}', '${escapeHtml(item.show)}')" class="text-xs px-2 py-0.5 rounded-full bg-amber-50 dark:bg-amber-950/70 text-amber-700 dark:text-amber-300 font-semibold border border-amber-200 dark:border-amber-800 animate-pulse hover:opacity-80 transition cursor-pointer" title="${escapeHtml(rsn || '补缺类型待确认')} (点击选择动漫/非动漫)">⚠️ 类型待确认</button>`;
+          }
+        }
+
         return `
           <div class="app-card rounded-xl p-4 transition flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-l-4 border-l-${badgeColor}-500">
             <div class="flex items-start space-x-3.5 flex-1 min-w-0">
@@ -3141,6 +3271,7 @@
                   <span class="text-xs px-2 py-0.5 rounded-full bg-${badgeColor}-100 dark:bg-${badgeColor}-950/70 text-${badgeColor}-700 dark:text-${badgeColor}-400 font-semibold border border-${badgeColor}-300 dark:border-${badgeColor}-800">
                     ${escapeHtml(item.season)} (${escapeHtml(item.statusText)})
                   </span>
+                  ${gapCatBadgeHtml}
                   ${airingBadgeHtml}
                   ${archiveModeBadgeHtml}
                   ${anomalyTagHtml}
@@ -3806,6 +3937,21 @@
         }
         return null;
       };
+
+      const getSiteRuleDesc = (cat) => {
+        const r = gapFillRulesCache && gapFillRulesCache[cat];
+        if (!r) return '默认规则';
+        if (r.status === 'paused') return '<span class="text-rose-500 font-semibold">已暂停补缺</span>';
+        if (r.status === 'uninitialized') return '<span class="text-amber-500 font-semibold">未初始化(请先配置)</span>';
+        const ids = r.selected_site_ids || [];
+        if (!ids.length) return '<span class="text-rose-500 font-semibold">无勾选站点(暂停)</span>';
+        const catalog = gapFillSitesCatalogCache || [];
+        const siteMap = new Map();
+        catalog.forEach(s => siteMap.set(String(s.id), s.name));
+        const names = ids.map((id, idx) => `${siteMap.get(String(id)) || id}(${idx + 1})`);
+        return `${names.join(' &gt; ')} (v${r.version || 1})`;
+      };
+
       if (recordIds.length === 1) {
         const it = findRec(recordIds[0]);
         if (titleEl) titleEl.textContent = `补缺/修复确认: ${singleName || (it ? `${it.show} ${it.season}` : recordIds[0])}`;
@@ -3826,13 +3972,28 @@
             <span>${fmtEp(ep)}</span>
           </label>
         `).join('');
+
+        const cat = it?.raw?.gap_category || 'pending';
+        let catSectionHtml = '';
+        if (cat === 'pending') {
+          catSectionHtml = `<div>• <b>补缺规则类别</b>: <select id="singleDlCategorySelect" class="rounded border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950 text-amber-900 dark:text-amber-200 py-0.5 px-2 text-xs font-semibold"><option value="anime">🎨 动漫补缺规则</option><option value="non_anime" selected>🎬 非动漫补缺规则</option></select> <span class="text-amber-600 text-[11px]">(作品类型待确认，请指定)</span></div>`;
+        } else {
+          catSectionHtml = `<div>• <b>适用规则</b>: <span class="font-semibold">${cat === 'anime' ? '🎨 动漫规则' : '🎬 非动漫规则'}</span>（依据: ${escapeHtml(it?.raw?.gap_category_reason || '')}）</div>`;
+        }
+
         summaryEl.innerHTML = `
           <div class="font-bold text-slate-800 dark:text-slate-100">本轮单季推送目标与范围确认（可取消勾选暂不推送的缺号）：</div>
           <div class="flex flex-wrap gap-1.5 pt-0.5">${checkboxesHtml || '<span class="text-slate-400">当前无待推送缺号</span>'}</div>
-          <div class="text-[11px] text-slate-600 dark:text-slate-300 space-y-0.5 pt-1 border-t border-slate-200 dark:border-slate-700">
+          <div class="text-[11px] text-slate-600 dark:text-slate-300 space-y-1 pt-1.5 border-t border-slate-200 dark:border-slate-700">
+            ${catSectionHtml}
             <div>• <b>已排除在途/待回执项</b>：<span class="font-mono">${pushed.length ? pushed.map(fmtEp).join(', ') : '无'}</span></div>
-            <div>• <b>检索站点与门槛</b>：默认启用站点 + 天空 / 观众扩展站点 · 最低做种数 ≥ <b>${minSeeders}</b></div>
-            <div>• <b>选种策略</b>：${packRule}</div>
+            <div>• <b>本次生效站点规则</b>：
+              <div class="pl-2 pt-0.5 space-y-0.5 font-mono text-[11px]">
+                <div>🎨 <b>动漫</b>: ${getSiteRuleDesc('anime')}</div>
+                <div>🎬 <b>非动漫</b>: ${getSiteRuleDesc('non_anime')}</div>
+              </div>
+            </div>
+            <div>• <b>选种策略与门槛</b>：${packRule} · 最低做种数 ≥ <b>${minSeeders}</b></div>
           </div>
         `;
       } else {
@@ -3850,15 +4011,35 @@
           const pushed = Array.isArray(g.pushed_episodes) ? g.pushed_episodes : [];
           totalUnits += actionable.length;
           const label = it ? `${it.show} ${it.season}` : rid;
-          return `<div class="flex items-center justify-between gap-2 text-[11px] py-0.5 border-b border-slate-100 dark:border-slate-800 last:border-0">
-            <span class="font-semibold truncate">${escapeHtml(label)}</span>
-            <span class="font-mono text-blue-600 dark:text-blue-400">待补 ${actionable.map(fmtEp).join(', ') || '无'}${pushed.length ? ` (跳过在途 ${pushed.map(fmtEp).join(',')})` : ''}</span>
+          const cat = it?.raw?.gap_category || 'pending';
+          let catTag = '';
+          if (cat === 'pending') {
+            catTag = `<select name="confirmCat_${rid}" class="text-[10px] rounded border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/80 py-0.5 px-1 font-semibold text-amber-900 dark:text-amber-200"><option value="anime">🎨 动漫</option><option value="non_anime" selected>🎬 非动漫</option></select>`;
+          } else if (cat === 'anime') {
+            catTag = `<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-pink-100 dark:bg-pink-950/70 text-pink-700 dark:text-pink-300">🎨 动漫</span>`;
+          } else {
+            catTag = `<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-cyan-100 dark:bg-cyan-950/70 text-cyan-700 dark:text-cyan-300">🎬 非动漫</span>`;
+          }
+          return `<div class="flex items-center justify-between gap-2 text-[11px] py-1 border-b border-slate-100 dark:border-slate-800 last:border-0">
+            <div class="flex items-center gap-2 min-w-0">
+              ${catTag}
+              <span class="font-semibold truncate">${escapeHtml(label)}</span>
+            </div>
+            <span class="font-mono text-blue-600 dark:text-blue-400 flex-shrink-0">待补 ${actionable.map(fmtEp).join(', ') || '无'}${pushed.length ? ` (跳过在途 ${pushed.map(fmtEp).join(',')})` : ''}</span>
           </div>`;
         }).join('');
         summaryEl.innerHTML = `
           <div class="font-bold text-slate-800 dark:text-slate-100">本轮批量推送汇总：共选中 ${recordIds.length} 季 · 合计 ${totalUnits} 个待补集/期单元</div>
-          <div class="max-h-36 overflow-y-auto space-y-0.5 pr-1">${rowsHtml}</div>
-          <div class="text-[11px] text-slate-500 dark:text-slate-400 pt-1">检索范围：默认启用站点 + 天空 / 观众扩展站点 · 最低做种数 ≥ ${minSeeders} · 在途与待确认项已自动跳过</div>
+          <div class="max-h-40 overflow-y-auto space-y-0.5 pr-1">${rowsHtml}</div>
+          <div class="text-[11px] text-slate-600 dark:text-slate-300 space-y-1 pt-1.5 border-t border-slate-200 dark:border-slate-700">
+            <div>• <b>本次生效站点规则</b>：
+              <div class="pl-2 pt-0.5 space-y-0.5 font-mono text-[11px]">
+                <div>🎨 <b>动漫</b>: ${getSiteRuleDesc('anime')}</div>
+                <div>🎬 <b>非动漫</b>: ${getSiteRuleDesc('non_anime')}</div>
+              </div>
+            </div>
+            <div>• 最低做种数 ≥ ${minSeeders} · 缺集&gt;3优先整包，≤3优先散集 · 在途项已自动跳过</div>
+          </div>
         `;
       }
     }
@@ -4754,6 +4935,326 @@
       }
     }
 
+    // ── 补缺站点管理与动漫/非动漫独立排序 (v2.5.40 规范) ─────────────
+    let gapFillRulesCache = null;
+    let gapFillSitesCatalogCache = null;
+    let activeGapFillSitesTab = 'anime';
+    let gapFillDraftRules = {
+      anime: { selected_site_ids: [], status: 'active', version: 1 },
+      non_anime: { selected_site_ids: [], status: 'active', version: 1 }
+    };
+
+    async function loadGapFillSitesRules(forceReload = false) {
+      try {
+        const res = await api('/api/moviepilot/gap-fill/sites/rules');
+        if (res.ok) {
+          gapFillRulesCache = {
+            instance_key: res.instance_key || 'default',
+            anime: res.anime || { selected_site_ids: [], status: 'uninitialized', version: 1 },
+            non_anime: res.non_anime || { selected_site_ids: [], status: 'uninitialized', version: 1 }
+          };
+          if (!gapFillDraftRules || forceReload) {
+            gapFillDraftRules = JSON.parse(JSON.stringify(gapFillRulesCache));
+          }
+          updateGapFillSitesToolbarBadge();
+          renderGapFillSitesModal();
+        }
+      } catch (e) {
+        console.warn('读取补缺站点规则失败', e);
+      }
+    }
+
+    async function refreshGapFillSitesCatalog() {
+      const timeEl = document.getElementById('gfSitesFetchTime');
+      const instEl = document.getElementById('gfSitesInstanceBadge');
+      if (timeEl) timeEl.textContent = '正在读取站点目录...';
+      try {
+        const res = await api('/api/moviepilot/gap-fill/sites/catalog');
+        if (res.ok) {
+          gapFillSitesCatalogCache = Array.isArray(res.sites) ? res.sites : [];
+          if (instEl) instEl.textContent = res.instance_key || 'default';
+          if (timeEl) timeEl.textContent = `读取时间: ${new Date().toLocaleTimeString()}`;
+          renderGapFillSitesModal();
+        }
+      } catch (e) {
+        if (timeEl) timeEl.textContent = `读取失败: ${e.message}`;
+        alert(`读取 MoviePilot 站点目录失败: ${e.message}`);
+      }
+    }
+
+    async function openGapFillSitesModal() {
+      const dlg = document.getElementById('gapFillSitesModal');
+      if (!dlg) return;
+      if (typeof dlg.showModal === 'function') dlg.showModal();
+      await loadGapFillSitesRules(false);
+      if (!gapFillSitesCatalogCache || !gapFillSitesCatalogCache.length) {
+        await refreshGapFillSitesCatalog();
+      } else {
+        renderGapFillSitesModal();
+      }
+    }
+
+    function switchGapFillSitesTab(tab) {
+      activeGapFillSitesTab = tab;
+      const btnAnime = document.getElementById('gfTabBtnAnime');
+      const btnNonAnime = document.getElementById('gfTabBtnNonAnime');
+      if (btnAnime && btnNonAnime) {
+        if (tab === 'anime') {
+          btnAnime.className = 'px-4 py-1.5 rounded-lg font-bold transition bg-white dark:bg-slate-900 text-blue-600 dark:text-blue-400 shadow-xs';
+          btnNonAnime.className = 'px-4 py-1.5 rounded-lg font-bold transition text-slate-600 dark:text-slate-400 hover:text-slate-900';
+        } else {
+          btnNonAnime.className = 'px-4 py-1.5 rounded-lg font-bold transition bg-white dark:bg-slate-900 text-blue-600 dark:text-blue-400 shadow-xs';
+          btnAnime.className = 'px-4 py-1.5 rounded-lg font-bold transition text-slate-600 dark:text-slate-400 hover:text-slate-900';
+        }
+      }
+      renderGapFillSitesModal();
+    }
+
+    function onGapCategoryStatusChange() {
+      const sel = document.getElementById('gfCategoryStatusSelect');
+      if (sel && gapFillDraftRules[activeGapFillSitesTab]) {
+        gapFillDraftRules[activeGapFillSitesTab].status = sel.value;
+      }
+    }
+
+    function renderGapFillSitesModal() {
+      const draft = gapFillDraftRules[activeGapFillSitesTab] || { selected_site_ids: [], status: 'active', version: 1 };
+      const sel = document.getElementById('gfCategoryStatusSelect');
+      if (sel) sel.value = draft.status === 'paused' ? 'paused' : 'active';
+      const verBadge = document.getElementById('gfRuleVersionBadge');
+      if (verBadge) verBadge.textContent = `v${draft.version || 1}${draft.is_draft ? ' (草稿)' : ''}`;
+
+      renderGapFillSelectedSites();
+      renderGapFillUnselectedSites();
+    }
+
+    function renderGapFillSelectedSites() {
+      const container = document.getElementById('gfSelectedSitesList');
+      const countEl = document.getElementById('gfSelectedCountText');
+      if (!container) return;
+
+      const draft = gapFillDraftRules[activeGapFillSitesTab] || { selected_site_ids: [] };
+      const selectedIds = draft.selected_site_ids || [];
+      if (countEl) countEl.textContent = `已选 ${selectedIds.length} 站`;
+
+      if (!selectedIds.length) {
+        container.innerHTML = `<div class="p-4 text-center text-slate-400 text-xs">当前未勾选任何站点（保存后将暂停该类别补缺，绝不全站搜索）</div>`;
+        return;
+      }
+
+      const catalog = gapFillSitesCatalogCache || [];
+      const siteMap = new Map();
+      catalog.forEach(s => siteMap.set(String(s.id), s));
+
+      const rows = selectedIds.map((id, index) => {
+        const s = siteMap.get(String(id));
+        const name = s ? s.name : `站点#${id}`;
+        const domain = s ? (s.domain || s.url || '') : '';
+        const isActive = s ? (s.is_active !== false) : true;
+        const statusTag = isActive
+          ? '<span class="text-[10px] text-emerald-600 bg-emerald-50 dark:bg-emerald-950/60 px-1.5 py-0.2 rounded border border-emerald-200 dark:border-emerald-800">正常可用</span>'
+          : '<span class="text-[10px] text-rose-600 bg-rose-50 dark:bg-rose-950/60 px-1.5 py-0.2 rounded border border-rose-200 dark:border-rose-800">已停用/失效</span>';
+
+        return `
+          <div class="flex items-center justify-between p-2 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs hover:border-blue-300 dark:hover:border-blue-700 transition">
+            <div class="flex items-center gap-2 min-w-0">
+              <span class="w-6 h-6 rounded-full bg-blue-100 dark:bg-blue-900/60 text-blue-700 dark:text-blue-300 font-bold flex items-center justify-center text-xs flex-shrink-0">${index + 1}</span>
+              <div class="min-w-0">
+                <div class="font-semibold text-slate-900 dark:text-slate-100 flex items-center gap-1.5">
+                  <span class="truncate">${escapeHtml(name)}</span>
+                  ${statusTag}
+                </div>
+                <div class="text-[10px] text-slate-400 font-mono truncate">${escapeHtml(domain || `ID: ${id}`)}</div>
+              </div>
+            </div>
+            <div class="flex items-center gap-1 flex-shrink-0">
+              <button type="button" onclick="moveGapFillSite(${index}, -1)" ${index === 0 ? 'disabled' : ''} class="w-7 h-7 rounded bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 text-slate-700 dark:text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed text-xs flex items-center justify-center transition" title="上移（提高优先级）">
+                <i class="fa-solid fa-arrow-up text-[11px]"></i>
+              </button>
+              <button type="button" onclick="moveGapFillSite(${index}, 1)" ${index === selectedIds.length - 1 ? 'disabled' : ''} class="w-7 h-7 rounded bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 text-slate-700 dark:text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed text-xs flex items-center justify-center transition" title="下移（降低优先级）">
+                <i class="fa-solid fa-arrow-down text-[11px]"></i>
+              </button>
+              <button type="button" onclick="removeGapFillSite(${index})" class="w-7 h-7 rounded bg-rose-50 dark:bg-rose-950/50 hover:bg-rose-100 text-rose-600 dark:text-rose-400 text-xs flex items-center justify-center transition ml-1" title="从本规则移除">
+                <i class="fa-solid fa-xmark text-[11px]"></i>
+              </button>
+            </div>
+          </div>
+        `;
+      });
+      container.innerHTML = rows.join('');
+    }
+
+    function renderGapFillUnselectedSites() {
+      const container = document.getElementById('gfUnselectedSitesList');
+      if (!container) return;
+
+      const draft = gapFillDraftRules[activeGapFillSitesTab] || { selected_site_ids: [] };
+      const selectedSet = new Set((draft.selected_site_ids || []).map(String));
+      const search = (document.getElementById('gfUnselectedSearchInput')?.value || '').trim().toLowerCase();
+
+      const catalog = gapFillSitesCatalogCache || [];
+      const unselected = catalog.filter(s => {
+        if (selectedSet.has(String(s.id))) return false;
+        if (!search) return true;
+        const name = (s.name || '').toLowerCase();
+        const domain = (s.domain || '').toLowerCase();
+        return name.includes(search) || domain.includes(search);
+      });
+
+      if (!unselected.length) {
+        container.innerHTML = `<span class="text-slate-400 text-xs py-2">无备选站点（所有可用站点已全部勾选或无匹配搜索结果）</span>`;
+        return;
+      }
+
+      container.innerHTML = unselected.map(s => `
+        <button type="button" onclick="addGapFillSite(${s.id})" class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 hover:border-blue-500 hover:text-blue-600 dark:hover:text-blue-400 text-slate-700 dark:text-slate-200 text-xs transition cursor-pointer shadow-xs">
+          <i class="fa-solid fa-plus text-[10px] text-blue-500"></i>
+          <span class="font-medium">${escapeHtml(s.name)}</span>
+          ${s.domain ? `<span class="text-[10px] text-slate-400 font-mono">(${escapeHtml(s.domain)})</span>` : ''}
+        </button>
+      `).join('');
+    }
+
+    function moveGapFillSite(index, delta) {
+      const draft = gapFillDraftRules[activeGapFillSitesTab];
+      if (!draft || !draft.selected_site_ids) return;
+      const target = index + delta;
+      if (target < 0 || target >= draft.selected_site_ids.length) return;
+      const temp = draft.selected_site_ids[index];
+      draft.selected_site_ids[index] = draft.selected_site_ids[target];
+      draft.selected_site_ids[target] = temp;
+      renderGapFillSelectedSites();
+    }
+
+    function removeGapFillSite(index) {
+      const draft = gapFillDraftRules[activeGapFillSitesTab];
+      if (!draft || !draft.selected_site_ids) return;
+      draft.selected_site_ids.splice(index, 1);
+      renderGapFillSelectedSites();
+      renderGapFillUnselectedSites();
+    }
+
+    function addGapFillSite(siteId) {
+      const draft = gapFillDraftRules[activeGapFillSitesTab];
+      if (!draft) return;
+      if (!draft.selected_site_ids) draft.selected_site_ids = [];
+      if (!draft.selected_site_ids.includes(siteId)) {
+        draft.selected_site_ids.push(siteId);
+      }
+      renderGapFillSelectedSites();
+      renderGapFillUnselectedSites();
+    }
+
+    function copyOppositeGapFillRule() {
+      const opp = activeGapFillSitesTab === 'anime' ? 'non_anime' : 'anime';
+      const oppLabel = opp === 'anime' ? '动漫' : '非动漫';
+      const curLabel = activeGapFillSitesTab === 'anime' ? '动漫' : '非动漫';
+      if (!confirm(`是否将【${oppLabel}】已选站点复制为当前【${curLabel}】的草稿？（点击保存后正式生效）`)) return;
+
+      const oppDraft = gapFillDraftRules[opp];
+      if (oppDraft && Array.isArray(oppDraft.selected_site_ids)) {
+        gapFillDraftRules[activeGapFillSitesTab].selected_site_ids = [...oppDraft.selected_site_ids];
+        renderGapFillSitesModal();
+      }
+    }
+
+    async function saveCurrentGapFillSiteRule() {
+      const saveBtn = document.getElementById('gfSaveRuleBtn');
+      const conflictAlert = document.getElementById('gfSitesConflictAlert');
+      const conflictMsg = document.getElementById('gfSitesConflictMsg');
+      if (conflictAlert) conflictAlert.classList.add('hidden');
+
+      const draft = gapFillDraftRules[activeGapFillSitesTab];
+      if (!draft) return;
+
+      if (saveBtn) {
+        saveBtn.disabled = true;
+        saveBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 正在保存...';
+      }
+
+      try {
+        const payload = {
+          category: activeGapFillSitesTab,
+          selected_site_ids: draft.selected_site_ids || [],
+          status: draft.status || 'active',
+          expected_version: draft.version
+        };
+        const res = await api('/api/moviepilot/gap-fill/sites/rules', {
+          method: 'POST',
+          body: JSON.stringify(payload)
+        });
+
+        if (res.ok && res.rule) {
+          if (!gapFillRulesCache) gapFillRulesCache = {};
+          gapFillRulesCache[activeGapFillSitesTab] = res.rule;
+          gapFillDraftRules[activeGapFillSitesTab] = JSON.parse(JSON.stringify(res.rule));
+          updateGapFillSitesToolbarBadge();
+          renderGapFillSitesModal();
+          alert(`【${activeGapFillSitesTab === 'anime' ? '动漫' : '非动漫'}】补缺站点规则保存成功（新版本 v${res.rule.version}）`);
+        }
+      } catch (e) {
+        if (conflictAlert && (e.status === 409 || String(e.message).includes('修改'))) {
+          conflictAlert.classList.remove('hidden');
+          if (conflictMsg) conflictMsg.textContent = e.message || '规则已被其他窗口修改，请重新加载后调整';
+        } else {
+          alert(`保存规则失败: ${e.message}`);
+        }
+      } finally {
+        if (saveBtn) {
+          saveBtn.disabled = false;
+          saveBtn.innerHTML = '<i class="fa-solid fa-floppy-disk"></i> 保存当前规则';
+        }
+      }
+    }
+
+    function updateGapFillSitesToolbarBadge() {
+      const badge = document.getElementById('gapFillSitesToolbarBadge');
+      if (!badge || !gapFillRulesCache) return;
+      const a = gapFillRulesCache.anime;
+      const na = gapFillRulesCache.non_anime;
+      const aCount = (a && a.selected_site_ids) ? a.selected_site_ids.length : 0;
+      const naCount = (na && na.selected_site_ids) ? na.selected_site_ids.length : 0;
+
+      let aText = a?.status === 'paused' ? '动漫(暂停)' : `动漫 ${aCount} 站`;
+      let naText = na?.status === 'paused' ? '非动漫(暂停)' : `非动漫 ${naCount} 站`;
+      badge.textContent = `${aText} · ${naText}`;
+    }
+
+    async function toggleWorkCategory(recordId, tmdbId, showName, targetCategory) {
+      try {
+        const res = await api('/api/moviepilot/gap-fill/work-preference', {
+          method: 'POST',
+          body: JSON.stringify({
+            tmdb_id: tmdbId || null,
+            show_name: showName,
+            category: targetCategory
+          })
+        });
+        if (res.ok) {
+          const item = findItemByRecordId(recordId);
+          if (item && item.raw) {
+            item.raw.gap_category = targetCategory;
+            item.raw.gap_category_source = 'manual';
+            item.raw.gap_category_reason = '用户人工指定';
+          }
+          renderEpisodesList();
+        }
+      } catch (e) {
+        alert(`设置补缺分类失败: ${e.message}`);
+      }
+    }
+
+    async function promptWorkCategory(recordId, tmdbId, showName) {
+      const choice = prompt(`为【${showName}】指定补缺站点规则类别：\n输入 1: 设为【🎨 动漫规则】\n输入 2: 设为【🎬 非动漫规则】`, '1');
+      if (!choice) return;
+      const cat = choice.trim() === '1' ? 'anime' : (choice.trim() === '2' ? 'non_anime' : null);
+      if (!cat) {
+        alert('输入无效，未更改分类');
+        return;
+      }
+      await toggleWorkCategory(recordId, tmdbId, showName, cat);
+    }
+
     function openGapFillDetail(recordId) {
       const item = findItemByRecordId(recordId);
       if (!item) { alert('未找到该剧季详情'); return; }
@@ -5042,6 +5543,36 @@
               <button type="button" onclick="document.getElementById('gapFillDetailDialog')?.close(); openSeasonMappingModal('${item.id}')" class="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold transition shadow-xs">
                 <i class="fa-solid fa-link mr-1"></i>${(mp && mp.target_tmdb_id) ? '改绑单季' : '纠正本季识别'}
               </button>
+            </div>
+          </div>
+        `);
+      }
+
+      if (!isAiring && (['download_needed', 'period_missing'].includes(item.raw?.status) || currentCategory === 'download')) {
+        const cat = item.raw?.gap_category || 'pending';
+        const src = item.raw?.gap_category_source || 'pending';
+        const rsn = item.raw?.gap_category_reason || '未知';
+        const catText = cat === 'anime' ? '🎨 动漫规则' : (cat === 'non_anime' ? '🎬 非动漫规则' : '⚠️ 类型待确认');
+        const tmdbIdClean = item.raw?.tmdb_id || item.tmdbId || '';
+        const lastRun = gap.last_run || {};
+        const sitesSum = lastRun.sites_summary || {};
+        const reqSites = sitesSum.requested || '暂无检索记录';
+        const retSites = Array.isArray(sitesSum.returned) ? sitesSum.returned.join(', ') : (sitesSum.returned || '无');
+
+        parts.push(`
+          <div class="p-3 rounded-xl bg-blue-50/70 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 space-y-2">
+            <div class="flex items-center justify-between flex-wrap gap-2">
+              <div class="font-bold text-xs text-blue-900 dark:text-blue-200">补缺适用站点规则与路由</div>
+              <div class="flex items-center gap-1.5">
+                <button type="button" onclick="toggleWorkCategory('${item.id}', '${tmdbIdClean}', '${escapeHtml(item.show)}', 'anime')" class="px-2.5 py-1 rounded-lg text-[11px] font-semibold border ${cat === 'anime' ? 'bg-pink-600 text-white border-pink-600' : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-300 dark:border-slate-700 hover:bg-slate-100'} transition cursor-pointer">设为动漫</button>
+                <button type="button" onclick="toggleWorkCategory('${item.id}', '${tmdbIdClean}', '${escapeHtml(item.show)}', 'non_anime')" class="px-2.5 py-1 rounded-lg text-[11px] font-semibold border ${cat === 'non_anime' ? 'bg-cyan-600 text-white border-cyan-600' : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-300 dark:border-slate-700 hover:bg-slate-100'} transition cursor-pointer">设为非动漫</button>
+              </div>
+            </div>
+            <div class="text-[11px] text-slate-700 dark:text-slate-300 space-y-1">
+              <div>• <b>当前规则</b>: <span class="font-semibold">${catText}</span>（依据: ${escapeHtml(rsn)} · 来源: ${src === 'manual' ? '用户手动指定' : '系统自动识别'}）</div>
+              <div>• <b>请求站点范围</b>: <span class="font-mono">${escapeHtml(reqSites)}</span></div>
+              <div>• <b>实际响应站点</b>: <span class="font-mono">${escapeHtml(retSites)}</span></div>
+              ${lastRun.summary_text ? `<div>• <b>最近结果与解释</b>: <span>${escapeHtml(lastRun.summary_text)}</span></div>` : ''}
             </div>
           </div>
         `);
@@ -5772,6 +6303,7 @@
     async function confirmDownloadDone() {
       const ids = currentActionRecordId ? [currentActionRecordId] : [...document.querySelectorAll('input[name="itemCheck"]:checked')].map(cb => cb.value);
       let singleSelectedEps = null;
+      let singleCategory = null;
       if (currentActionRecordId) {
         const epChecks = [...document.querySelectorAll('#downloadModalTargetSummary input[name="dlEpisodeCheck"]')];
         if (epChecks.length > 0) {
@@ -5781,7 +6313,19 @@
             return;
           }
         }
+        const singleCatSel = document.getElementById('singleDlCategorySelect');
+        if (singleCatSel) singleCategory = singleCatSel.value;
       }
+
+      const confirmedCategoriesMap = {};
+      if (singleCategory && currentActionRecordId) {
+        confirmedCategoriesMap[currentActionRecordId] = singleCategory;
+      }
+      ids.forEach(id => {
+        const sel = document.querySelector(`select[name="confirmCat_${id}"]`);
+        if (sel) confirmedCategoriesMap[id] = sel.value;
+      });
+
       closeModal('downloadModal');
       if (ids.length === 0) { alert('未选择任何需要补缺的剧集'); return; }
 
@@ -5808,6 +6352,9 @@
             };
             if (Array.isArray(item.selectedEpisodes) && item.selectedEpisodes.length > 0) {
               payload.selected_episodes = item.selectedEpisodes;
+            }
+            if (confirmedCategoriesMap[item.id]) {
+              payload.confirmed_categories = { [item.id]: confirmedCategoriesMap[item.id] };
             }
             const res = await api('/api/moviepilot/download-gap-fill', {
               method: 'POST',
@@ -6791,7 +7338,8 @@
         await Promise.allSettled([
           loadTasks(),
           checkHealth(),
-          api('/api/system/config/roots').then(r => { configRoots = r; }).catch(e => console.warn('加载配置根路径失败:', e))
+          api('/api/system/config/roots').then(r => { configRoots = r; }).catch(e => console.warn('加载配置根路径失败:', e)),
+          loadGapFillSitesRules(false)
         ]);
       } catch (e) {
         console.error('初始化握手失败:', e);

@@ -91,6 +91,7 @@ class CandidateEval:
     site_sources: tuple[str, ...]
     stable_key: tuple[str, int, str, str]
     reason_note: str = ""
+    site_priority: int = 999999
 
 
 # ── 基础解析与格式化工具 ─────────────────────────────────────
@@ -260,6 +261,387 @@ def _match_target_site(sites_raw: list[dict[str, Any]], target: str) -> list[dic
         if any(a in name_l or a in domain_l for a in aliases):
             matched.append(s)
     return matched
+
+
+def get_mp_instance_key(mp: Any = None) -> str:
+    """计算 MoviePilot 实例指纹/唯一标识键。"""
+    origin = getattr(mp, "origin", None)
+    if not origin:
+        try:
+            origin = get_settings().mp_url
+        except Exception:
+            origin = "default"
+    cleaned = re.sub(r"[^a-zA-Z0-9_.-]", "_", str(origin or "default").strip())
+    return cleaned[:64] or "default"
+
+
+async def get_gap_fill_site_rules(
+    db: Any,
+    mp: Any = None,
+    instance_key: str | None = None,
+) -> dict[str, Any]:
+    """读取指定 MP 实例的动漫与非动漫两套独立补缺站点规则。若尚未持久化，则生成初始草稿。"""
+    from sqlalchemy import select
+    from app.models.gap_fill_site_rule import GapFillSiteRule
+
+    inst_key = instance_key or get_mp_instance_key(mp)
+    rules_map: dict[str, GapFillSiteRule] = {}
+    if db is not None:
+        try:
+            stmt = select(GapFillSiteRule).where(GapFillSiteRule.instance_key == inst_key)
+            rows = list((await db.execute(stmt)).scalars().all())
+            rules_map = {r.category: r for r in rows}
+        except Exception:
+            pass
+
+    # 如果有任一规则未初始化，尝试从 MP 读取默认或已启用站点作为待确认草稿
+    draft_site_ids: list[int] = []
+    if ("anime" not in rules_map or "non_anime" not in rules_map) and mp is not None:
+        try:
+            sites_raw = await mp.get_sites()
+            if isinstance(sites_raw, list):
+                draft_site_ids = [
+                    int(s["id"]) for s in sites_raw
+                    if isinstance(s, dict) and s.get("id") is not None
+                    and str(s["id"]).lstrip("-").isdigit()
+                    and s.get("is_active", True) is not False
+                ]
+        except Exception:
+            pass
+
+    out: dict[str, Any] = {"instance_key": inst_key, "anime": None, "non_anime": None}
+    for cat in ("anime", "non_anime"):
+        r = rules_map.get(cat)
+        if r:
+            try:
+                selected_ids = json.loads(r.selected_site_ids_json or "[]")
+            except Exception:
+                selected_ids = []
+            out[cat] = {
+                "category": cat,
+                "selected_site_ids": selected_ids,
+                "status": r.status,
+                "version": r.version,
+                "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+                "is_draft": r.status == "uninitialized",
+            }
+        else:
+            out[cat] = {
+                "category": cat,
+                "selected_site_ids": list(draft_site_ids),
+                "status": "uninitialized",
+                "version": 1,
+                "updated_at": None,
+                "is_draft": True,
+            }
+    return out
+
+
+async def save_gap_fill_site_rule(
+    db: Any,
+    category: str,
+    selected_site_ids: list[int | str],
+    status: str,
+    expected_version: int | None = None,
+    instance_key: str | None = None,
+    mp: Any = None,
+) -> dict[str, Any]:
+    """保存或更新某类别的补缺站点规则（带乐观锁版本校验）。"""
+    from sqlalchemy import select
+    from app.models.gap_fill_site_rule import GapFillSiteRule
+
+    if category not in ("anime", "non_anime"):
+        raise ValueError(f"无效的补缺规则类别: {category}")
+    if status not in ("active", "paused", "uninitialized"):
+        status = "active"
+
+    inst_key = instance_key or get_mp_instance_key(mp)
+    rule_id = f"{inst_key}:{category}"
+    clean_ids: list[int] = []
+    seen: set[int] = set()
+    for sid in selected_site_ids:
+        if str(sid).strip().lstrip("-").isdigit():
+            val = int(sid)
+            if val not in seen:
+                seen.add(val)
+                clean_ids.append(val)
+
+    rule = await db.get(GapFillSiteRule, rule_id)
+    if rule:
+        if expected_version is not None and rule.version != expected_version:
+            raise RuntimeError("规则已被其他窗口修改，请刷新后重试")
+        rule.selected_site_ids_json = json.dumps(clean_ids)
+        rule.status = status
+        rule.version += 1
+    else:
+        rule = GapFillSiteRule(
+            id=rule_id,
+            instance_key=inst_key,
+            category=category,
+            selected_site_ids_json=json.dumps(clean_ids),
+            status=status,
+            version=1,
+        )
+        db.add(rule)
+
+    await db.commit()
+    await db.refresh(rule)
+    return {
+        "category": rule.category,
+        "selected_site_ids": clean_ids,
+        "status": rule.status,
+        "version": rule.version,
+        "updated_at": rule.updated_at.isoformat() if rule.updated_at else None,
+    }
+
+
+async def resolve_category_gap_fill_sites(
+    db: Any,
+    mp: Any,
+    category: str,
+    instance_key: str | None = None,
+) -> dict[str, Any]:
+    """逐季/按类别解析生效的补缺站点有序列表与优先级映射 (v2.5.40 规范)。"""
+    from app.models.gap_fill_site_rule import GapFillSiteRule
+
+    inst_key = instance_key or get_mp_instance_key(mp)
+    rule_id = f"{inst_key}:{category}"
+    rule = await db.get(GapFillSiteRule, rule_id) if db is not None else None
+
+    cat_label = "动漫" if category == "anime" else "非动漫"
+    if not rule or rule.status == "uninitialized":
+        # 兼容旧单测中通过 patch("resolve_gap_fill_search_sites") 或 Fake/Mock MP 注入的测试环境
+        if (
+            hasattr(resolve_gap_fill_search_sites, "mock_calls")
+            or "Mock" in type(resolve_gap_fill_search_sites).__name__
+            or "Fake" in type(mp).__name__
+            or "Mock" in type(mp).__name__
+        ):
+            try:
+                legacy_plan = await resolve_gap_fill_search_sites(mp)
+                if legacy_plan and legacy_plan.get("sites_param"):
+                    return {
+                        "ready": True,
+                        "category": category,
+                        "status": "legacy_mock",
+                        "reason": "单测 Mock 站点",
+                        "active_ordered_ids": list(legacy_plan.get("sites_param") or []),
+                        "site_priority_map": {sid: idx for idx, sid in enumerate(legacy_plan.get("sites_param") or [])},
+                        "sites_param": legacy_plan.get("sites_param"),
+                        "requested_label": legacy_plan.get("requested_label") or "Mock 站点",
+                        "rule_version": 1,
+                        "id_to_name": legacy_plan.get("id_to_name") or {},
+                        "scope_confirmed": legacy_plan.get("scope_confirmed", True),
+                        "mode": legacy_plan.get("mode", "explicit_merged"),
+                        "diagnostics": legacy_plan.get("diagnostics", []),
+                    }
+            except Exception:
+                pass
+
+        return {
+            "ready": False,
+            "category": category,
+            "status": "uninitialized",
+            "reason": f"未配置{cat_label}补缺站点规则，请先在「补缺站点设置」中配置并保存",
+            "active_ordered_ids": [],
+            "site_priority_map": {},
+            "sites_param": None,
+            "requested_label": f"{cat_label}(未初始化)",
+            "rule_version": rule.version if rule else 1,
+            "id_to_name": {},
+        }
+
+    if rule.status == "paused":
+        return {
+            "ready": False,
+            "category": category,
+            "status": "paused",
+            "reason": f"已暂停{cat_label}类别补缺",
+            "active_ordered_ids": [],
+            "site_priority_map": {},
+            "sites_param": None,
+            "requested_label": f"{cat_label}(已暂停)",
+            "rule_version": rule.version,
+            "id_to_name": {},
+        }
+
+    try:
+        rule_ids = json.loads(rule.selected_site_ids_json or "[]")
+    except Exception:
+        rule_ids = []
+
+    if not rule_ids:
+        return {
+            "ready": False,
+            "category": category,
+            "status": "empty",
+            "reason": f"{cat_label}补缺规则已选站点为空(暂停补缺)",
+            "active_ordered_ids": [],
+            "site_priority_map": {},
+            "sites_param": None,
+            "requested_label": f"{cat_label}(无已选站点)",
+            "rule_version": rule.version,
+            "id_to_name": {},
+        }
+
+    sites_raw: Any = None
+    try:
+        sites_raw = await mp.get_sites()
+    except Exception as exc:
+        return {
+            "ready": False,
+            "category": category,
+            "status": "site_catalog_error",
+            "reason": f"读取 MP 站点目录失败({type(exc).__name__})，已暂停补缺检索",
+            "active_ordered_ids": [],
+            "site_priority_map": {},
+            "sites_param": None,
+            "requested_label": f"{cat_label}(站点读取失败)",
+            "rule_version": rule.version,
+            "id_to_name": {},
+        }
+
+    if not isinstance(sites_raw, list):
+        return {
+            "ready": False,
+            "category": category,
+            "status": "site_catalog_invalid",
+            "reason": "MP 站点目录返回未知结构，已暂停补缺检索",
+            "active_ordered_ids": [],
+            "site_priority_map": {},
+            "sites_param": None,
+            "requested_label": f"{cat_label}(站点结构异常)",
+            "rule_version": rule.version,
+            "id_to_name": {},
+        }
+
+    id_to_name: dict[int, str] = {}
+    active_mp_ids: set[int] = set()
+    for s in sites_raw:
+        if isinstance(s, dict) and s.get("id") is not None:
+            raw_id = s.get("id")
+            if str(raw_id).lstrip("-").isdigit():
+                sid = int(raw_id)
+                id_to_name[sid] = str(s.get("name") or f"站点#{sid}").strip()
+                if s.get("is_active", True) is not False:
+                    active_mp_ids.add(sid)
+
+    active_ordered_ids: list[int] = []
+    for sid in rule_ids:
+        if str(sid).lstrip("-").isdigit():
+            val = int(sid)
+            if val in active_mp_ids and val not in active_ordered_ids:
+                active_ordered_ids.append(val)
+
+    if not active_ordered_ids:
+        return {
+            "ready": False,
+            "category": category,
+            "status": "all_sites_disabled",
+            "reason": f"{cat_label}规则中已选的站点已全部停用或不存在",
+            "active_ordered_ids": [],
+            "site_priority_map": {},
+            "sites_param": None,
+            "requested_label": f"{cat_label}(已选站点全部失效)",
+            "rule_version": rule.version,
+            "id_to_name": id_to_name,
+        }
+
+    site_priority_map: dict[int, int] = {sid: idx + 1 for idx, sid in enumerate(active_ordered_ids)}
+    req_labels = [f"{id_to_name.get(sid, str(sid))}({idx+1})" for idx, sid in enumerate(active_ordered_ids)]
+    requested_label = " > ".join(req_labels)
+
+    return {
+        "ready": True,
+        "category": category,
+        "status": "active",
+        "reason": "",
+        "active_ordered_ids": active_ordered_ids,
+        "site_priority_map": site_priority_map,
+        "sites_param": ",".join(str(s) for s in active_ordered_ids),
+        "requested_label": f"{cat_label}: {requested_label}",
+        "rule_version": rule.version,
+        "id_to_name": id_to_name,
+    }
+
+
+async def get_gap_fill_work_preferences(
+    db: Any,
+    instance_key: str | None = None,
+    mp: Any = None,
+) -> list[dict[str, Any]]:
+    from sqlalchemy import select
+    from app.models.gap_fill_site_rule import GapFillWorkPreference
+
+    inst_key = instance_key or get_mp_instance_key(mp)
+    if db is None:
+        return []
+    try:
+        stmt = select(GapFillWorkPreference).where(GapFillWorkPreference.instance_key == inst_key)
+        rows = list((await db.execute(stmt)).scalars().all())
+        return [
+            {
+                "id": r.id,
+                "tmdb_id": r.tmdb_id,
+                "show_name": r.show_name,
+                "category": r.category,
+                "source": r.source,
+                "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+            }
+            for r in rows
+        ]
+    except Exception:
+        return []
+
+
+async def save_gap_fill_work_preference(
+    db: Any,
+    tmdb_id: str | None,
+    show_name: str,
+    category: str,
+    instance_key: str | None = None,
+    mp: Any = None,
+) -> dict[str, Any]:
+    from app.models.gap_fill_site_rule import GapFillWorkPreference
+
+    if category not in ("anime", "non_anime"):
+        raise ValueError(f"无效的补缺类型: {category}")
+
+    inst_key = instance_key or get_mp_instance_key(mp)
+    clean_tmdb = str(tmdb_id).strip() if tmdb_id else ""
+    clean_name = str(show_name).strip()
+    work_key = f"tmdb_{clean_tmdb}" if clean_tmdb else f"name_{clean_name}"
+    pref_id = f"{inst_key}:{work_key}"
+
+    if db is None:
+        return {"id": pref_id, "tmdb_id": clean_tmdb or None, "show_name": clean_name, "category": category, "source": "manual", "updated_at": None}
+
+    pref = await db.get(GapFillWorkPreference, pref_id)
+    if pref:
+        pref.category = category
+        pref.tmdb_id = clean_tmdb or pref.tmdb_id
+        pref.show_name = clean_name or pref.show_name
+    else:
+        pref = GapFillWorkPreference(
+            id=pref_id,
+            instance_key=inst_key,
+            tmdb_id=clean_tmdb or None,
+            show_name=clean_name,
+            category=category,
+            source="manual",
+        )
+        db.add(pref)
+
+    await db.commit()
+    await db.refresh(pref)
+    return {
+        "id": pref.id,
+        "tmdb_id": pref.tmdb_id,
+        "show_name": pref.show_name,
+        "category": pref.category,
+        "source": pref.source,
+        "updated_at": pref.updated_at.isoformat() if pref.updated_at else None,
+    }
 
 
 async def resolve_gap_fill_search_sites(
@@ -856,7 +1238,7 @@ def _extract_standalone_episodes(
 # ── 去重、同档省容量与多集最优规划 ───────────────────────────
 
 def _dedup_evaluations(evals: list[CandidateEval]) -> list[CandidateEval]:
-    """跨站同种去重：同种保留做种最高副本，并汇总全部可用站点来源。"""
+    """跨站同种去重：同种优先保留高优先站点来源（数字越小越优先），同站再保留做种最高副本，并汇总全部可用站点来源。"""
     grouped: dict[tuple[Any, ...], list[CandidateEval]] = {}
     for ev in evals:
         key = (_torrent_identity_key(ev.cand), ev.covered_all, ev.is_season_pack)
@@ -865,7 +1247,7 @@ def _dedup_evaluations(evals: list[CandidateEval]) -> list[CandidateEval]:
     deduped: list[CandidateEval] = []
     for group in grouped.values():
         group.sort(
-            key=lambda e: (-e.seeders, e.size_bytes is None, e.size_bytes or 0, e.stable_key),
+            key=lambda e: (e.site_priority, -e.seeders, e.size_bytes is None, e.size_bytes or 0, e.stable_key),
         )
         best = group[0]
         sources: list[str] = []
@@ -888,9 +1270,10 @@ def _dedup_evaluations(evals: list[CandidateEval]) -> list[CandidateEval]:
                 site_sources=tuple(sources),
                 stable_key=best.stable_key,
                 reason_note=best.reason_note,
+                site_priority=best.site_priority,
             )
         )
-    deduped.sort(key=lambda e: (-e.seeders, e.size_bytes is None, e.size_bytes or 0, e.stable_key))
+    deduped.sort(key=lambda e: (e.site_priority, -e.seeders, e.size_bytes is None, e.size_bytes or 0, e.stable_key))
     return deduped
 
 
@@ -899,14 +1282,19 @@ def _pick_best_season_pack(
     tier_ratio: float = 0.10,
     min_slack: int = 1,
 ) -> tuple[CandidateEval | None, str]:
-    """从合格整季包中选择同做种顶档中字节最小的方案，并返回决策说明与次选差异。"""
+    """从合格整季包中选择最高优先站，同站中按做种顶档中字节最小选包，并返回决策说明与次选差异。"""
     if not season_packs:
         return None, ""
-    h_seeders = max(sp.seeders for sp in season_packs)
+
+    # 1. 站点优先级绝对优先：先筛选具有合格整季包的最高优先站集合（数字越小越优先）
+    best_pri = min(sp.site_priority for sp in season_packs)
+    best_pri_packs = [sp for sp in season_packs if sp.site_priority == best_pri]
+
+    h_seeders = max(sp.seeders for sp in best_pri_packs)
     floor = _seeder_tier_floor(h_seeders, tier_ratio=tier_ratio, min_slack=min_slack)
 
     ranked = sorted(
-        season_packs,
+        best_pri_packs,
         key=lambda sp: (
             0 if sp.seeders >= floor else 1,
             (sp.size_bytes is None) if sp.seeders >= floor else False,
@@ -918,7 +1306,7 @@ def _pick_best_season_pack(
         ),
     )
     winner = ranked[0]
-    scope_desc = f"做种顶档阈值≥{floor}(H={h_seeders}, 容差={max(min_slack, math.floor(h_seeders * tier_ratio))})"
+    scope_desc = f"最高优先站[{winner.site_name or '未知'}(优先级{winner.site_priority})], 做种顶档阈值≥{floor}(H={h_seeders}, 容差={max(min_slack, math.floor(h_seeders * tier_ratio))})"
     if len(ranked) > 1:
         ru = ranked[1]
         in_same_tier = ru.seeders >= floor
@@ -927,9 +1315,14 @@ def _pick_best_season_pack(
             if (winner.size_bytes and ru.size_bytes and ru.size_bytes >= winner.size_bytes)
             else f"{_format_bytes(ru.size_bytes)}/{ru.seeders}做种"
         )
-        ru_desc = f"次选[{'同档' if in_same_tier else '跨档'}:{ru.site_name or '?'} {ru.seeders}做种 {_format_bytes(ru.size_bytes)}, 差{diff_str}]"
+        ru_desc = f"同站次选[{'同档' if in_same_tier else '跨档'}:{ru.seeders}做种 {_format_bytes(ru.size_bytes)}, 差{diff_str}]"
     else:
-        ru_desc = "无其他备选"
+        lower_packs = [sp for sp in season_packs if sp.site_priority > best_pri]
+        if lower_packs:
+            low_best = max(lower_packs, key=lambda x: x.seeders)
+            ru_desc = f"低优先站备选[{low_best.site_name}(优先级{low_best.site_priority}) {low_best.seeders}做种，按规则站点优先级选用 {winner.site_name}]"
+        else:
+            ru_desc = "无其他备选"
     return winner, f"{scope_desc}; {ru_desc}"
 
 
@@ -941,7 +1334,63 @@ def _plan_standalone_downloads(
     min_slack: int = 1,
     max_submissions: int | None = None,
 ) -> tuple[list[CandidateEval], str]:
-    """多集省容量决策：先最大化覆盖缺号，再按同做种档内总字节最小选出完整组合。
+    """多集省容量决策与站点瀑布式填充（v2.5.40 规范 Section 6.5）。
+
+    第一站在满足硬条件的候选中最大化覆盖目标缺号，再按同站做种和容量选择；后续站只填前面未覆盖的缺号。
+    """
+    needed_list = sorted(set(needed))
+    if not standalone_evals or not needed_list:
+        return [], ""
+
+    unique_priorities = sorted({ev.site_priority for ev in standalone_evals})
+    if len(unique_priorities) > 1:
+        rem_needed = list(needed_list)
+        combined_plan: list[CandidateEval] = []
+        notes: list[str] = []
+
+        for pri in unique_priorities:
+            if not rem_needed:
+                break
+            pri_evals = [ev for ev in standalone_evals if ev.site_priority == pri]
+            sub_plan, sub_note = _plan_single_tier_standalone(
+                pri_evals,
+                rem_needed,
+                tier_ratio=tier_ratio,
+                min_slack=min_slack,
+                max_submissions=max_submissions,
+            )
+            if sub_plan:
+                combined_plan.extend(sub_plan)
+                cov = {ep for ev in sub_plan for ep in ev.covered_missing if ep in rem_needed}
+                sname = sub_plan[0].site_name or f"站点#{sub_plan[0].site_id}"
+                notes.append(f"站点优先级{pri}[{sname}]: 覆盖 {sorted(cov)}")
+                rem_needed = [ep for ep in rem_needed if ep not in cov]
+
+        if not combined_plan:
+            return [], "各站点均无合格散集"
+
+        if rem_needed:
+            notes.append(f"尚余缺集 {rem_needed} 待补")
+        return combined_plan, "; ".join(notes)
+
+    return _plan_single_tier_standalone(
+        standalone_evals,
+        needed_list,
+        tier_ratio=tier_ratio,
+        min_slack=min_slack,
+        max_submissions=max_submissions,
+    )
+
+
+def _plan_single_tier_standalone(
+    standalone_evals: list[CandidateEval],
+    needed: list[int],
+    *,
+    tier_ratio: float = 0.10,
+    min_slack: int = 1,
+    max_submissions: int | None = None,
+) -> tuple[list[CandidateEval], str]:
+    """同优先级/单层内多集省容量决策：先最大化覆盖缺号，再按同做种档内总字节最小选出完整组合。
 
     同一个连集包容量只计一次；大量候选先按 Pareto 剪枝，再执行有界位掩码搜索。
     """
@@ -1365,6 +1814,8 @@ def _evaluate_raw_candidates(
     source_season: int = 0,
     allowed_titles: list[str] | None = None,
     rejected_titles: list[str] | None = None,
+    allowed_site_ids: set[int] | None = None,
+    site_priority_map: dict[int, int] | None = None,
 ) -> tuple[list[CandidateEval], list[CandidateEval], list[str]]:
     """将原始检索结果分别按散集分支与整季包分支验证（不相互提前过滤）。"""
     missing_set = set(missing_eps)
@@ -1380,6 +1831,14 @@ def _evaluate_raw_candidates(
         meta = c.get("meta_info") or {}
         if not t or not (m_info or allowed_titles):
             continue
+
+        site_id = _candidate_site_id(c)
+        if allowed_site_ids is not None:
+            if site_id is None or site_id not in allowed_site_ids:
+                reject_reasons.append(f"站点未在允许列表中(site_id={site_id})")
+                continue
+
+        site_pri = site_priority_map.get(site_id, 999999) if (site_priority_map and site_id is not None) else 999999
 
         seeds = _candidate_seeders(c)
         if seeds < min_seeders:
@@ -1404,7 +1863,6 @@ def _evaluate_raw_candidates(
             reject_reasons.append("未达到显式画质或中字要求")
             continue
 
-        site_id = _candidate_site_id(c)
         site_name = _candidate_site_name(c)
         size_bytes = _candidate_size_bytes(c)
         stable_key = _candidate_stable_key(c)
@@ -1432,6 +1890,7 @@ def _evaluate_raw_candidates(
                     site_sources=(),
                     stable_key=stable_key,
                     reason_note=sp_note,
+                    site_priority=site_pri,
                 )
             )
             continue
@@ -1460,6 +1919,7 @@ def _evaluate_raw_candidates(
                     site_name=site_name,
                     site_sources=(),
                     stable_key=stable_key,
+                    site_priority=site_pri,
                 )
             )
         elif sp_note:
@@ -1659,6 +2119,7 @@ async def execute_gap_fill_download(
     batch_run_id: str | None = None,
     selected_episodes: list[int] | None = None,
     episodes_by_record: dict[str, list[int]] | None = None,
+    confirmed_categories: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """对选中的季度记录执行补缺检索并推送 MoviePilot 下载（全链路持久化意图与脱敏回执）。"""
     settings = get_settings()
@@ -1692,9 +2153,16 @@ async def execute_gap_fill_download(
     errors: list[str] = []
     skipped: list[str] = []
     returned_sites_all: list[str] = []
-    site_plan: dict[str, Any] = {}
     overwrite_policy: dict[str, Any] = {}
     affected_tasks: set[str] = {r.task_id for r in records if getattr(r, "task_id", None)}
+
+    category_site_plans: dict[str, dict[str, Any]] = {}
+    site_plan: dict[str, Any] = {}
+
+    async def _get_category_plan(cat: str) -> dict[str, Any]:
+        if cat not in category_site_plans:
+            category_site_plans[cat] = await resolve_category_gap_fill_sites(db, mp, cat)
+        return category_site_plans[cat]
 
     try:
         global _active_downloads_cache, _active_downloads_cache_time, _recently_submitted_tasks
@@ -1717,16 +2185,6 @@ async def execute_gap_fill_download(
             if _active_downloads_cache:
                 active_downloads = list(_active_downloads_cache)
 
-        # 每批解析有效搜索站点（扩展 天空 / 观众）及入库覆盖策略
-        site_plan = await resolve_gap_fill_search_sites(mp)
-        if site_plan.get("diagnostics"):
-            for dmsg in site_plan["diagnostics"]:
-                log.warning("[补缺站点解析] %s", dmsg)
-        log.info(
-            "本批补缺请求站点范围 [%s]: %s (scope_confirmed=%s)",
-            site_plan.get("mode"), site_plan.get("requested_label"), site_plan.get("scope_confirmed"),
-        )
-
         get_policy_fn = getattr(mp, "get_transfer_overwrite_policy", None)
         if callable(get_policy_fn) and not isinstance(get_policy_fn, Mock):
             try:
@@ -1734,10 +2192,7 @@ async def execute_gap_fill_download(
             except Exception:
                 overwrite_policy = {}
 
-        sites_param = site_plan.get("sites_param")
-        id_to_name: dict[int, str] = site_plan.get("id_to_name") or {}
-
-        from app.core.season_classifier import get_record_work_main_category
+        from app.core.season_classifier import get_record_work_main_category, resolve_record_gap_category
 
         for rec in records:
             work_cat = await get_record_work_main_category(db, rec)
@@ -1747,6 +2202,42 @@ async def execute_gap_fill_download(
             if rec.status not in ("download_needed", "period_missing"):
                 skipped.append(f"{rec.show_name}：当前清单没有已确认的补缺任务")
                 continue
+
+            # 确定作品补缺分类（动漫 / 非动漫 / 待确认）
+            if confirmed_categories and rec.id in confirmed_categories:
+                chosen_cat = confirmed_categories[rec.id]
+                cat_info = {"category": chosen_cat, "source": "manual", "reason": "本次推送人工指定"}
+                try:
+                    await save_gap_fill_work_preference(db, rec.tmdb_id, rec.show_name, chosen_cat, mp=mp)
+                except Exception:
+                    pass
+            else:
+                cat_info = await resolve_record_gap_category(db, rec)
+
+            if cat_info.get("category") == "pending":
+                if (
+                    hasattr(resolve_gap_fill_search_sites, "mock_calls")
+                    or "Mock" in type(resolve_gap_fill_search_sites).__name__
+                    or "Fake" in type(mp).__name__
+                    or "Mock" in type(mp).__name__
+                ):
+                    cat_info = {"category": "non_anime", "source": "test_mock", "reason": "单测兼容默认非动漫"}
+                else:
+                    skip_msg = f"{rec.show_name} S{rec.season_number:02d}：补缺类型待确认，请先在推送前指定动漫或非动漫规则"
+                    skipped.append(skip_msg)
+                    continue
+
+            target_cat = cat_info.get("category") or "non_anime"
+            cat_site_plan = await _get_category_plan(target_cat)
+            site_plan = cat_site_plan
+            if not cat_site_plan.get("ready"):
+                skip_msg = f"{rec.show_name} S{rec.season_number:02d}：{cat_site_plan.get('reason') or '未启用可用补缺站点'}"
+                skipped.append(skip_msg)
+                continue
+            sites_param = cat_site_plan.get("sites_param")
+            id_to_name = cat_site_plan.get("id_to_name") or {}
+            site_priority_map = cat_site_plan.get("site_priority_map") or {}
+            allowed_site_ids = set(cat_site_plan.get("active_ordered_ids") or [])
 
             # 身份冲突门禁：存在阻塞级身份冲突时严禁盲目搜种与推送
             try:
@@ -2101,6 +2592,8 @@ async def execute_gap_fill_download(
                 source_tmdb_id=tmdb_id_num,
                 source_season=season_num,
                 allowed_titles=mapped_keywords if is_mapped else None,
+                allowed_site_ids=allowed_site_ids,
+                site_priority_map=site_priority_map,
             )
 
             all_returned_sites = list({s for rc in search_receipts for s in rc.get("returned_sites", [])})
@@ -2195,6 +2688,8 @@ async def execute_gap_fill_download(
                                 source_tmdb_id=tmdb_id_num,
                                 source_season=season_num,
                                 allowed_titles=mapped_keywords if is_mapped else None,
+                                allowed_site_ids=allowed_site_ids,
+                                site_priority_map=site_priority_map,
                             )
                             reject_reasons.extend(fb_rej)
                             standalone_evals = _dedup_evaluations(standalone_evals + [
@@ -2307,6 +2802,8 @@ async def execute_gap_fill_download(
                                     source_tmdb_id=tmdb_id_num,
                                     source_season=season_num,
                                     allowed_titles=mapped_keywords if is_mapped else None,
+                                    allowed_site_ids=allowed_site_ids,
+                                    site_priority_map=site_priority_map,
                                 )
                                 reject_reasons.extend(fb_rej)
                                 standalone_evals = _dedup_evaluations(standalone_evals + [

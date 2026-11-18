@@ -893,3 +893,133 @@ async def get_record_work_context(db: Any, rec: Any) -> dict:
 
 async def get_record_work_main_category(db: Any, rec: Any) -> str:
     return str((await get_record_work_context(db, rec)).get("main_category") or "")
+
+
+async def resolve_record_gap_category(
+    db: Any,
+    rec: Any,
+    instance_key: str | None = None,
+) -> dict[str, str]:
+    """逐季作品分类路由 (v2.5.40 规范):
+
+    优先级：
+    1. 用户对该作品明确保存的「补缺类型」偏好 (GapFillWorkPreference)，跨初检复用；
+    2. 元数据中的动画/动漫分类 (TMDB 动画类别 16、关键词 '动画'/'动漫'/'Animation')；
+    3. 任务/目录类型 (Task.media_type=='anime' 或路径含有 '动漫'/'动画'/'Anime')；
+    4. 存在元数据与目录冲突或元数据不足时，标记为 'pending' (待确认)。
+    """
+    import re
+    from sqlalchemy import select
+    from app.models.gap_fill_site_rule import GapFillWorkPreference
+    from app.models.task import Task
+
+    show_name = str(get_record_field(rec, "show_name", "") or "")
+    tmdb_id_val = get_record_field(rec, "tmdb_id")
+    tmdb_id_str = str(tmdb_id_val).strip() if tmdb_id_val is not None else ""
+    if not tmdb_id_str and show_name:
+        m = re.search(r"\[tmdbid[=:](\d+)\]", show_name, re.I)
+        if m:
+            tmdb_id_str = m.group(1)
+
+    clean_name = re.sub(r"\[tmdbid[=:]\d+\]", "", show_name, flags=re.I)
+    clean_name = re.sub(r"[\(\[（].*?[\)\]）]", " ", clean_name)
+    clean_name = re.sub(r"\s+\d{4}$", "", clean_name).strip() or show_name
+
+    # 1. 用户人工指定偏好
+    if db is not None:
+        try:
+            pref = None
+            if tmdb_id_str:
+                stmt = select(GapFillWorkPreference).where(
+                    GapFillWorkPreference.tmdb_id == tmdb_id_str
+                )
+                pref = (await db.execute(stmt)).scalars().first()
+            if not pref and clean_name:
+                stmt2 = select(GapFillWorkPreference).where(
+                    GapFillWorkPreference.show_name == clean_name
+                )
+                pref = (await db.execute(stmt2)).scalars().first()
+            if pref and pref.category in ("anime", "non_anime"):
+                cat_label = "动漫" if pref.category == "anime" else "非动漫"
+                return {
+                    "category": pref.category,
+                    "source": "manual",
+                    "reason": f"用户人工指定({cat_label})",
+                }
+        except Exception:
+            pass
+
+    # 2. 元数据动画分类检测
+    evidence = _safe_json(get_record_field(rec, "evidence_json", None), {})
+    if not isinstance(evidence, dict):
+        evidence = {}
+    genres = evidence.get("genres") or evidence.get("genre_ids") or []
+    if isinstance(genres, str):
+        genres = [genres]
+    type_name = str(evidence.get("type_name") or evidence.get("type") or "").strip()
+
+    is_anime_meta: bool | None = None
+    if 16 in genres or "16" in [str(g) for g in genres]:
+        is_anime_meta = True
+    elif any("动画" in str(g) or "动漫" in str(g) or "animation" in str(g).lower() for g in genres):
+        is_anime_meta = True
+    elif "动漫" in type_name or "动画" in type_name:
+        is_anime_meta = True
+    elif genres:
+        # 有明确且非空的分类列表，且不含动画
+        is_anime_meta = False
+
+    # 3. 任务与目录分类检测
+    task_hint_anime = False
+    task_id = get_record_field(rec, "task_id")
+    if task_id and db is not None:
+        try:
+            task = await db.get(Task, task_id)
+            if task:
+                if str(getattr(task, "media_type", "")).lower() == "anime":
+                    task_hint_anime = True
+                sp = str(getattr(task, "source_path", "")).lower()
+                if "动漫" in sp or "动画" in sp or "anime" in sp:
+                    task_hint_anime = True
+        except Exception:
+            pass
+
+    season_path = str(get_record_field(rec, "season_path", "") or "").lower()
+    if "动漫" in season_path or "动画" in season_path:
+        task_hint_anime = True
+
+    # 4. 冲突检测与综合判定
+    if is_anime_meta is False and task_hint_anime:
+        return {
+            "category": "pending",
+            "source": "conflict",
+            "reason": "作品元数据为非动画，但初检目录为动漫，分类待确认",
+        }
+
+    if is_anime_meta is True:
+        return {
+            "category": "anime",
+            "source": "tmdb",
+            "reason": "TMDB元数据(动画分类)",
+        }
+
+    if is_anime_meta is False and not task_hint_anime:
+        return {
+            "category": "non_anime",
+            "source": "tmdb",
+            "reason": "TMDB元数据(非动画分类)",
+        }
+
+    if task_hint_anime:
+        return {
+            "category": "anime",
+            "source": "task",
+            "reason": "任务/目录类型(动漫)",
+        }
+
+    return {
+        "category": "pending",
+        "source": "pending",
+        "reason": "补缺类型待确认",
+    }
+

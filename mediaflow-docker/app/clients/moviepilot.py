@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -117,24 +118,42 @@ class MoviePilotClient:
 
     # ── 资源搜索 ──────────────────────────────────────────
     @staticmethod
-    def _format_sites_param(sites: list[int] | tuple[int, ...] | set[int] | str | None) -> str | None:
+    def _format_sites_param(sites: list[int | str] | tuple[int | str, ...] | set[int | str] | str | None) -> str | None:
         if sites is None:
             return None
         if isinstance(sites, str):
             parts = [p.strip() for p in sites.split(",") if p.strip()]
             return ",".join(parts) if parts else None
-        ids = sorted({int(s) for s in sites if str(s).strip().lstrip("-").isdigit()})
-        return ",".join(str(s) for s in ids) if ids else None
+        # 保持传入的原始顺序，不按 ID 升序重排，严格保留优先级顺序
+        ids: list[str] = []
+        seen: set[int] = set()
+        for s in sites:
+            s_str = str(s).strip()
+            if s_str.lstrip("-").isdigit():
+                val = int(s_str)
+                if val not in seen:
+                    seen.add(val)
+                    ids.append(str(val))
+        return ",".join(ids) if ids else None
 
     async def search_resources(
         self,
         tmdb_id: int | None = None,
         season: int | None = None,
         title: str | None = None,
-        sites: list[int] | tuple[int, ...] | set[int] | str | None = None,
+        sites: list[int | str] | tuple[int | str, ...] | set[int | str] | str | None = None,
         media_type: str = "tv",
     ) -> list[dict]:
+        # 显式空集合拦截：若调用方明确传入了空的有效站点集合（例如 [] 或 set()），严禁省略参数退化为全站搜索
+        if sites is not None and not isinstance(sites, str) and len(sites) == 0:
+            return []
+        if isinstance(sites, str) and not sites.strip():
+            return []
+
         sites_param = self._format_sites_param(sites)
+        if sites is not None and not sites_param:
+            return []
+
         is_movie = media_type in ("movie", "电影")
         mtype_str = "电影" if is_movie else "电视剧"
 
@@ -411,13 +430,57 @@ class MoviePilotClient:
         return []
 
     # ── 站点 ──────────────────────────────────────────────
-    async def get_sites(self) -> list[dict]:
+    @staticmethod
+    def sanitize_site_data(site: dict[str, Any]) -> dict[str, Any]:
+        """清洗站点数据，剥离 Cookie/Passkey/Token 等敏感凭据。"""
+        raw_id = site.get("id")
+        site_id = int(raw_id) if raw_id is not None and str(raw_id).lstrip("-").isdigit() else raw_id
+        raw_name = str(site.get("name") or "").strip()
+        raw_domain = str(site.get("domain") or "").strip()
+        raw_url = str(site.get("url") or "").strip()
+
+        # URL 仅保留 scheme 与 host，杜绝带 token 的鉴权链接
+        safe_url = ""
+        if raw_url:
+            try:
+                parts = urlsplit(raw_url)
+                safe_url = f"{parts.scheme}://{parts.netloc}" if parts.scheme and parts.netloc else parts.netloc or raw_domain
+            except Exception:
+                safe_url = raw_domain
+
+        return {
+            "id": site_id,
+            "name": raw_name or f"站点#{site_id}",
+            "domain": raw_domain,
+            "url": safe_url,
+            "is_active": bool(site.get("is_active", True)),
+            "public": bool(site.get("public", False)),
+            "pri": site.get("pri"),
+            "comment": str(site.get("comment") or site.get("note") or "").strip(),
+        }
+
+    async def get_sites(self, sanitize: bool = False) -> list[dict]:
+        """从 MoviePilot 读取站点目录，严格校验返回格式。"""
         res = await self._get("/api/v1/site/")
+        raw_list: list[dict] = []
         if isinstance(res, list):
-            return res
-        if isinstance(res, dict):
-            return res.get("data") or []
-        return []
+            raw_list = res
+        elif isinstance(res, dict):
+            if res.get("success") is False:
+                raise RuntimeError(res.get("message") or "获取站点列表失败")
+            data = res.get("data")
+            if isinstance(data, list):
+                raw_list = data
+            elif isinstance(data, dict) and isinstance(data.get("sites"), list):
+                raw_list = data["sites"]
+            else:
+                raise RuntimeError("站点列表返回未知数据格式")
+        else:
+            raise RuntimeError("站点列表返回未知响应类型")
+
+        if sanitize:
+            return [self.sanitize_site_data(s) for s in raw_list if isinstance(s, dict)]
+        return raw_list
 
     async def get_indexer_sites(self) -> dict[str, Any]:
         """读取 MoviePilot 默认搜索站点配置 (IndexerSites)。"""
@@ -589,3 +652,6 @@ class MoviePilotClient:
 
     async def close(self) -> None:
         await self._client.aclose()
+
+
+sanitize_site_data = MoviePilotClient.sanitize_site_data
