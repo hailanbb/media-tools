@@ -307,11 +307,11 @@ class TestV2539AnomalyModule(unittest.IsolatedAsyncioTestCase):
             ))
             await db.commit()
 
-        # 确认目录前：BOSS 主分类为 anomaly (decision)，合并覆盖 [1, 2]
+        # 确认目录前：v2.5.45 G06 同 TMDB 多目录归并先收口至 review (merge_directory)，合并覆盖 [1, 2]
         before_list = (await self.http.get("/api/tasks/t_boss/seasons")).json()
         boss_card = next(x for x in before_list if x["tmdb_id"] == "326975")
-        self.assertEqual(boss_card["main_category"], "anomaly")
-        self.assertEqual(boss_card["anomaly_sub_category"], "decision")
+        self.assertEqual(boss_card["main_category"], "review")
+        self.assertEqual(boss_card["review_action_kind"], "merge_directory")
         self.assertEqual(boss_card["airing_view"]["source_episodes"], [1, 2])
 
         # 确认目录后：无需全量重扫，自动回到 airing（连载留源）

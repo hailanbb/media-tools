@@ -26,7 +26,7 @@ from app.models.manual_confirmation import ManualSeasonConfirmation
 
 CATEGORY_LABELS: dict[str, str] = {
     "archive": "齐全可归档",
-    "download": "真缺集待补",
+    "download": "缺集待补",
     "airing": "连载留源",
     "review": "待复核清理",
     "anomaly": "异常剧集",
@@ -361,17 +361,20 @@ def evaluate_confirmation_outcome(
 
     if pos_arc and expected_set <= set(pos_arc) and pos_rec and set(pos_rec) <= set(pos_arc):
         new_status = "already_archived"
-        new_detail = f"已按人工确认（共 {eff_total} 集，已播毕）核算：归档单端已独立覆盖全 {eff_total} 集，源端本季可核验清源"
-        pred_cat = "anomaly"
+        new_detail = f"已按人工确认（共 {eff_total} 集，已播毕）核算：归档单端已独立覆盖全 {eff_total} 集，源端本季可在待复核清理核验清源"
+        pred_cat = "review"
+    elif pos_dups:
+        new_status = "download_needed" if missing else "review_needed"
+        new_detail = (
+            f"已按人工确认（共 {eff_total} 集，已播毕）核算：第 {', '.join(map(str, pos_dups))} 集存在重复副本，优先进入待复核清理"
+            + (f"（清理后转缺集待补，缺 {len(missing)} 集）" if missing else "")
+        )
+        pred_cat = "review"
     elif missing:
         new_status = "download_needed"
         miss_txt = ", ".join(f"E{e:02d}" for e in missing[:8])
         new_detail = f"已按人工确认（共 {eff_total} 集，已播毕）核算：三端合计已覆盖 {len(combined_eps)}/{eff_total} 集，实缺 {miss_txt}"
-        pred_cat = "anomaly" if pending_dir_group else "download"
-    elif pos_dups:
-        new_status = "review_needed"
-        new_detail = f"已按人工确认（共 {eff_total} 集，已播毕）核算：全 {eff_total} 集已齐，第 {', '.join(map(str, pos_dups))} 集存在重复版本待清理"
-        pred_cat = "anomaly" if pending_dir_group else "review"
+        pred_cat = "review" if pending_dir_group else "download"
     else:
         new_status, diag_det = diagnose_season(
             recognized=combined_eps,
@@ -382,9 +385,9 @@ def evaluate_confirmation_outcome(
             allow_bonus_specials=True,
         )
         new_detail = f"已按人工确认（共 {eff_total} 集，已播毕）核算：{diag_det}"
-        pred_cat = "anomaly" if pending_dir_group else ("archive" if new_status == "archive_ready" else "anomaly")
+        pred_cat = "review" if pending_dir_group else ("archive" if new_status == "archive_ready" else "anomaly")
 
-    block_rsn = "存在待确认归档目标目录组，请先确认目录" if pending_dir_group else ""
+    block_rsn = "存在待规范化归并的同 ID 多目录组" if pending_dir_group else ""
     return {
         "status": new_status,
         "status_detail": new_detail,
@@ -396,4 +399,411 @@ def evaluate_confirmation_outcome(
         "blocking_reason": block_rsn,
         "identity_cleared": eff_id_confirmed,
         "contradiction": contradiction_obj,
+    }
+
+
+def _rewrite_single_season_tag(filename: str, old_season: int, new_season: int) -> tuple[str | None, str]:
+    """精准改写文件名中唯一明确代表本季的 S 标记，保留集号与全部发行后缀；多标记歧义返回 None 禁止盲改 (G18)。"""
+    import re
+    pat = re.compile(rf"(?i)(?<![a-zA-Z0-9])([Ss])(0?{old_season})([Ee]\d{{1,4}}(?:-[Ee]?\d{{1,4}})?)")
+    matches = list(pat.finditer(filename))
+    if not matches:
+        return filename, ""
+    if len(matches) > 1:
+        return None, f"文件名含多个季集标记，为防误改已保持原名：{filename}"
+    m = matches[0]
+    new_tag = f"S{new_season:02d}{m.group(3)}"
+    rewritten = filename[:m.start()] + new_tag + filename[m.end():]
+    return rewritten, f"季号标记 S{old_season:02d} -> S{new_season:02d}"
+
+
+def _rewrite_prefix_for_identity(filename: str, season_number: int, new_prefix: str) -> tuple[str | None, str]:
+    """在身份/规范名称变更时统一季集标记前的展示前缀，保留 SxxExx 及之后全部文本 (G17)。"""
+    from app.core.directory_merge import split_season_episode_boundary
+    boundary = split_season_episode_boundary(filename, season_number)
+    if not boundary:
+        return filename, ""
+    old_prefix, suffix = boundary
+    if old_prefix == new_prefix:
+        return filename, ""
+    return f"{new_prefix}{suffix}", f"展示前缀统一为「{new_prefix}」"
+
+
+def update_nfo_identity_structured(
+    nfo_path: str,
+    *,
+    tmdb_id: int | str | None = None,
+    douban_id: str | None = None,
+    season_number: int | None = None,
+    title: str | None = None,
+) -> bool:
+    """结构化更新单季/分集 NFO 的身份字段，完整保留用户备注与无关 XML 字段 (Section 5.3)。"""
+    import os
+    import xml.etree.ElementTree as ET
+
+    if not nfo_path or not os.path.isfile(nfo_path):
+        return False
+    try:
+        tree = ET.parse(nfo_path)
+        root = tree.getroot()
+    except Exception:
+        return False
+
+    changed = False
+    if tmdb_id is not None and str(tmdb_id).isdigit():
+        tid_str = str(tmdb_id)
+        t_el = root.find("tmdbid")
+        if t_el is not None:
+            if t_el.text != tid_str:
+                t_el.text = tid_str
+                changed = True
+        else:
+            t_el = ET.SubElement(root, "tmdbid")
+            t_el.text = tid_str
+            changed = True
+        uid_tmdb = next((u for u in root.findall("uniqueid") if str(u.attrib.get("type") or "").lower() == "tmdb"), None)
+        if uid_tmdb is not None:
+            if uid_tmdb.text != tid_str:
+                uid_tmdb.text = tid_str
+                changed = True
+        else:
+            u_el = ET.SubElement(root, "uniqueid", {"type": "tmdb"})
+            u_el.text = tid_str
+            changed = True
+
+    if douban_id and str(douban_id).isdigit():
+        did_str = str(douban_id)
+        uid_db = next((u for u in root.findall("uniqueid") if str(u.attrib.get("type") or "").lower() == "douban"), None)
+        if uid_db is not None:
+            if uid_db.text != did_str:
+                uid_db.text = did_str
+                changed = True
+        else:
+            u_el = ET.SubElement(root, "uniqueid", {"type": "douban"})
+            u_el.text = did_str
+            changed = True
+
+    if season_number is not None and root.tag in ("episodedetails", "season"):
+        s_el = root.find("season")
+        if s_el is not None and s_el.text != str(season_number):
+            s_el.text = str(season_number)
+            changed = True
+
+    if title and root.tag == "tvshow":
+        ti_el = root.find("title")
+        if ti_el is not None and ti_el.text != title:
+            ti_el.text = title
+            changed = True
+
+    if changed:
+        tree.write(nfo_path, encoding="utf-8", xml_declaration=True)
+    return changed
+
+
+def build_manual_correction_plan(
+    *,
+    show_name: str,
+    show_path: str,
+    season_path: str,
+    current_tmdb_id: int | str | None,
+    current_season: int,
+    target_tmdb_id: int | None = None,
+    target_title: str = "",
+    target_first_air_year: str = "",
+    target_season: int | None = None,
+    douban_id: str | None = None,
+    episode_mapping: dict[str, int] | None = None,
+    season_files: list[dict[str, Any]] | None = None,
+    sibling_seasons: list[str] | None = None,
+) -> dict[str, Any]:
+    """为单季人工修正生成固定可执行计划（区分纯资料确认 G19 vs 身份改名迁移 G17 vs 季号修正 G18）。"""
+    import posixpath
+    import re
+    from uuid import uuid4
+    from app.core.directory_merge import build_canonical_show_dir_name, normalize_dir_path, sanitize_fs_name
+    from app.core.episode_parser import is_subtitle_file, is_video_file
+
+    norm_show = normalize_dir_path(show_path)
+    norm_season = normalize_dir_path(season_path)
+    cur_tid = str(current_tmdb_id or "").strip()
+    new_tid = str(target_tmdb_id) if (target_tmdb_id and int(target_tmdb_id) > 0) else cur_tid
+    new_sn = int(target_season) if (target_season and int(target_season) > 0) else int(current_season)
+
+    identity_changed = bool(new_tid and new_tid != cur_tid) or bool(
+        target_title and sanitize_fs_name(target_title) and sanitize_fs_name(target_title) != sanitize_fs_name(show_name.split(" [tmdbid=")[0].split(" (")[0])
+    )
+    season_changed = (new_sn != int(current_season))
+    has_ep_mapping = bool(episode_mapping)
+
+    if not identity_changed and not season_changed and not has_ep_mapping:
+        return {
+            "plan_id": f"plan_fix_{uuid4().hex[:10]}",
+            "has_file_changes": False,
+            "identity_changed": False,
+            "season_changed": False,
+            "new_show_name": show_name,
+            "new_show_path": norm_show,
+            "new_season_path": norm_season,
+            "new_season_number": new_sn,
+            "new_tmdb_id": new_tid,
+            "keep_old_show_root": True,
+            "file_changes": [],
+            "nfo_updates": [],
+            "ambiguous_files": [],
+            "summary_text": "仅确认元数据事实，无目录或文件变更",
+        }
+
+    def _p_dirname(p: str) -> str:
+        s = str(p or "").rstrip("/\\")
+        if "\\" in s and "/" not in s:
+            import ntpath
+            return ntpath.dirname(s)
+        return posixpath.dirname(s.replace("\\", "/"))
+
+    def _p_basename(p: str) -> str:
+        s = str(p or "").rstrip("/\\")
+        if "\\" in s and "/" not in s:
+            import ntpath
+            return ntpath.basename(s)
+        return posixpath.basename(s.replace("\\", "/"))
+
+    def _p_join(base: str, child: str) -> str:
+        if not base:
+            return child
+        sep = "\\" if ("\\" in base and "/" not in base) else "/"
+        clean_base = base.rstrip("/\\")
+        return f"{clean_base}{sep}{child}"
+
+    # 计算新规范剧目录与新季目录
+    parent_dir = _p_dirname(norm_show) if norm_show else ""
+    if identity_changed:
+        canon_dir_name, naming_basis = build_canonical_show_dir_name(
+            canonical_title=target_title or show_name,
+            first_air_year=target_first_air_year,
+            tmdb_id=new_tid,
+            existing_name=_p_basename(norm_show) if norm_show else show_name,
+        )
+        new_show_path = _p_join(parent_dir, canon_dir_name) if parent_dir else canon_dir_name
+        new_show_name = canon_dir_name
+        clean_title_prefix = f"{sanitize_fs_name(target_title or canon_dir_name.split(' [tmdbid=')[0].split(' (')[0])} - "
+    else:
+        new_show_path = norm_show
+        new_show_name = show_name
+        naming_basis = "保持原剧目录"
+        clean_title_prefix = ""
+
+    new_season_path = _p_join(new_show_path, f"Season {new_sn}") if new_show_path else f"Season {new_sn}"
+    has_siblings = bool(sibling_seasons)
+    # 若旧剧根还有其他季，绝对保留旧剧根且严禁修改旧剧根共享 tvshow.nfo (G18)
+    keep_old_show_root = has_siblings or (new_show_path == norm_show)
+
+    file_changes: list[dict[str, Any]] = []
+    nfo_updates: list[dict[str, Any]] = []
+    ambiguous_files: list[dict[str, Any]] = []
+
+    for f in (season_files or []):
+        if f.get("isDirectory"):
+            continue
+        fname = str(f.get("name") or "")
+        fpath = normalize_dir_path(f.get("path") or f"{norm_season}/{fname}")
+        new_name = fname
+        reasons: list[str] = []
+
+        # 1. 季号修正（先改 S 标记）
+        if season_changed:
+            rewritten, r_txt = _rewrite_single_season_tag(new_name, int(current_season), new_sn)
+            if rewritten is None:
+                ambiguous_files.append({"old_name": fname, "old_path": fpath, "reason": r_txt})
+            else:
+                new_name = rewritten
+                if r_txt:
+                    reasons.append(r_txt)
+
+        # 2. 身份/剧名变更（统一前缀）
+        if identity_changed and clean_title_prefix and (is_video_file(fname) or is_subtitle_file(fname) or fname.lower().endswith(".nfo")):
+            rewritten_p, rp_txt = _rewrite_prefix_for_identity(new_name, new_sn, clean_title_prefix)
+            if rewritten_p:
+                new_name = rewritten_p
+                if rp_txt:
+                    reasons.append(rp_txt)
+
+        # 3. 明确确认的集号映射修正（只改确认条目，保留审计）
+        if has_ep_mapping and episode_mapping:
+            m_ep = re.search(rf"(?i)(?<![a-zA-Z0-9])([Ss]0*{new_sn}[Ee])(\d{{1,4}})(?!\d)", new_name)
+            if m_ep:
+                old_ep_str = str(int(m_ep.group(2)))
+                if old_ep_str in episode_mapping or m_ep.group(2) in episode_mapping:
+                    mapped_ep = int(episode_mapping.get(old_ep_str, episode_mapping.get(m_ep.group(2))))
+                    new_name = new_name[:m_ep.start()] + f"{m_ep.group(1)}{mapped_ep:02d}" + new_name[m_ep.end():]
+                    reasons.append(f"集号映射 E{int(old_ep_str):02d} -> E{mapped_ep:02d}")
+
+        dest_path = f"{new_season_path}/{new_name}"
+        if fpath != dest_path or fname != new_name:
+            file_changes.append({
+                "old_path": fpath,
+                "old_name": fname,
+                "new_dir": new_season_path,
+                "new_name": new_name,
+                "new_path": dest_path,
+                "kind": "video" if is_video_file(fname) else ("subtitle" if is_subtitle_file(fname) else "attachment"),
+                "reason": "；".join(reasons) if reasons else "随单季迁移至目标目录",
+            })
+
+        if fname.lower().endswith(".nfo"):
+            nfo_updates.append({
+                "path": dest_path,
+                "tmdb_id": new_tid,
+                "douban_id": douban_id,
+                "season_number": new_sn,
+            })
+
+    summary_parts = []
+    if identity_changed:
+        summary_parts.append(f"迁入新剧目录「{new_show_name}」")
+    if season_changed:
+        summary_parts.append(f"调整季号 S{int(current_season):02d} -> S{new_sn:02d}")
+    if file_changes:
+        summary_parts.append(f"同步移动/改名 {len(file_changes)} 个文件")
+    if keep_old_show_root and has_siblings:
+        summary_parts.append(f"保留旧剧根其余 {len(sibling_seasons or [])} 个季")
+
+    return {
+        "plan_id": f"plan_fix_{uuid4().hex[:10]}",
+        "has_file_changes": bool(file_changes or norm_season != new_season_path),
+        "identity_changed": identity_changed,
+        "season_changed": season_changed,
+        "naming_basis": naming_basis,
+        "old_show_path": norm_show,
+        "old_season_path": norm_season,
+        "new_show_name": new_show_name,
+        "new_show_path": new_show_path,
+        "new_season_path": new_season_path,
+        "new_season_number": new_sn,
+        "new_tmdb_id": new_tid,
+        "keep_old_show_root": keep_old_show_root,
+        "sibling_seasons": list(sibling_seasons or []),
+        "file_changes": file_changes,
+        "nfo_updates": nfo_updates,
+        "ambiguous_files": ambiguous_files,
+        "summary_text": "，".join(summary_parts) or "将按计划更新目录与文件",
+    }
+
+
+async def execute_manual_correction_plan(
+    plan: dict[str, Any],
+    *,
+    cd2_client: Any = None,
+) -> dict[str, Any]:
+    """执行单季人工修正的实物移动、改名、结构化 NFO 更新与核验，部分失败记录剩余步骤支持恢复 (G17, G18, G23)。"""
+    import os
+    import posixpath
+    from app.core.directory_merge import (
+        delete_dir_robust,
+        list_files_robust,
+        move_and_rename_file_robust,
+    )
+
+    if not plan.get("has_file_changes"):
+        return {
+            "ok": True,
+            "completed_steps": [],
+            "remaining_steps": [],
+            "updated_nfos": [],
+            "cleaned_dirs": [],
+            "partial_failure": False,
+        }
+
+    completed_steps: list[dict[str, Any]] = []
+    remaining_steps: list[dict[str, Any]] = []
+    updated_nfos: list[str] = []
+    cleaned_dirs: list[str] = []
+    errors: list[str] = []
+
+    # 1. 逐文件幂等移动/改名
+    for step in (plan.get("file_changes") or []):
+        old_p = step["old_path"]
+        new_dir = step["new_dir"]
+        new_name = step["new_name"]
+        new_p = step["new_path"]
+        try:
+            if os.path.exists(new_p) and not os.path.exists(old_p):
+                completed_steps.append(step)
+                continue
+            await move_and_rename_file_robust(cd2_client, old_p, new_dir, new_name)
+            completed_steps.append(step)
+        except Exception as e:
+            remaining_steps.append({**step, "error": str(e)})
+            errors.append(f"{step['old_name']} -> {new_name}: {e}")
+
+    if remaining_steps:
+        return {
+            "ok": False,
+            "partial_failure": True,
+            "completed_steps": completed_steps,
+            "remaining_steps": remaining_steps,
+            "updated_nfos": updated_nfos,
+            "cleaned_dirs": cleaned_dirs,
+            "errors": errors,
+        }
+
+    # 2. 结构化更新属于本季的已知 NFO 身份字段（严禁修改旧剧根共享 tvshow.nfo）
+    for nfo_item in (plan.get("nfo_updates") or []):
+        n_path = nfo_item.get("path") or ""
+        if n_path and update_nfo_identity_structured(
+            n_path,
+            tmdb_id=nfo_item.get("tmdb_id"),
+            douban_id=nfo_item.get("douban_id"),
+            season_number=nfo_item.get("season_number"),
+        ):
+            updated_nfos.append(n_path)
+
+    # 3. 实物后验：确认移动后的文件已在目标季目录中
+    new_season_path = plan.get("new_season_path") or ""
+    if new_season_path and completed_steps:
+        after_files = await list_files_robust(cd2_client, new_season_path)
+        after_names = {f["name"] for f in after_files}
+        missing_after = [s for s in completed_steps if s["new_name"] not in after_names]
+        if missing_after:
+            return {
+                "ok": False,
+                "partial_failure": True,
+                "completed_steps": [s for s in completed_steps if s not in missing_after],
+                "remaining_steps": missing_after,
+                "updated_nfos": updated_nfos,
+                "cleaned_dirs": cleaned_dirs,
+                "errors": [f"后验未见目标文件: {[m['new_name'] for m in missing_after]}"],
+            }
+
+    # 4. 清理空旧季目录；仅在不保留旧剧根且旧剧根确已为空时清理旧剧根
+    old_season_path = plan.get("old_season_path") or ""
+    old_show_path = plan.get("old_show_path") or ""
+    if old_season_path and old_season_path != new_season_path:
+        if await delete_dir_robust(cd2_client, old_season_path):
+            cleaned_dirs.append(old_season_path)
+    if old_show_path and not plan.get("keep_old_show_root") and old_show_path != plan.get("new_show_path"):
+        if await delete_dir_robust(cd2_client, old_show_path):
+            cleaned_dirs.append(old_show_path)
+
+    # 5. 刷新旧新目录父级缓存
+    if cd2_client is not None:
+        for ref_dir in {
+            new_season_path,
+            plan.get("new_show_path") or "",
+            posixpath.dirname(plan.get("new_show_path") or "") if plan.get("new_show_path") else "",
+            posixpath.dirname(old_show_path) if old_show_path else "",
+        }:
+            if ref_dir:
+                try:
+                    await cd2_client.list_files(ref_dir, force_refresh=True)
+                except Exception:
+                    pass
+
+    return {
+        "ok": True,
+        "partial_failure": False,
+        "completed_steps": completed_steps,
+        "remaining_steps": [],
+        "updated_nfos": updated_nfos,
+        "cleaned_dirs": cleaned_dirs,
+        "errors": [],
     }

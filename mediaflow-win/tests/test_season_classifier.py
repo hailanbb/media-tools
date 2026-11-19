@@ -15,13 +15,13 @@ from app.core.season_classifier import (
 
 class TestSeasonClassifier(unittest.TestCase):
     def test_single_record_priorities(self):
-        # 1. 目录组待确认 -> anomaly
+        # 1. 目录组待确认 -> review (v2.5.45 清理优先)
         rec_dir = {
             "status": "review_needed",
             "evidence": {"directory_group": {"requires_confirm": True, "id": "grp-1"}},
         }
         cat, act = classify_single_record(rec_dir)
-        self.assertEqual(cat, "anomaly")
+        self.assertEqual(cat, "review")
 
         # 2. 身份冲突 -> anomaly
         rec_id_conf = {"status": "identity_review"}
@@ -33,10 +33,10 @@ class TestSeasonClassifier(unittest.TestCase):
         cat, _ = classify_single_record(rec_period)
         self.assertEqual(cat, "anomaly")
 
-        # 4. 源端已有残留 -> anomaly
+        # 4. 源端已有残留 -> review (v2.5.45 清理优先)
         rec_already = {"status": "already_archived"}
         cat, act = classify_single_record(rec_already)
-        self.assertEqual(cat, "anomaly")
+        self.assertEqual(cat, "review")
         self.assertEqual(act, "clean_redundant")
 
         # 5. 在播连载 -> airing
@@ -50,7 +50,7 @@ class TestSeasonClassifier(unittest.TestCase):
         self.assertEqual(cat, "airing")
         self.assertEqual(act, "skip")
 
-        # 6. 缺集兼重复 -> download (真缺集优先，齐集后再清理)
+        # 6. 缺集兼重复 -> v2.5.45 G01 清理优先：先入 review 清理同内容重复副本，清理后自动转入 download
         rec_gap_dup = {
             "status": "download_needed",
             "missing_episodes": [14],
@@ -60,8 +60,8 @@ class TestSeasonClassifier(unittest.TestCase):
             "season_finished": True,
         }
         cat, act = classify_single_record(rec_gap_dup)
-        self.assertEqual(cat, "download")
-        self.assertEqual(act, "download")
+        self.assertEqual(cat, "review")
+        self.assertEqual(act, "clean")
 
         # 7. 纯重复无缺集 -> review
         rec_dup_only = {
@@ -147,11 +147,11 @@ class TestSeasonClassifier(unittest.TestCase):
 
         work_records, counts = consolidate_seasons_to_work_records(records)
 
-        # 乘风破浪两个目录必须被归并为 1 个作品季，且因为缺集优先级 (download: 3) 高于 review (4)，
-        # 该作品季主分类必须是 download！
+        # 乘风破浪两个目录必须被归并为 1 个作品季，且按 v2.5.45 G01 清理优先规则 (review: 1 > download: 4)，
+        # 该作品季主分类必须先入 review（清理后去向预判为 download）！
         self.assertEqual(len(work_records), 3, "4 个物理目录应归并为 3 个作品季")
         cf_rec = next(w for w in work_records if str(w.get("tmdb_id")) == "223344")
-        self.assertEqual(cf_rec["main_category"], "download")
+        self.assertEqual(cf_rec["main_category"], "review")
         self.assertEqual(cf_rec["total_dir_count"], 2)
         self.assertEqual(len(cf_rec["associated_records"]), 1)
 
@@ -162,10 +162,10 @@ class TestSeasonClassifier(unittest.TestCase):
             counts["total_work_seasons"],
             "各分类作品季数之和必须严格等于作品季总数！"
         )
-        self.assertEqual(counts["download"], 1)
+        self.assertEqual(counts["review"], 1)
         self.assertEqual(counts["archive"], 1)
         self.assertEqual(counts["airing"], 1)
-        self.assertEqual(counts["review"], 0)
+        self.assertEqual(counts["download"], 0)
         self.assertEqual(counts["anomaly"], 0)
 
     def test_a13_failed_conflict_and_missing_evidence_never_fallback_to_archive(self):
@@ -410,7 +410,7 @@ class TestSeasonClassifier(unittest.TestCase):
             "recognized_episodes": [1, 2],
         }
         cat_l04a, act_l04a = classify_single_record(rec_legacy_false)
-        self.assertEqual((cat_l04a, act_l04a), ("anomaly", "system_tracking"))
+        self.assertEqual((cat_l04a, act_l04a), ("anomaly", "verify_broadcast"))
 
         rec_181d = {
             "id": "l04-181d",
@@ -428,9 +428,9 @@ class TestSeasonClassifier(unittest.TestCase):
             },
         }
         cat_l04b, act_l04b = classify_single_record(rec_181d)
-        self.assertEqual((cat_l04b, act_l04b), ("anomaly", "system_tracking"))
+        self.assertEqual((cat_l04b, act_l04b), ("anomaly", "verify_broadcast"))
 
-        # L05: 连载季 E05 有两份，底层 review_needed；同时关联历史物理记录带 download_needed -> 主卡仅 1 张且为 airing
+        # L05 (v2.5.45 G02): 连载季 E05 有稳定重复副本 -> 先入待复核清理，清理后去向预判为 airing，且不流向 download
         rec_l05_dup = {
             "id": "l05-dup",
             "show_name": "连载双版本剧",
@@ -458,10 +458,11 @@ class TestSeasonClassifier(unittest.TestCase):
         }
         w_l05, c_l05 = consolidate_seasons_to_work_records([rec_l05_dup, rec_l05_hist_gap])
         self.assertEqual(len(w_l05), 1)
-        self.assertEqual(c_l05["airing"], 1)
+        self.assertEqual(c_l05["review"], 1)
         self.assertEqual(c_l05["download"], 0)
-        self.assertEqual(c_l05["review"], 0)
-        self.assertEqual(w_l05[0]["airing_view"]["duplicate_episodes"], [5])
+        self.assertEqual(c_l05["airing"], 0)
+        self.assertEqual(w_l05[0]["predicted_next_category"], "airing")
+        self.assertEqual(w_l05[0]["duplicate_episodes"], [5])
 
         # L07: 同季两个已绑定物理目录，正片重叠 (E03,E04 重叠) -> 确认有效时去重计数(6集)、只占 1 季；确认失效后移到异常剧集
         rec_l07_a = {
@@ -494,12 +495,12 @@ class TestSeasonClassifier(unittest.TestCase):
         self.assertEqual(w_l07_ok[0]["recognized_episodes"], [1, 2, 3, 4, 5, 6], "重叠目录必须按集号去重计数")
         self.assertEqual(w_l07_ok[0]["airing_view"]["cross_dir_overlap_episodes"], [3, 4])
 
-        # 当目录组确认失效 (grp-8007 进入 pending_dir_group_ids) -> 唯一主卡移到异常剧集
+        # 当目录组确认失效 (grp-8007 进入 pending_dir_group_ids) -> v2.5.45 G06 唯一主卡移到待复核清理，仍保留连载保护
         w_l07_inv, c_l07_inv = consolidate_seasons_to_work_records([rec_l07_a, rec_l07_b], pending_dir_group_ids={"grp-8007"})
         self.assertEqual(len(w_l07_inv), 1)
         self.assertEqual(c_l07_inv["airing"], 0)
-        self.assertEqual(c_l07_inv["anomaly"], 1)
-        self.assertEqual(w_l07_inv[0]["main_category"], "anomaly")
+        self.assertEqual(c_l07_inv["review"], 1)
+        self.assertEqual(w_l07_inv[0]["main_category"], "review")
         self.assertTrue(w_l07_inv[0]["airing_protected"])
         self.assertFalse(w_l07_inv[0]["can_mark_handled"])
         self.assertEqual(w_l07_inv[0]["airing_view"]["source_episodes"], [1, 2, 3, 4, 5, 6])

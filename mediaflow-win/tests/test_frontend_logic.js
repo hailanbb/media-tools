@@ -170,7 +170,8 @@ console.log("===================================================================
   context.currentCategory = 'download';
   vm.runInContext('renderEpisodesList()', context);
   const downloadCard = getNode('episodeItemContainer').innerHTML;
-  assert(!downloadCard.includes("promptDeleteSourceShow("), "真缺集待补分类绝不应包含删除源端整剧删除按钮！");
+  assert(!downloadCard.includes("promptDeleteSourceShow("), "缺集待补分类绝不应包含删除源端整剧删除按钮！");
+  assert(!downloadCard.includes("openDeleteSourceSeasonModal("), "G22: 缺集待补分类绝不应包含删除源端本季按钮！");
   assert(!downloadCard.includes('markSeasonHandled('));
 
   // 验证异常卡片移除整剧删除入口，并按问题提供人工确认
@@ -446,7 +447,7 @@ console.log("===================================================================
     assert(anomalyPanelHtml.includes('乘风 · 确认归档目标'), '必须直接使用作品名作为卡片标题');
     assert(anomalyPanelHtml.includes('TMDB: 104716'), '卡片必须显示 TMDB ID');
     assert(anomalyPanelHtml.includes('TMDB 页面显示：「乘风」'), '卡片必须显示 TMDB 官网页面当前名称');
-    assert(anomalyPanelHtml.includes('返回「真缺集待补」'), '跨页跳转后顶部必须显示返回原清单按钮');
+    assert(anomalyPanelHtml.includes('返回「缺集待补」'), '跨页跳转后顶部必须显示返回原清单按钮');
     assert(anomalyPanelHtml.includes("openDirectoryGroupDialog('grp-104716')"), '卡片必须挂载确认归档目标弹窗按钮');
     // 目录组面板绝对不包含 itemCheck checkbox，保证不参与“全选清理冗余”
     assert(!anomalyPanelHtml.includes('name="itemCheck"'), '目录组面板绝不可包含 itemCheck checkbox，防止误入批量清理');

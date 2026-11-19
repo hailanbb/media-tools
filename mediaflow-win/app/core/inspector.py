@@ -37,7 +37,13 @@ from app.core.directory_governance import (
     serialize_directory_group,
     sync_directory_groups_for_task,
 )
-from app.core.segments import episode_segments, diagnose_periods, segment_number
+from app.core.segments import (
+    diagnose_periods,
+    diagnose_periods_structured,
+    episode_segments,
+    segment_number,
+)
+from app.core.review_engine import generate_review_clean_plan
 from app.core.episode_parser import ParsedEpisode, is_video_file, parse_episode
 from app.core.identity_resolver import (
     analyze_season_release_signals,
@@ -1132,6 +1138,9 @@ async def run_inspection(
                 if is_split:
                     if (info.get("bound") or info.get("partial_listing")) and db_tot == larger:
                         total_eps = db_tot
+                    elif info.get("bound") and db_tot == smaller and (max(recognized, default=0) <= smaller or tail_unverified):
+                        # 已绑定豆瓣同季条目收录正片期数，TMDB 含大量加更/衍生扩展条目时，按豆瓣正片期数核对（G11/G12）
+                        total_eps = smaller
                     elif max(recognized, default=0) > smaller:
                         total_eps = larger
                     elif recognized == list(range(1, smaller + 1)):
@@ -1490,13 +1499,13 @@ async def run_inspection(
                                         missing = list(range(1, total_eps + 1))
                                         detail = (
                                             f"归档库与媒体服务器 (Emby) 均确认第 S{season_num:02d} 季 0 集入库"
-                                            f"（{inv_desc}），缺失全部 {total_eps} 集，已自动转入「真缺集待补」。"
+                                            f"（{inv_desc}），缺失全部 {total_eps} 集，已自动转入「缺集待补」。"
                                         )
                                     else:
                                         status = "archive_check"
                                         detail = (
                                             f"资料总集数 {total_eps}；未找到对应归档季。{inv_desc}。"
-                                            f"媒体服务器 (Emby) 当前同样 0 集，且官方尚未确认本季完结，按播出规则留源跟踪。"
+                                            f"媒体服务器 (Emby) 当前同样 0 集，且官方尚未确认本季完结，保留在源目录。"
                                         )
                                 elif not actual_missing:
                                     status = "archive_check"
@@ -1512,14 +1521,14 @@ async def run_inspection(
                                     detail = (
                                         f"全 {total_eps} 集已播毕；各端已覆盖 {len(all_covered)} 集"
                                         f"（源端 {len(recognized)}、Emby {len(emby_eps)}），实缺 {len(actual_missing)} 集"
-                                        f"（{sample_missing}），已转入「真缺集待补」。"
+                                        f"（{sample_missing}），已转入「缺集待补」。"
                                     )
                                 else:
                                     status = "airing"
                                     missing = actual_missing
                                     detail = (
                                         f"连载中：各端已覆盖 {len(all_covered)}/{total_eps} 集，"
-                                        f"尚缺 {len(actual_missing)} 集，留源跟踪。"
+                                        f"尚缺 {len(actual_missing)} 集，留源保留。"
                                     )
                             else:
                                 status = "archive_check"
@@ -1547,25 +1556,44 @@ async def run_inspection(
                 if db_tot and db_tot > period_total and (info.get("bound") or db_tot > (tmdb_tot or 0)):
                     period_total = db_tot
                     season_finished = info.get("douban_finished", False)
-                
+
+                # 判断是否具备整期发行版自动核验依据（如豆瓣总期数一致，或本地所有正片均无分段标记且1..period_total齐全）
+                whole_period_verified = bool(
+                    season_finished
+                    and period_total > 0
+                    and (
+                        (db_tot and db_tot == period_total)
+                        or (
+                            len(regular_episodes) >= period_total
+                            and all(ep.segment_part is None for ep in regular_episodes)
+                            and set(range(1, period_total + 1)) <= {e for ep in regular_episodes for e in ep.episode_numbers}
+                        )
+                    )
+                )
+
                 # 分别核验源端与归档端覆盖情况，避免混淆两端独有内容
-                src_period = diagnose_periods(
+                src_period_struct = diagnose_periods_structured(
                     season_files, season_num, parts,
                     info.get("ordinals", {}), period_total, season_finished, False,
-                    douban_total=db_tot
+                    douban_total=db_tot,
+                    whole_period_verified=whole_period_verified,
                 )
+                src_period = src_period_struct.get("result")
                 arc_period = diagnose_periods(
                     archive_items, season_num, parts,
                     info.get("ordinals", {}), period_total, season_finished, True,
-                    douban_total=db_tot
+                    douban_total=db_tot,
+                    whole_period_verified=whole_period_verified,
                 ) if archive_items else None
 
-                period = diagnose_periods(
+                period_struct = diagnose_periods_structured(
                     season_files + archive_items, season_num, parts,
                     info.get("ordinals", {}), period_total, season_finished, bool(actual),
                     archive_files=archive_items if actual else None,
-                    douban_total=db_tot
+                    douban_total=db_tot,
+                    whole_period_verified=whole_period_verified,
                 )
+                period = period_struct.get("result")
                 if period:
                     status, detail, missing, recognized = period
                     if status == "period_ready" and alias and not actual:
@@ -1583,15 +1611,25 @@ async def run_inspection(
                     period_evidence = {
                         "is_segmented": True,
                         "parts_total": len(parts),
+                        "outcome_kind": period_struct.get("outcome_kind", "ok"),
                         "source_status": src_period[0] if src_period else None,
                         "archive_status": arc_period[0] if arc_period else None,
                         "combined_status": status,
                         "confirmed_missing": missing,
+                        "whole_period_verified": whole_period_verified,
                         "partial_period_notes": re.findall(r"第\s*\d+\s*期上段已收，下段播期待确认", detail),
                     }
                 else:
                     status = "archive_check"
-                    detail = "本季含分段，目录中还有无法核实的内容。请检查子目录及未编号视频。"
+                    detail = period_struct.get("detail") or "文件内容待识别：目录中存在未核实子目录或未编号视频，请核查具体文件。"
+                    period_evidence = {
+                        "is_segmented": True,
+                        "parts_total": len(parts),
+                        "outcome_kind": period_struct.get("outcome_kind", "unrecognized_content"),
+                        "subdirs": period_struct.get("subdirs") or [],
+                        "unrecognized_videos": period_struct.get("unrecognized_videos") or [],
+                        "strm_files": period_struct.get("strm_files") or [],
+                    }
 
             # 组装季级播出证据与三组进度 (L01-L09)
             raw_b_ev = dict(info.get("broadcast_evidence") or {})
@@ -1667,7 +1705,7 @@ async def run_inspection(
                 season_finished = False
                 missing = []
                 pend_reason = raw_b_ev.get("missing_evidence_reason") or "欠缺本季播期或终集依据"
-                detail = f"证据待决 · 安全保留：{pend_reason}。源端已识别 {len(source_only_pos_eps)} 集正片，文件保留在源目录。"
+                detail = f"播期资料待核实：{pend_reason}。源端已识别 {len(source_only_pos_eps)} 集正片，文件保留在源目录。"
             elif b_status == "airing" and not identity_conflict and not multi_archive_dirs:
                 season_finished = False
                 uncollected_aired = sorted(set(aired_eps_list) - set(all_cov_pos))
@@ -1795,6 +1833,51 @@ async def run_inspection(
                 for f in season_files
                 if not f.get("isDirectory")
             ]
+
+            # 统一内容等价组内存预分析（G01-G05, G26）：区分真重复副本 vs 不同内容/剪辑版本共存
+            review_plan_preview: dict[str, Any] = {}
+            review_resolution: dict[str, Any] = {}
+            if season_files and not identity_conflict:
+                try:
+                    _rp = generate_review_clean_plan(
+                        files=season_files,
+                        season_number=season_num,
+                        total_episodes=int(total_eps or max(recognized, default=0) or 0),
+                    )
+                    review_plan_preview = {
+                        "plan_id": _rp.get("plan_id") or "",
+                        "rules_version": _rp.get("rules_version") or "v2.5.45",
+                        "can_clean": bool(_rp.get("can_clean")),
+                        "to_delete_count": len(_rp.get("to_delete") or []),
+                        "reclaimable_bytes": int(_rp.get("reclaimable_bytes") or 0),
+                        "version_note": str(_rp.get("version_note") or ""),
+                        "reason": str(_rp.get("reason") or ""),
+                        "all_distinct_retained": bool(_rp.get("all_distinct_retained")),
+                        "distinct_retention_note": str(_rp.get("distinct_retention_note") or ""),
+                    }
+                    if _rp.get("all_distinct_retained") and not _rp.get("can_clean"):
+                        # 全部同集多文件经内容等价判定属于不同内容/剪辑版本 -> 消除分流循环 (G26)
+                        raw_dups_preserved = list(duplicates)
+                        duplicates = []
+                        if status == "review_needed":
+                            re_st, re_det = diagnose_season(
+                                recognized=recognized,
+                                total_episodes=total_eps,
+                                season_finished=season_finished,
+                                has_duplicates=False,
+                                duplicate_episodes=[],
+                                allow_bonus_specials=True,
+                            )
+                            status = re_st
+                            detail = f"{re_det}（{_rp.get('distinct_retention_note') or '多内容版本均已保留'}）"
+                        review_resolution = {
+                            "all_distinct_retained": True,
+                            "raw_duplicate_episodes": raw_dups_preserved,
+                            "note": _rp.get("distinct_retention_note") or "多内容版本均已保留",
+                        }
+                except Exception as _rp_err:
+                    log.debug("预分析复核清理计划异常: %s", _rp_err)
+
             asset_fp = compute_asset_fingerprint(
                 recognized_episodes=recognized,
                 duplicate_episodes=duplicates,
@@ -1806,12 +1889,17 @@ async def run_inspection(
                 meta_status=meta_status,
                 broadcast_status=broadcast_evidence_payload.get("status") or "",
             )
+            if review_resolution:
+                review_resolution["fingerprint"] = asset_fp
 
             evidence_payload = {
                 "meta_status": meta_status,
                 "metadata_binding_verified": bool(active_mapping or (info.get("total") and not info.get("candidate_id"))),
                 "asset_fingerprint": asset_fp,
                 "source_total_conflict": source_total_conflict_info,
+                "source_fusion": info.get("source_fusion") or {},
+                "review_plan_preview": review_plan_preview,
+                "review_resolution": review_resolution,
                 "meta_error": meta_evidence.get("meta_error") or "",
                 "stale_cache_reused": bool(info.get("stale_cache_reused")),
                 "matched_work": (
@@ -3081,13 +3169,89 @@ def _merge_season_sources(primary: dict, secondary: dict | None) -> dict:
     if not secondary:
         return info
     tmdb_total = primary.get("total") or 0
-    db_total = secondary["total"]
+    db_total = int(secondary.get("total") or 0)
     if not tmdb_total:
-        return {**info, **secondary}
-    return {**info, "tmdb_total": tmdb_total, "douban_total": db_total,
-            "douban_id": secondary["douban_id"], "bound": secondary["bound"],
-            "douban_finished": secondary.get("finished", False),
-            "is_split_edition": max(tmdb_total, db_total) >= 1.5 * min(tmdb_total, db_total)}
+        merged = {**info, **secondary}
+        merged["source_fusion"] = {
+            "tmdb_total": 0,
+            "douban_total": db_total,
+            "douban_id": secondary.get("douban_id"),
+            "douban_bound": bool(secondary.get("bound")),
+            "adopted_total": db_total,
+            "adopted_basis": "douban_only",
+        }
+        return merged
+
+    merged = {
+        **info,
+        "tmdb_total": tmdb_total,
+        "douban_total": db_total,
+        "douban_id": secondary["douban_id"],
+        "bound": bool(secondary.get("bound")),
+        "douban_finished": bool(secondary.get("finished", False)),
+        "is_split_edition": (
+            bool(db_total > 0 and max(tmdb_total, db_total) >= 1.5 * min(tmdb_total, db_total))
+        ),
+    }
+
+    # 按事实融合豆瓣与 TMDB 播期证据：绝不让超出豆瓣正片期数的无日期衍生/加更条目（如 E42）覆盖整季正片播毕结论
+    b_ev = dict(primary.get("broadcast_evidence") or {})
+    if db_total > 0 and b_ev:
+        reg_range = set(range(1, db_total + 1))
+        aired_set = {int(x) for x in (b_ev.get("aired_episodes") or []) if str(x).isdigit() and int(x) > 0}
+        upcoming_set = {int(x) for x in (b_ev.get("upcoming_episodes") or []) if str(x).isdigit() and int(x) > 0}
+        today_set = {int(x) for x in (b_ev.get("today_scheduled_episodes") or []) if str(x).isdigit() and int(x) > 0}
+        undated_set = {int(x) for x in (b_ev.get("undated_episodes") or []) if str(x).isdigit() and int(x) > 0}
+        reg_future = reg_range & (upcoming_set | today_set)
+        reg_undated = reg_range & undated_set
+        extra_undated = sorted(e for e in undated_set if e > db_total)
+
+        if b_ev.get("status") == "evidence_pending":
+            if (reg_range <= aired_set or secondary.get("finished")) and not reg_future and not reg_undated:
+                b_ev["status"] = "finished"
+                b_ev["schedule_verified"] = True
+                b_ev["source"] = "tmdb_douban_fused"
+                b_ev["undated_extra_ignored"] = extra_undated
+                b_ev["missing_evidence_reason"] = ""
+                merged["finished"] = True
+                merged["broadcast_evidence"] = b_ev
+            elif reg_future:
+                b_ev["status"] = "airing" if (aired_set & reg_range) else "upcoming"
+                b_ev["schedule_verified"] = True
+                b_ev["source"] = "tmdb_douban_fused"
+                b_ev["missing_evidence_reason"] = ""
+                merged["finished"] = False
+                merged["broadcast_evidence"] = b_ev
+            elif secondary.get("bound") and not reg_future and len(aired_set & reg_range) >= db_total:
+                b_ev["status"] = "finished"
+                b_ev["schedule_verified"] = True
+                b_ev["source"] = "tmdb_douban_fused"
+                b_ev["undated_extra_ignored"] = extra_undated
+                b_ev["missing_evidence_reason"] = ""
+                merged["finished"] = True
+                merged["broadcast_evidence"] = b_ev
+            elif secondary.get("bound") and not reg_future and not reg_undated and str(primary.get("season_year") or "").isdigit():
+                from datetime import datetime as _dt
+                if int(primary["season_year"]) < _dt.now().year and len(aired_set) > 0:
+                    b_ev["status"] = "finished"
+                    b_ev["schedule_verified"] = True
+                    b_ev["source"] = "tmdb_douban_fused_historical"
+                    b_ev["undated_extra_ignored"] = extra_undated
+                    b_ev["missing_evidence_reason"] = ""
+                    merged["finished"] = True
+                    merged["broadcast_evidence"] = b_ev
+
+    merged["source_fusion"] = {
+        "tmdb_total": tmdb_total,
+        "douban_total": db_total,
+        "douban_id": secondary.get("douban_id"),
+        "douban_bound": bool(secondary.get("bound")),
+        "douban_finished": bool(secondary.get("finished", False)),
+        "tmdb_broadcast_status": (primary.get("broadcast_evidence") or {}).get("status") or "",
+        "fused_broadcast_status": (merged.get("broadcast_evidence") or {}).get("status") or "",
+        "is_split_edition": merged["is_split_edition"],
+    }
+    return merged
 
 
 def unverified_metadata_candidates(evidence: dict, tmdb_id, season_number: int) -> list[dict]:

@@ -447,29 +447,15 @@ class TestV2538GapFillModule(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sum2["released_to_todo"], 1)
             self.assertEqual(sum2["still_pending"], 1)
 
-            # D09: 预览并执行放弃补缺删除源端本季
-            with (
-                patch("app.api.archive.get_settings", side_effect=_mock_settings),
-                patch("app.api.archive.CloudDrive2Client") as mock_cd2_cls,
-            ):
-                inst = mock_cd2_cls.return_value
-                inst.list_files = AsyncMock(side_effect=lambda p, force_refresh=False: (
-                    [{"name": "Season 1", "path": rec.season_path, "isDirectory": True}]
-                    if p == rec.show_path
-                    else [{"name": "TestShow.S01E01.mkv", "path": f"{rec.season_path}/TestShow.S01E01.mkv", "size": 2048, "isDirectory": False}]
-                ))
-                inst.delete_file = AsyncMock(return_value=True)
-                inst.close = AsyncMock()
+            # D09 (v2.5.45 G22 升级): 缺集待补取消删除源端本季入口，preview 与 execute 必须返回 HTTP 409 拦截
+            from fastapi import HTTPException
+            with self.assertRaises(HTTPException) as ctx_prev:
+                await preview_delete_source_season(DeleteSourceSeasonRequest(season_record_id="rec_d08"), db=db)
+            self.assertEqual(ctx_prev.exception.status_code, 409)
 
-                prev = await preview_delete_source_season(DeleteSourceSeasonRequest(season_record_id="rec_d08"), db=db)
-                self.assertTrue(prev["ok"])
-                self.assertEqual(prev["archive_impact"], "none")
-                self.assertEqual(prev["video_count"], 1)
-
-                del_res = await delete_source_season(DeleteSourceSeasonRequest(season_record_id="rec_d08"), db=db)
-                self.assertTrue(del_res.ok)
-                await db.refresh(rec)
-                self.assertEqual(rec.status, "source_absent")
+            with self.assertRaises(HTTPException) as ctx_del:
+                await delete_source_season(DeleteSourceSeasonRequest(season_record_id="rec_d08"), db=db)
+            self.assertEqual(ctx_del.exception.status_code, 409)
 
 
 if __name__ == "__main__":

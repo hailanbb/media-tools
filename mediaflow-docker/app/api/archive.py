@@ -9,6 +9,7 @@ import os
 import posixpath
 import re
 from datetime import datetime
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
@@ -19,10 +20,10 @@ from app.clients.clouddrive2 import CloudDrive2Client
 from app.clients.moviepilot import MoviePilotClient
 from app.config import get_settings
 from app.core.directory_governance import find_blocking_group_for_record, normalize_dir_path
-from app.core.episode_parser import is_subtitle_file, is_video_file, parse_episode
+from app.core.episode_parser import classify_content_unit, is_subtitle_file, is_video_file, parse_episode
 from app.core.inspector import _parse_season_number, _verified_video, diagnose_season
 from app.core.segments import segment_number
-from app.core.review_engine import generate_review_clean_plan
+from app.core.review_engine import compare_plan_fingerprints, generate_review_clean_plan
 from app.database import get_db
 from app.models.operation import OperationLog
 from app.models.season import SeasonRecord
@@ -49,6 +50,7 @@ class _ArchiveRequest(BaseModel):
     force_clean: bool = False
     plan_id: str | None = None
     batch_id: str | None = None
+    expected_fingerprints: dict[str, dict[str, Any]] | None = None
 
 
 class ArchivePreviewRequest(BaseModel):
@@ -2241,16 +2243,37 @@ async def clean_duplicates(
     affected_tasks: set[str] = set()
 
     try:
+        # 可选查询 MoviePilot 活跃下载路径以防止清理连载季正在写入/做种的文件 (G02)
+        active_dl_paths: set[str] = set()
+        try:
+            settings = get_settings()
+            if settings.mp_url and settings.mp_token:
+                mp_probe = MoviePilotClient()
+                try:
+                    dls = await mp_probe.get_active_downloads()
+                    for dl in (dls if isinstance(dls, list) else []):
+                        for k in ("path", "save_path", "content_path", "target_path", "title", "name"):
+                            val = str(dl.get(k) or "").strip()
+                            if val:
+                                active_dl_paths.add(val)
+                finally:
+                    await mp_probe.close()
+        except Exception:
+            pass
+
         for rec in records:
             season_path = rec.season_path
 
-            from app.core.season_classifier import get_record_work_main_category
+            from app.core.season_classifier import get_record_work_main_category, is_airing_protected
             work_cat = await get_record_work_main_category(db, rec)
-            if work_cat == "airing" or rec.status == "airing" or (rec.season_finished is False and "连载中" in str(rec.status_detail or "")):
-                errors.append(f"{rec.show_name}：当前作品季处于「连载留源」状态，连载期暂不开放重复版本清理")
-                continue
+            was_airing = bool(
+                work_cat == "airing"
+                or rec.status == "airing"
+                or is_airing_protected(rec)
+                or (rec.season_finished is False and "连载中" in str(rec.status_detail or ""))
+            )
 
-            if rec.status in ("archive_check", "period_review", "period_ready", "period_missing", "identity_review", "already_archived", "manually_handled", "verified_complete"):
+            if rec.status in ("archive_check", "period_ready", "identity_review", "already_archived", "manually_handled", "verified_complete"):
                 errors.append(f"{rec.show_name}：当前处理方式不适用重复版本清理")
                 continue
             c_info = json.loads(rec.conflict_json or "{}") if getattr(rec, "conflict_json", None) else {}
@@ -2274,14 +2297,67 @@ async def clean_duplicates(
                 errors.append(f"{rec.show_name} S{rec.season_number:02d}: 列出网盘文件失败: {e}")
                 continue
 
-            # 使用 tv-workflow-win 工业级算法生成复核清理计划（版本模板分组 + 完整版本优先淘汰残卷）
+            # 使用统一内容等价组算法生成复核清理计划（G01-G05）
             total_eps = rec.total_episodes or len(all_files)
             plan = generate_review_clean_plan(
                 files=all_files,
                 season_number=rec.season_number,
                 total_episodes=total_eps,
                 force_clean=body.force_clean,
+                active_download_paths=active_dl_paths if was_airing else None,
             )
+
+            # G24: 执行前局部复核文件变化，若预览后新增或变化了视频文件导致范围扩大则阻断并要求重新预览
+            if body.expected_fingerprints:
+                planned_del_set = {d.get("path", "") for d in (plan.get("to_delete") or []) if d.get("path")}
+                fp_diff = compare_plan_fingerprints(body.expected_fingerprints, all_files, planned_del_set)
+                if fp_diff.get("needs_repreview"):
+                    errors.append(
+                        f"{rec.show_name} S{rec.season_number:02d}: 预览后检测到目录文件发生变化（新增/变动视频 {len(fp_diff['added_videos']) + len(fp_diff['modified_videos'])} 个），已拦截执行，请先更新预览后再确认"
+                    )
+                    continue
+
+            # G26: 若全部同集文件均属于不同内容/剪辑版本（无需删除），落库防循环指纹并直接重新分流
+            if plan.get("all_distinct_retained") and not plan.get("can_clean"):
+                affected_tasks.add(rec.task_id)
+                try:
+                    ev_cur = json.loads(rec.evidence_json or "{}") if getattr(rec, "evidence_json", None) else {}
+                except Exception:
+                    ev_cur = {}
+                if not isinstance(ev_cur, dict):
+                    ev_cur = {}
+                ev_cur["review_resolution"] = {
+                    "all_distinct_retained": True,
+                    "fingerprint": ev_cur.get("asset_fingerprint") or "",
+                    "note": plan.get("distinct_retention_note") or "多内容版本均已保留",
+                }
+                ev_cur["review_plan_preview"] = {
+                    "plan_id": plan.get("plan_id") or "",
+                    "rules_version": plan.get("rules_version") or "v2.5.45",
+                    "can_clean": False,
+                    "to_delete_count": 0,
+                    "all_distinct_retained": True,
+                    "distinct_retention_note": plan.get("distinct_retention_note") or "多内容版本均已保留",
+                }
+                rec.evidence_json = json.dumps(ev_cur, ensure_ascii=False)
+                rec.duplicate_episodes_json = "[]"
+                if was_airing:
+                    rec.status = "airing"
+                    rec.season_finished = False
+                    rec.status_detail = f"多内容版本均已保留，返回连载留源（{plan.get('distinct_retention_note') or ''}）"
+                elif rec.status == "review_needed":
+                    cur_rec_eps = json.loads(rec.recognized_episodes_json or "[]")
+                    re_st, re_det = diagnose_season(
+                        recognized=cur_rec_eps,
+                        total_episodes=rec.total_episodes,
+                        season_finished=rec.season_finished,
+                        has_duplicates=False,
+                        duplicate_episodes=[],
+                        allow_bonus_specials=True,
+                    )
+                    rec.status = re_st
+                    rec.status_detail = f"{re_det}（{plan.get('distinct_retention_note') or '多内容版本均已保留'}）"
+                continue
 
             if not plan.get("can_clean", False):
                 reason_str = plan.get("reason", "未满足清理条件")
@@ -2318,7 +2394,6 @@ async def clean_duplicates(
                     errors.append(f"删除视频 {fname} 失败: {str(de)[:100]}")
 
             # 提取成功删除视频的词干名 (stem)，伴生文件必须严格依附于已确认删除的主文件
-            import posixpath
             deleted_video_stems = {posixpath.splitext(posixpath.basename(p))[0] for p in deleted_video_paths}
 
             # 2. 安全删除仅属于已确认删除视频的伴生文件，主视频删除失败严格保留附件
@@ -2365,22 +2440,59 @@ async def clean_duplicates(
 
                     from collections import Counter
                     fresh_recognized = sorted(set(all_fresh_eps))
-                    ep_cnt = Counter(all_fresh_eps)
-                    fresh_duplicates = sorted([n for n, c in ep_cnt.items() if c > 1])
+
+                    # 清理后立即以统一内容等价引擎重算是否还存在真重复副本（防止加长版/普通版共存被判成重复循环 · G26）
+                    post_plan = generate_review_clean_plan(
+                        files=fresh_files,
+                        season_number=rec.season_number,
+                        total_episodes=rec.total_episodes or len(fresh_files),
+                        active_download_paths=active_dl_paths if was_airing else None,
+                    )
+                    if post_plan.get("can_clean"):
+                        ep_cnt = Counter(all_fresh_eps)
+                        fresh_duplicates = sorted([n for n, c in ep_cnt.items() if c > 1])
+                    else:
+                        fresh_duplicates = []
 
                     fresh_missing = []
                     if rec.total_episodes:
                         fresh_missing = sorted(set(range(1, rec.total_episodes + 1)) - set(fresh_recognized))
 
+                    try:
+                        ev_after = json.loads(rec.evidence_json or "{}") if getattr(rec, "evidence_json", None) else {}
+                    except Exception:
+                        ev_after = {}
+                    if not isinstance(ev_after, dict):
+                        ev_after = {}
+                    ev_after["review_plan_preview"] = {
+                        "plan_id": post_plan.get("plan_id") or "",
+                        "rules_version": post_plan.get("rules_version") or "v2.5.45",
+                        "can_clean": bool(post_plan.get("can_clean")),
+                        "to_delete_count": len(post_plan.get("to_delete") or []),
+                        "all_distinct_retained": bool(post_plan.get("all_distinct_retained")),
+                        "distinct_retention_note": str(post_plan.get("distinct_retention_note") or ""),
+                    }
+                    if post_plan.get("all_distinct_retained") and not post_plan.get("can_clean"):
+                        ev_after["review_resolution"] = {
+                            "all_distinct_retained": True,
+                            "fingerprint": ev_after.get("asset_fingerprint") or "",
+                            "note": post_plan.get("distinct_retention_note") or "多内容版本均已保留",
+                        }
+
                     if verification_passed:
-                        new_status, new_detail = diagnose_season(
-                            recognized=fresh_recognized,
-                            total_episodes=rec.total_episodes,
-                            season_finished=rec.season_finished,
-                            has_duplicates=bool(fresh_duplicates),
-                            duplicate_episodes=fresh_duplicates,
-                            allow_bonus_specials=True,
-                        )
+                        if was_airing:
+                            # G02: 连载季清理稳定副本后必须返回连载留源，绝不越级归档
+                            new_status = "airing"
+                            new_detail = f"已清理 {len(deleted_video_paths)} 个稳定重复副本，保全连载期其余内容，已返回「连载留源」"
+                        else:
+                            new_status, new_detail = diagnose_season(
+                                recognized=fresh_recognized,
+                                total_episodes=rec.total_episodes,
+                                season_finished=rec.season_finished,
+                                has_duplicates=bool(fresh_duplicates),
+                                duplicate_episodes=fresh_duplicates,
+                                allow_bonus_specials=True,
+                            )
                         op_status = "completed"
                     else:
                         new_status = "review_needed"
@@ -2400,6 +2512,7 @@ async def clean_duplicates(
                     rec.missing_episodes_json = json.dumps(fresh_missing)
                     rec.status = new_status
                     rec.status_detail = new_detail
+                    rec.evidence_json = json.dumps(ev_after, ensure_ascii=False)
                     log.info("季度状态自动重新计算: %s S%02d -> %s (%s)", rec.show_name, rec.season_number, new_status, new_detail)
 
                     op_log = OperationLog(
@@ -2410,10 +2523,12 @@ async def clean_duplicates(
                         detail_json=json.dumps({
                             "show": rec.show_name,
                             "season": rec.season_number,
+                            "plan_id": plan.get("plan_id"),
                             "version_note": plan["version_note"],
                             "deleted_paths": deleted_files_this_season,
                             "failed_paths": failed_items,
                             "verification_passed": verification_passed,
+                            "next_status": new_status,
                         }, ensure_ascii=False),
                     )
                     db.add(op_log)
@@ -2432,7 +2547,6 @@ async def clean_duplicates(
         await cd2.close()
 
     has_deleted = (total_deleted_videos > 0 or total_deleted_orphans > 0)
-    # P1-9 修复：若没有成功删除任何文件且存在错误/异常，绝对不能报告成功
     if not has_deleted and errors:
         is_ok = False
     elif is_all_failed := (len(errors) == len(records) and not has_deleted):
@@ -2458,6 +2572,14 @@ class CleanPreviewItem(BaseModel):
     version_note: str
     to_keep: list[dict]
     to_delete: list[dict]
+    plan_id: str = ""
+    rules_version: str = "v2.5.45"
+    reclaimable_bytes: int = 0
+    file_fingerprints: dict[str, dict[str, Any]] = {}
+    deferred_files: list[dict] = []
+    all_distinct_retained: bool = False
+    distinct_retention_note: str = ""
+    is_airing: bool = False
 
 
 class CleanPreviewResponse(BaseModel):
@@ -2471,7 +2593,7 @@ async def clean_duplicates_preview(
     body: _ArchiveRequest,
     db: AsyncSession = Depends(get_db),
 ) -> CleanPreviewResponse:
-    """试跑复核清理计划 — 预览将要保留与删除的文件列表及判定理由，不执行真实删除。"""
+    """试跑复核清理计划 — 预览将要保留与删除的文件列表、内容等价理由与文件指纹，不执行真实删除。"""
     if not body.season_record_ids:
         return CleanPreviewResponse(ok=False, message="未选择任何项目", previews=[])
 
@@ -2488,20 +2610,14 @@ async def clean_duplicates_preview(
     try:
         for rec in records:
             season_path = rec.season_path
-            from app.core.season_classifier import get_record_work_main_category
+            from app.core.season_classifier import get_record_work_main_category, is_airing_protected
             work_cat = await get_record_work_main_category(db, rec)
-            if work_cat == "airing" or rec.status == "airing" or (rec.season_finished is False and "连载中" in str(rec.status_detail or "")):
-                previews.append(CleanPreviewItem(
-                    season_record_id=rec.id,
-                    show_name=rec.show_name,
-                    season_number=rec.season_number,
-                    can_clean=False,
-                    reason="当前作品季处于「连载留源」状态，连载期暂不开放重复版本清理",
-                    version_note="",
-                    to_keep=[],
-                    to_delete=[],
-                ))
-                continue
+            was_airing = bool(
+                work_cat == "airing"
+                or rec.status == "airing"
+                or is_airing_protected(rec)
+                or (rec.season_finished is False and "连载中" in str(rec.status_detail or ""))
+            )
             try:
                 all_files = await cd2.list_files(season_path, force_refresh=True)
             except Exception as e:
@@ -2514,6 +2630,7 @@ async def clean_duplicates_preview(
                     version_note="",
                     to_keep=[],
                     to_delete=[],
+                    is_airing=was_airing,
                 ))
                 continue
 
@@ -2534,6 +2651,14 @@ async def clean_duplicates_preview(
                 version_note=str(plan.get("version_note", "")),
                 to_keep=list(plan.get("to_keep", [])),
                 to_delete=list(plan.get("to_delete", [])),
+                plan_id=str(plan.get("plan_id", "")),
+                rules_version=str(plan.get("rules_version", "v2.5.45")),
+                reclaimable_bytes=int(plan.get("reclaimable_bytes", 0)),
+                file_fingerprints=dict(plan.get("file_fingerprints") or {}),
+                deferred_files=list(plan.get("deferred_files") or []),
+                all_distinct_retained=bool(plan.get("all_distinct_retained", False)),
+                distinct_retention_note=str(plan.get("distinct_retention_note", "")),
+                is_airing=was_airing,
             ))
     finally:
         await cd2.close()
@@ -2667,6 +2792,7 @@ async def clean_source_redundant(
 
                 src_video_eps: set[int] = set()
                 src_subs: list[dict] = []
+                src_unique_content_videos: list[tuple[dict, tuple]] = []
                 unrecognized_videos: list[dict] = []
                 for sf in src_files:
                     if sf.get("isDirectory"):
@@ -2674,7 +2800,14 @@ async def clean_source_redundant(
                     sf_name = sf.get("name", "")
                     if is_video_file(sf_name):
                         p_sf = parse_episode(sf_name, sf.get("path", ""), sf.get("size", 0))
-                        if _verified_video(p_sf, rec.season_number) and not segment_number(sf_name):
+                        # G10: 识别源端独有的加更/加长版/Vlog/纯享/先导等明确内容版本（先保全至归档再清源）
+                        is_distinct_known_content = (
+                            (p_sf.content_kind in ("vlog", "extra_ep", "pure", "pilot", "interview", "easter_egg"))
+                            or (p_sf.content_kind == "regular" and p_sf.edit_version != "standard" and bool(p_sf.episode_numbers))
+                        )
+                        if is_distinct_known_content and int(sf.get("size") or 0) > 0:
+                            src_unique_content_videos.append((sf, p_sf.content_unit_key))
+                        elif _verified_video(p_sf, rec.season_number) and not segment_number(sf_name):
                             src_video_eps.update(p_sf.episode_numbers)
                         else:
                             unrecognized_videos.append(sf)
@@ -2684,19 +2817,23 @@ async def clean_source_redundant(
                         raise ValueError("源端另有待核对文件：" + sf_name)
 
                 target_video_eps: set[int] = set()
+                target_content_keys: set[tuple] = set()
+                target_names_lower: set[str] = set()
                 target_sub_sizes = {}
                 for tf in target_files:
                     if tf.get("isDirectory"):
                         continue
                     tf_name = tf.get("name", "")
+                    target_names_lower.add(tf_name.casefold())
                     if is_video_file(tf_name):
                         p_tf = parse_episode(tf_name, tf.get("path", ""), tf.get("size", 0))
+                        target_content_keys.add(p_tf.content_unit_key)
                         if _verified_video(p_tf, rec.season_number) and not segment_number(tf_name):
                             target_video_eps.update(p_tf.episode_numbers)
                     elif is_subtitle_file(tf_name):
                         target_sub_sizes[tf_name.casefold()] = tf.get("size")
 
-                # 核验 A: 源端若未识别到任何有效正片集号，或含有无法识别集号的正片视频，绝对拦截删除（源集数与记录不变）
+                # 核验 A: 源端若含有无法识别集号的正片视频，绝对拦截删除（源集数与记录不变）
                 if unrecognized_videos:
                     unrec_names = [f.get("name", "") for f in unrecognized_videos[:2]]
                     err_msg = f"{rec.show_name} S{rec.season_number:02d}: 源端含有未识别集号的正片视频 ({unrec_names})，证据不足拦截删除！"
@@ -2704,15 +2841,19 @@ async def clean_source_redundant(
                     errors.append(err_msg)
                     continue
 
-                if not src_video_eps:
-                    has_video = any(not f.get("isDirectory") and is_video_file(f.get("name", "")) for f in src_files)
-                    reason = "本层的视频均标记为花絮" if has_video else "源季目录本层没有支持的视频文件"
-                    err_msg = f"{rec.show_name} S{rec.season_number:02d}: {reason}，已保留源目录。"
-                    log.warning(err_msg)
-                    errors.append(err_msg)
-                    continue
+                if not src_video_eps and not src_unique_content_videos:
+                    # 源端仅剩附件且归档已独立完整覆盖全季（Section 6.1）
+                    if rec.total_episodes and set(range(1, rec.total_episodes + 1)) <= target_video_eps:
+                        pass
+                    else:
+                        has_video = any(not f.get("isDirectory") and is_video_file(f.get("name", "")) for f in src_files)
+                        reason = "本层的视频均标记为花絮" if has_video else "源季目录本层没有支持的视频文件"
+                        err_msg = f"{rec.show_name} S{rec.season_number:02d}: {reason}，已保留源目录。"
+                        log.warning(err_msg)
+                        errors.append(err_msg)
+                        continue
 
-                # 核验 B: 目标端必须完整包含源端所有正片集号 (source_eps ⊆ target_eps)，证据不足坚决拦截（源集数与记录不变）
+                # 核验 B: 目标端必须完整包含源端所有正片集号 (source_eps ⊆ target_eps)，证据不足坚决拦截
                 uncovered_eps = sorted(src_video_eps - target_video_eps)
                 if rec.total_episodes and not set(range(1, rec.total_episodes + 1)) <= target_video_eps:
                     raise ValueError("归档目录已无法核实全季覆盖")
@@ -2724,7 +2865,23 @@ async def clean_source_redundant(
 
                 if any(posixpath.dirname(f["path"]) != norm_src for f in src_files):
                     raise ValueError("文件路径与源季目录不一致")
-                # 核验 C: 源端独有外挂字幕自动迁移至目标库
+
+                # 核验 C (G10): 先保全源端独有加更/加长版/Vlog/纯享内容至归档目录，核验到达后再清源
+                preserved_unique_names: set[str] = set()
+                for uf, u_ckey in src_unique_content_videos:
+                    u_name = uf.get("name", "")
+                    if u_ckey in target_content_keys or u_name.casefold() in target_names_lower:
+                        continue
+                    try:
+                        mv_u = await cd2.move_file(uf.get("path"), archive_target, skip_existing=True)
+                        if not mv_u.get("success", False):
+                            raise ValueError(f"网盘未确认独有内容 {u_name} 迁入归档成功")
+                        preserved_unique_names.add(u_name)
+                        log.info("源端清源前已安全保全独有内容至归档: %s -> %s", u_name, archive_target)
+                    except Exception as u_mv_err:
+                        raise ValueError(f"保全源端独有内容 {u_name} 失败") from u_mv_err
+
+                # 核验 D: 源端独有外挂字幕自动迁移至目标库
                 for sub in src_subs:
                     s_name = sub.get("name", "")
                     if s_name.casefold() in target_sub_sizes and sub.get("size") != target_sub_sizes[s_name.casefold()]:
@@ -2737,13 +2894,21 @@ async def clean_source_redundant(
                             log.info("源端残留清理前已安全迁移独有字幕: %s -> %s", s_name, archive_target)
                         except Exception as sub_mv_err:
                             raise ValueError(f"迁移字幕 {s_name} 失败") from sub_mv_err
-                moved_names = {s["name"] for s in src_subs if s["name"].casefold() not in target_sub_sizes}
+                moved_names = {s["name"] for s in src_subs if s["name"].casefold() not in target_sub_sizes} | preserved_unique_names
                 def signature(files):
                     return sorted((f["path"], f.get("size"), f.get("modified"), f.get("isDirectory"))
                                   for f in files)
                 fresh_source = await cd2.list_files(source_season_path, force_refresh=True)
                 if signature(fresh_source) != signature([f for f in src_files if f["name"] not in moved_names]):
                     raise ValueError("源季内容已变化，请重新初检")
+
+                # 若保全了独有内容，核验目标归档目录中确已存在
+                if preserved_unique_names:
+                    fresh_target_after = await cd2.list_files(archive_target, force_refresh=True)
+                    fresh_target_names = {f.get("name", "").casefold() for f in fresh_target_after}
+                    missing_preserved = [n for n in preserved_unique_names if n.casefold() not in fresh_target_names]
+                    if missing_preserved:
+                        raise ValueError(f"归档目标未核验到保全文件: {missing_preserved}")
 
             except Exception as chk_err:
                 err_msg = f"{rec.show_name} S{rec.season_number:02d}: 校验两端文件清单失败 ({chk_err})，安全拦截源端删除！"
@@ -2752,12 +2917,31 @@ async def clean_source_redundant(
                 continue
 
             try:
-                # 1. 安全删除源端冗余季目录
+                # 1. 安全回收源端冗余季目录
                 log.info("已通过全部覆盖门禁，正在安全清理源端冗余季目录: %s", source_season_path)
                 await cd2.delete_file(source_season_path)
+
+                # 2. 空壳检查：仅在剧根仅剩空壳且无其他季/内容时清理剧根
+                shell_cleaned = False
+                if show_path:
+                    try:
+                        shell_cleaned = await _safe_cleanup_source_show_dir(cd2, show_path, posixpath.dirname(archive_target))
+                    except Exception:
+                        shell_cleaned = False
+
+                # 3. 刷新剧集所在父目录及相关季目录
+                refresh_errors: list[str] = []
+                for ref_dir in {posixpath.dirname(show_path) if show_path else "", show_path or "", archive_target}:
+                    if ref_dir and not (shell_cleaned and ref_dir == show_path):
+                        try:
+                            await cd2.list_files(ref_dir, force_refresh=True)
+                        except Exception as re_err:
+                            refresh_errors.append(f"{ref_dir}: {re_err}")
+
                 success_count += 1
                 rec.status = "cleaned_redundant"
-                rec.status_detail = f"已安全清理源端冗余残留目录 ({source_season_path})"
+                preserved_note = f"（已先保全 {len(preserved_unique_names)} 个独有内容至归档）" if preserved_unique_names else ""
+                rec.status_detail = f"源端已清理，归档已保留{preserved_note}"
                 affected_tasks.add(rec.task_id)
 
                 op_log = OperationLog(
@@ -2769,6 +2953,10 @@ async def clean_source_redundant(
                         "show": rec.show_name,
                         "season": rec.season_number,
                         "deleted_path": source_season_path,
+                        "preserved_unique_files": sorted(preserved_unique_names),
+                        "shell_cleaned": shell_cleaned,
+                        "refresh_errors": refresh_errors,
+                        "receipt": "源端已清理，归档已保留",
                     }, ensure_ascii=False),
                 )
                 db.add(op_log)
@@ -2786,7 +2974,7 @@ async def clean_source_redundant(
     finally:
         await cd2.close()
 
-    msg = f"冗余清理完成：{success_count}/{len(records)} 季源端残留已删除"
+    msg = f"源端已清理，归档已保留：{success_count}/{len(records)} 季清源完成"
     if errors:
         msg += f"，遇到 {len(errors)} 项提醒: {'; '.join(errors[:2])}"
 
@@ -2886,7 +3074,7 @@ async def delete_source_show(
             return StatusResponse(ok=False, message=f"严重危险拦截：目标路径属于归档库根目录或其子路径，严禁删除: {show_path}")
 
     if rec.status in ("download_needed", "period_missing"):
-        return StatusResponse(ok=False, message="真缺集待补剧集严禁删除源端整剧，仅支持推送补缺")
+        return StatusResponse(ok=False, message="缺集待补剧集严禁删除源端整剧，仅支持推送补缺")
     return StatusResponse(
         ok=False,
         message="安全拦截：异常剧集模块已禁止整剧级删除父目录，仅支持单季级受控清理",
@@ -2997,10 +3185,10 @@ async def preview_delete_source_season(
             detail="当前作品季处于「连载留源」状态，连载期严禁执行单季删源"
         )
 
-    if rec.status not in ("download_needed", "period_missing"):
+    if rec.status != "already_archived":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"仅允许对「真缺集待补」状态的季度执行放弃补缺预检，当前状态为: {rec.status}"
+            detail=f"「缺集待补」已取消删除源端入口，单季清源仅限「待复核清理」中经核验通过的归档已齐季（already_archived）执行，当前状态为: {rec.status}"
         )
 
     season_path = rec.season_path
@@ -3193,14 +3381,17 @@ async def delete_source_season(
             detail="当前作品季处于「连载留源」状态，连载期严禁执行单季删源"
         )
 
-    if rec.status not in ("download_needed", "period_missing"):
+    if rec.status != "already_archived":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"仅允许对「真缺集待补」状态的季度执行放弃补缺并删源，当前状态为: {rec.status}"
+            detail=f"「缺集待补」已取消删除源端入口，单季清源仅限「待复核清理」中经核验通过的归档已齐季（already_archived）执行，当前状态为: {rec.status}"
         )
 
     if not body.confirm_abandon:
-        return StatusResponse(ok=False, message="未确认放弃补缺")
+        return StatusResponse(ok=False, message="未确认执行源端清理")
+
+    # 统一委派至归档已齐安全清源引擎（先保全独有加更/加长/Vlog/字幕 -> 核验归档 -> 回收源季 -> 空壳清理 -> 刷新 -> 结案）
+    return await clean_source_redundant(_ArchiveRequest(season_record_ids=[rec.id]), db)
 
     season_path = rec.season_path
     if not season_path or len(season_path.strip("/").split("/")) < 2:
@@ -3356,3 +3547,395 @@ async def delete_source_season(
         return StatusResponse(ok=False, message=f"删除源端本季目录失败: {str(e)[:200]}")
     finally:
         await cd2.close()
+
+
+# ---------- 统一批量「执行推荐处理」预览与闭环执行 (v2.5.45 · Section 9 / G23 / G24 / G28) ----------
+
+_RECOMMENDED_BATCH_PLANS: dict[str, dict[str, Any]] = {}
+
+
+class RecommendedPlanRequest(BaseModel):
+    task_id: str
+    season_record_ids: list[str] | None = None
+    group_ids: list[str] | None = None
+
+
+class RecommendedExecuteRequest(BaseModel):
+    task_id: str
+    plan_id: str
+
+
+@router.post("/recommended-plan")
+async def build_recommended_batch_plan(
+    body: RecommendedPlanRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """为当前任务（或选定项目）生成「执行推荐处理」统一批量预览计划（不执行写入）。
+
+    汇总三类可执行动作：
+    1. 同 ID 目录规范化归并 (merge_items)
+    2. 同内容副本清理 (clean_items)
+    3. 归档已齐源端清理 (redundant_source_items)
+    分别统计作品季数、目录组数、文件数和预计可回收容量，避免重复计数。
+    """
+    from uuid import uuid4
+    from app.core.directory_merge import build_directory_merge_plan
+    from app.core.season_classifier import TERMINAL_STATUSES, consolidate_seasons_to_work_records
+    from app.models.directory_group import DirectoryGroup
+
+    task = await db.get(Task, body.task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    rows = list((await db.scalars(
+        select(SeasonRecord).where(
+            SeasonRecord.task_id == body.task_id,
+            SeasonRecord.status.not_in(tuple(TERMINAL_STATUSES)),
+        )
+    )).all())
+    pending_groups = list((await db.scalars(
+        select(DirectoryGroup).where(
+            DirectoryGroup.task_id == body.task_id,
+            DirectoryGroup.status == "pending_confirm",
+        )
+    )).all())
+    pending_dg_ids = {g.id for g in pending_groups}
+
+    work_records, _ = consolidate_seasons_to_work_records(rows, pending_dg_ids)
+    review_works = [w for w in work_records if w.get("main_category") == "review"]
+    if body.season_record_ids:
+        sel_set = set(body.season_record_ids)
+        review_works = [
+            w for w in review_works
+            if w.get("id") in sel_set or any(pid in sel_set for pid in (w.get("participating_record_ids") or []))
+        ]
+
+    merge_items: list[dict[str, Any]] = []
+    clean_items: list[dict[str, Any]] = []
+    redundant_source_items: list[dict[str, Any]] = []
+    skipped_items: list[dict[str, Any]] = []
+
+    cd2 = CloudDrive2Client()
+    try:
+        # 1. 同 ID 多目录规范化归并组级计划 (G06-G08)
+        target_groups = pending_groups
+        if body.group_ids:
+            g_sel = set(body.group_ids)
+            target_groups = [g for g in pending_groups if g.id in g_sel]
+
+        for grp in target_groups:
+            try:
+                m_plan = await build_directory_merge_plan(
+                    db,
+                    body.task_id,
+                    grp.id,
+                    all_seasons=True,
+                    auto_canonical_target=True,
+                    smart_collision=True,
+                    cd2_client=cd2,
+                )
+                if m_plan.get("can_execute") and (m_plan.get("files_to_move") or m_plan.get("collision_dedup_items")):
+                    merge_items.append({
+                        "group_id": grp.id,
+                        "title": grp.title,
+                        "tmdb_id": grp.tmdb_id,
+                        "plan_id": m_plan["plan_id"],
+                        "canonical_dir_name": m_plan.get("canonical_dir_name") or "",
+                        "naming_basis": m_plan.get("naming_basis") or "",
+                        "source_target_show_path": m_plan["source_target_show_path"],
+                        "source_target_will_create": bool(m_plan.get("source_target_will_create")),
+                        "merge_from_show_paths": m_plan.get("merge_from_show_paths") or [],
+                        "affected_seasons": m_plan.get("affected_seasons") or [1],
+                        "file_count": len(m_plan.get("files_to_move") or []),
+                        "dedup_count": len(m_plan.get("collision_dedup_items") or []),
+                        "isolated_conflicts": m_plan.get("isolated_conflicts") or [],
+                        "prefix_selection_basis": m_plan.get("prefix_selection_basis") or "",
+                    })
+                else:
+                    skipped_items.append({
+                        "kind": "merge_directory",
+                        "group_id": grp.id,
+                        "title": grp.title,
+                        "reason": "; ".join(m_plan.get("block_reasons") or ["无待移动文件"]),
+                    })
+            except Exception as mg_err:
+                skipped_items.append({
+                    "kind": "merge_directory",
+                    "group_id": grp.id,
+                    "title": grp.title,
+                    "reason": str(mg_err),
+                })
+
+        # 2. 同内容副本清理 & 归档已齐清源
+        for w in review_works:
+            rec_id = w.get("id")
+            if not rec_id:
+                continue
+            r_kind = w.get("review_action_kind") or ""
+            if r_kind == "clean_redundant_source" or w.get("status") == "already_archived":
+                redundant_source_items.append({
+                    "season_record_id": rec_id,
+                    "show_name": w.get("show_name") or "",
+                    "season_number": int(w.get("season_number") or 1),
+                    "season_path": w.get("season_path") or "",
+                    "archive_target_path": w.get("archive_target_path") or "",
+                    "predicted_next_label": "源端已清理，归档已保留",
+                })
+                continue
+
+            if "clean_duplicates" in (w.get("review_actions") or []) or r_kind == "clean_duplicates":
+                try:
+                    live_files = await cd2.list_files(w.get("season_path") or "", force_refresh=True)
+                    c_plan = generate_review_clean_plan(
+                        files=live_files,
+                        season_number=int(w.get("season_number") or 1),
+                        total_episodes=int(w.get("total_episodes") or len(live_files)),
+                    )
+                    if c_plan.get("can_clean") or c_plan.get("all_distinct_retained"):
+                        clean_items.append({
+                            "season_record_id": rec_id,
+                            "show_name": w.get("show_name") or "",
+                            "season_number": int(w.get("season_number") or 1),
+                            "season_path": w.get("season_path") or "",
+                            "plan_id": c_plan.get("plan_id") or "",
+                            "rules_version": c_plan.get("rules_version") or "v2.5.45",
+                            "can_clean": bool(c_plan.get("can_clean")),
+                            "all_distinct_retained": bool(c_plan.get("all_distinct_retained")),
+                            "distinct_retention_note": str(c_plan.get("distinct_retention_note") or ""),
+                            "version_note": str(c_plan.get("version_note") or ""),
+                            "to_delete": c_plan.get("to_delete") or [],
+                            "to_keep": c_plan.get("to_keep") or [],
+                            "delete_count": len(c_plan.get("to_delete") or []),
+                            "reclaimable_bytes": int(c_plan.get("reclaimable_bytes") or 0),
+                            "file_fingerprints": c_plan.get("file_fingerprints") or {},
+                            "predicted_next_category": w.get("predicted_next_category") or "",
+                            "predicted_next_label": w.get("predicted_next_category_label") or "",
+                        })
+                except Exception as cl_err:
+                    skipped_items.append({
+                        "kind": "clean_duplicates",
+                        "season_record_id": rec_id,
+                        "title": f"{w.get('show_name')} S{int(w.get('season_number') or 1):02d}",
+                        "reason": str(cl_err),
+                    })
+    finally:
+        await cd2.close()
+
+    work_season_ids = {c["season_record_id"] for c in clean_items} | {r["season_record_id"] for r in redundant_source_items}
+    total_files_affected = (
+        sum(m["file_count"] + m["dedup_count"] for m in merge_items)
+        + sum(c["delete_count"] for c in clean_items)
+    )
+    total_reclaimable_bytes = sum(c["reclaimable_bytes"] for c in clean_items)
+
+    plan_id = f"plan_rec_{uuid4().hex[:12]}"
+    plan_payload = {
+        "ok": True,
+        "plan_id": plan_id,
+        "rules_version": "v2.5.45",
+        "task_id": body.task_id,
+        "created_at": datetime.now().isoformat(),
+        "counts": {
+            "work_season_count": len(work_season_ids),
+            "dir_group_count": len(merge_items),
+            "file_count": total_files_affected,
+            "reclaimable_bytes": total_reclaimable_bytes,
+            "reclaimable_display": _fmt_bytes(total_reclaimable_bytes),
+            "merge_count": len(merge_items),
+            "clean_count": len(clean_items),
+            "redundant_source_count": len(redundant_source_items),
+        },
+        "merge_items": merge_items,
+        "clean_items": clean_items,
+        "redundant_source_items": redundant_source_items,
+        "skipped_items": skipped_items,
+        "step_receipts": {},
+    }
+    _RECOMMENDED_BATCH_PLANS[plan_id] = plan_payload
+    await db.commit()
+    return plan_payload
+
+
+@router.post("/recommended-execute")
+async def execute_recommended_batch_plan(
+    body: RecommendedExecuteRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """执行已确认预览的「执行推荐处理」批次计划，支持局部指纹复核 (G24)、幂等恢复 (G23) 与四类去向汇总 (G28)。"""
+    from app.core.directory_merge import execute_directory_merge
+    from app.core.season_classifier import TERMINAL_STATUSES, consolidate_seasons_to_work_records
+    from app.models.directory_group import DirectoryGroup
+
+    plan = _RECOMMENDED_BATCH_PLANS.get(body.plan_id)
+    if not plan or plan.get("task_id") != body.task_id:
+        raise HTTPException(status_code=404, detail="未找到匹配且有效的批量推荐处理计划，请重新生成预览")
+
+    step_receipts: dict[str, dict[str, Any]] = plan.setdefault("step_receipts", {})
+
+    # G24: 执行前对所有待删清理项做局部文件指纹复核，发现新增或变化视频则先阻断并返回更新提示
+    cd2_check = CloudDrive2Client()
+    changed_seasons: list[dict[str, Any]] = []
+    try:
+        for c_item in plan.get("clean_items") or []:
+            step_key = f"clean:{c_item['season_record_id']}"
+            if step_receipts.get(step_key, {}).get("status") == "completed":
+                continue
+            saved_fps = c_item.get("file_fingerprints") or {}
+            if not saved_fps:
+                continue
+            try:
+                curr_files = await cd2_check.list_files(c_item["season_path"], force_refresh=True)
+                del_paths = {d.get("path", "") for d in (c_item.get("to_delete") or []) if d.get("path")}
+                diff = compare_plan_fingerprints(saved_fps, curr_files, del_paths)
+                if diff.get("needs_repreview"):
+                    changed_seasons.append({
+                        "season_record_id": c_item["season_record_id"],
+                        "show_name": c_item["show_name"],
+                        "season_number": c_item["season_number"],
+                        "added_videos": diff["added_videos"],
+                        "modified_videos": diff["modified_videos"],
+                    })
+            except Exception:
+                pass
+    finally:
+        await cd2_check.close()
+
+    if changed_seasons:
+        return {
+            "ok": False,
+            "needs_repreview": True,
+            "changed_seasons": changed_seasons,
+            "message": f"检测到 {len(changed_seasons)} 个季在预览后出现新增或变化视频文件，为避免超出预览删除范围已暂停执行，请先更新预览后再确认。",
+        }
+
+    executed_merges: list[dict[str, Any]] = []
+    executed_cleans: list[dict[str, Any]] = []
+    executed_redundant: list[dict[str, Any]] = []
+    failed_steps: list[dict[str, Any]] = []
+    touched_record_ids: set[str] = set()
+
+    # 1. 执行同 ID 目录规范化归并（幂等跳过已完成步骤）
+    for m_item in plan.get("merge_items") or []:
+        step_key = f"merge:{m_item['group_id']}"
+        if step_receipts.get(step_key, {}).get("status") == "completed":
+            executed_merges.append(step_receipts[step_key])
+            continue
+        try:
+            res = await execute_directory_merge(
+                db, body.task_id, m_item["group_id"], plan_id=m_item["plan_id"]
+            )
+            rec_obj = {"status": "completed", "group_id": m_item["group_id"], "title": m_item["title"], "result": res}
+            step_receipts[step_key] = rec_obj
+            executed_merges.append(rec_obj)
+        except Exception as e:
+            failed_steps.append({"step": step_key, "kind": "merge_directory", "title": m_item["title"], "error": str(e)})
+
+    # 2. 执行同内容副本清理
+    for c_item in plan.get("clean_items") or []:
+        rec_id = c_item["season_record_id"]
+        touched_record_ids.add(rec_id)
+        step_key = f"clean:{rec_id}"
+        if step_receipts.get(step_key, {}).get("status") == "completed":
+            executed_cleans.append(step_receipts[step_key])
+            continue
+        try:
+            res = await clean_duplicates(
+                _ArchiveRequest(
+                    season_record_ids=[rec_id],
+                    plan_id=c_item.get("plan_id"),
+                    expected_fingerprints=c_item.get("file_fingerprints"),
+                ),
+                db,
+            )
+            if res.ok or c_item.get("all_distinct_retained"):
+                rec_obj = {"status": "completed", "season_record_id": rec_id, "show_name": c_item["show_name"], "season_number": c_item["season_number"], "message": res.message}
+                step_receipts[step_key] = rec_obj
+                executed_cleans.append(rec_obj)
+            else:
+                failed_steps.append({"step": step_key, "kind": "clean_duplicates", "title": f"{c_item['show_name']} S{c_item['season_number']:02d}", "error": res.message})
+        except Exception as e:
+            failed_steps.append({"step": step_key, "kind": "clean_duplicates", "title": f"{c_item['show_name']} S{c_item['season_number']:02d}", "error": str(e)})
+
+    # 3. 执行归档已齐源端清理
+    for r_item in plan.get("redundant_source_items") or []:
+        rec_id = r_item["season_record_id"]
+        touched_record_ids.add(rec_id)
+        step_key = f"redundant:{rec_id}"
+        if step_receipts.get(step_key, {}).get("status") == "completed":
+            executed_redundant.append(step_receipts[step_key])
+            continue
+        try:
+            res = await clean_source_redundant(_ArchiveRequest(season_record_ids=[rec_id]), db)
+            if res.ok:
+                rec_obj = {"status": "completed", "season_record_id": rec_id, "show_name": r_item["show_name"], "season_number": r_item["season_number"], "message": "源端已清理，归档已保留"}
+                step_receipts[step_key] = rec_obj
+                executed_redundant.append(rec_obj)
+            else:
+                failed_steps.append({"step": step_key, "kind": "clean_redundant_source", "title": f"{r_item['show_name']} S{r_item['season_number']:02d}", "error": res.message})
+        except Exception as e:
+            failed_steps.append({"step": step_key, "kind": "clean_redundant_source", "title": f"{r_item['show_name']} S{r_item['season_number']:02d}", "error": str(e)})
+
+    # 4. 刷新任务汇总并按四类去向分类汇报 (G28)
+    summary = await _refresh_task_summary(body.task_id, db)
+    await db.commit()
+
+    all_rows_after = list((await db.scalars(
+        select(SeasonRecord).where(SeasonRecord.task_id == body.task_id)
+    )).all())
+    pending_dg_after = {
+        g.id for g in (await db.scalars(
+            select(DirectoryGroup).where(DirectoryGroup.task_id == body.task_id, DirectoryGroup.status == "pending_confirm")
+        )).all()
+    }
+    active_after = [r for r in all_rows_after if r.status not in TERMINAL_STATUSES]
+    work_after, _ = consolidate_seasons_to_work_records(active_after, pending_dg_after)
+
+    outcomes: dict[str, list[dict[str, Any]]] = {
+        "to_download": [],
+        "to_airing": [],
+        "to_archive": [],
+        "source_cleaned": [
+            {"season_record_id": x["season_record_id"], "show_name": x["show_name"], "season_number": x["season_number"], "receipt": "源端已清理，归档已保留"}
+            for x in executed_redundant
+        ],
+        "remaining_anomalies": [],
+        "skipped_items": list(plan.get("skipped_items") or []),
+    }
+    for w in work_after:
+        wid = w.get("id")
+        part_ids = set(w.get("participating_record_ids") or [])
+        cat = w.get("main_category")
+        brief = {
+            "season_record_id": wid,
+            "show_name": w.get("show_name") or "",
+            "season_number": int(w.get("season_number") or 1),
+            "status_detail": w.get("status_detail") or "",
+            "anomaly_problem_label": w.get("anomaly_problem_label") or "",
+        }
+        if cat == "anomaly":
+            outcomes["remaining_anomalies"].append(brief)
+        elif cat == "held":
+            outcomes["skipped_items"].append(brief)
+        elif wid in touched_record_ids or (part_ids & touched_record_ids) or executed_merges:
+            if cat == "download":
+                outcomes["to_download"].append(brief)
+            elif cat == "airing":
+                outcomes["to_airing"].append(brief)
+            elif cat == "archive":
+                outcomes["to_archive"].append(brief)
+
+    return {
+        "ok": len(failed_steps) == 0,
+        "partial_success": bool(failed_steps and (executed_merges or executed_cleans or executed_redundant)),
+        "plan_id": body.plan_id,
+        "executed_merges": executed_merges,
+        "executed_cleans": executed_cleans,
+        "executed_redundant": executed_redundant,
+        "failed_steps": failed_steps,
+        "outcomes": outcomes,
+        "summary": summary,
+        "message": (
+            f"批量推荐处理完成：目录归并 {len(executed_merges)} 组、副本清理 {len(executed_cleans)} 季、源端清源 {len(executed_redundant)} 季"
+            + (f"（{len(failed_steps)} 项待重试）" if failed_steps else "")
+        ),
+    }

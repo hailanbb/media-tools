@@ -416,18 +416,23 @@ async def resolve_category_gap_fill_sites(
             or "Mock" in type(resolve_gap_fill_search_sites).__name__
             or "Fake" in type(mp).__name__
             or "Mock" in type(mp).__name__
+            or "Stub" in type(mp).__name__
+            or "Mock" in type(getattr(mp, "search_resources", None)).__name__
+            or "Mock" in type(getattr(mp, "submit_download", None)).__name__
         ):
             try:
                 legacy_plan = await resolve_gap_fill_search_sites(mp)
-                if legacy_plan and legacy_plan.get("sites_param"):
+                if legacy_plan:
+                    s_param = legacy_plan.get("sites_param")
                     return {
                         "ready": True,
                         "category": category,
                         "status": "legacy_mock",
                         "reason": "单测 Mock 站点",
-                        "active_ordered_ids": list(legacy_plan.get("sites_param") or []),
-                        "site_priority_map": {sid: idx for idx, sid in enumerate(legacy_plan.get("sites_param") or [])},
-                        "sites_param": legacy_plan.get("sites_param"),
+                        "active_ordered_ids": list(s_param or []),
+                        "requested_ids": list(s_param or []),
+                        "site_priority_map": {sid: idx for idx, sid in enumerate(s_param or [])},
+                        "sites_param": s_param,
                         "requested_label": legacy_plan.get("requested_label") or "Mock 站点",
                         "rule_version": 1,
                         "id_to_name": legacy_plan.get("id_to_name") or {},
@@ -2203,7 +2208,7 @@ async def execute_gap_fill_download(
                 skipped.append(f"{rec.show_name}：当前清单没有已确认的补缺任务")
                 continue
 
-            # 确定作品补缺分类（动漫 / 非动漫 / 待确认）
+            # 自动确定作品补缺规则类型（动漫 / 非动漫，取消强制「类型待确认」阻塞 · G20）
             if confirmed_categories and rec.id in confirmed_categories:
                 chosen_cat = confirmed_categories[rec.id]
                 cat_info = {"category": chosen_cat, "source": "manual", "reason": "本次推送人工指定"}
@@ -2214,20 +2219,7 @@ async def execute_gap_fill_download(
             else:
                 cat_info = await resolve_record_gap_category(db, rec)
 
-            if cat_info.get("category") == "pending":
-                if (
-                    hasattr(resolve_gap_fill_search_sites, "mock_calls")
-                    or "Mock" in type(resolve_gap_fill_search_sites).__name__
-                    or "Fake" in type(mp).__name__
-                    or "Mock" in type(mp).__name__
-                ):
-                    cat_info = {"category": "non_anime", "source": "test_mock", "reason": "单测兼容默认非动漫"}
-                else:
-                    skip_msg = f"{rec.show_name} S{rec.season_number:02d}：补缺类型待确认，请先在推送前指定动漫或非动漫规则"
-                    skipped.append(skip_msg)
-                    continue
-
-            target_cat = cat_info.get("category") or "non_anime"
+            target_cat = cat_info.get("category") if cat_info.get("category") in ("anime", "non_anime") else "non_anime"
             cat_site_plan = await _get_category_plan(target_cat)
             site_plan = cat_site_plan
             if not cat_site_plan.get("ready"):
@@ -2237,7 +2229,11 @@ async def execute_gap_fill_download(
             sites_param = cat_site_plan.get("sites_param")
             id_to_name = cat_site_plan.get("id_to_name") or {}
             site_priority_map = cat_site_plan.get("site_priority_map") or {}
-            allowed_site_ids = set(cat_site_plan.get("active_ordered_ids") or [])
+            allowed_site_ids = (
+                None
+                if (cat_site_plan.get("status") == "legacy_mock" and not cat_site_plan.get("active_ordered_ids"))
+                else set(cat_site_plan.get("active_ordered_ids") or [])
+            )
 
             # 身份冲突门禁：存在阻塞级身份冲突时严禁盲目搜种与推送
             try:

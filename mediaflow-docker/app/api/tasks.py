@@ -1478,6 +1478,11 @@ class ManualConfirmRequest(BaseModel):
     target_tmdb_id: int | None = None
     target_season: int | None = None
     target_title: str = ""
+    target_first_air_year: str = ""
+    douban_url: str = ""
+    douban_id: str = ""
+    episode_mapping: dict[str, int] | None = None
+    apply_file_changes: bool = True
     total_episodes: int | None = None
     broadcast_status: str = "unknown"  # "finished" | "airing" | "unknown"
     note: str = ""
@@ -1511,6 +1516,68 @@ async def _collect_work_season_records(db: AsyncSession, rec: SeasonRecord) -> t
     return (rows or [rec]), work
 
 
+async def _build_correction_plan_for_record(
+    db: AsyncSession,
+    rec: SeasonRecord,
+    body: ManualConfirmRequest,
+    cd2: Any = None,
+) -> tuple[dict[str, Any], str | None]:
+    import re
+    from app.core.directory_merge import list_files_robust
+    from app.core.episode_parser import extract_douban_subject_id
+    from app.core.manual_confirmation import build_manual_correction_plan
+
+    douban_sid = extract_douban_subject_id(body.douban_url) or extract_douban_subject_id(body.douban_id)
+
+    # 检测同剧根下的其他季（保留旧剧根与共享 tvshow.nfo · G18）
+    sibling_seasons: list[str] = []
+    if rec.show_path:
+        db_siblings = list((await db.scalars(
+            select(SeasonRecord).where(
+                SeasonRecord.task_id == rec.task_id,
+                SeasonRecord.show_path == rec.show_path,
+                SeasonRecord.season_number != rec.season_number,
+            )
+        )).all())
+        for sib in db_siblings:
+            sibling_seasons.append(f"Season {sib.season_number}")
+        try:
+            root_entries = await list_files_robust(cd2, rec.show_path)
+            for re_it in root_entries:
+                if re_it.get("isDirectory"):
+                    m_s = re.match(r"(?i)^(?:Season\s*|S)(\d{1,2})$", re_it["name"])
+                    if m_s and int(m_s.group(1)) != int(rec.season_number):
+                        lbl = re_it["name"]
+                        if lbl not in sibling_seasons:
+                            sibling_seasons.append(lbl)
+        except Exception:
+            pass
+
+    season_files: list[dict[str, Any]] = []
+    if rec.season_path:
+        try:
+            season_files = await list_files_robust(cd2, rec.season_path)
+        except Exception:
+            season_files = []
+
+    plan = build_manual_correction_plan(
+        show_name=rec.show_name,
+        show_path=rec.show_path or "",
+        season_path=rec.season_path or "",
+        current_tmdb_id=rec.tmdb_id,
+        current_season=rec.season_number,
+        target_tmdb_id=body.target_tmdb_id,
+        target_title=body.target_title,
+        target_first_air_year=body.target_first_air_year,
+        target_season=body.target_season,
+        douban_id=douban_sid,
+        episode_mapping=body.episode_mapping,
+        season_files=season_files,
+        sibling_seasons=sibling_seasons,
+    )
+    return plan, douban_sid
+
+
 @router.post("/{task_id}/seasons/{record_id}/manual-confirm/preview")
 async def preview_manual_season_confirmation(
     task_id: str,
@@ -1518,7 +1585,7 @@ async def preview_manual_season_confirmation(
     body: ManualConfirmRequest,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """预览人工确认的作用范围与预计分流结果（不写入数据库或修改文件）。"""
+    """预览人工确认与单季实物修正计划（展示新剧名、目标目录、文件名变化和预计模块，不写入）。"""
     task = await db.get(Task, task_id)
     rec = await db.get(SeasonRecord, record_id)
     if not task or not rec or rec.task_id != task_id:
@@ -1572,12 +1639,17 @@ async def preview_manual_season_confirmation(
         conflict=_safe_json(getattr(rec, "conflict_json", None), {}),
         pending_dir_group=pending_dg,
     )
+
+    correction_plan, douban_sid = await _build_correction_plan_for_record(db, rec, body, cd2=None)
+
     return {
         "ok": True,
         "scope_paths": scope_paths,
         "recognized_episodes": sorted(union_rec),
         "archived_episodes": sorted(union_arc),
         "emby_episodes": sorted(union_emby),
+        "douban_id": douban_sid or "",
+        "correction_plan": correction_plan,
         "predicted_category": outcome["predicted_category"],
         "predicted_category_label": outcome["predicted_category_label"],
         "predicted_status": outcome["status"],
@@ -1594,7 +1666,11 @@ async def save_manual_season_confirmation(
     body: ManualConfirmRequest,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """保存单季人工确认事实并立即利用已有初检结果更新分流与统计（不移动/删除文件，不提交下载）。"""
+    """保存单季人工确认事实；若有身份/季号/映射修正则同步执行实物迁移改名、NFO与台账迁移并核验分流 (G17-G19)。"""
+    from app.core.manual_confirmation import execute_manual_correction_plan
+    from app.models.gap_fill import GapFillEpisode, GapFillSeasonRun
+    from app.services.gap_fill_tracker import build_identity_key
+
     task = await db.get(Task, task_id)
     rec = await db.get(SeasonRecord, record_id)
     if not task or not rec or rec.task_id != task_id:
@@ -1607,16 +1683,22 @@ async def save_manual_season_confirmation(
     if body.total_episodes is not None and body.total_episodes <= 0:
         raise HTTPException(status_code=400, detail="本季总集数必须为大于 0 的正整数或留空表示尚不清楚")
 
+    from app.core.episode_parser import extract_douban_subject_id
+    douban_sid = extract_douban_subject_id(body.douban_url) or extract_douban_subject_id(body.douban_id)
+
     has_any_choice = bool(
         body.confirm_current_identity
         or (body.target_tmdb_id and body.target_tmdb_id > 0)
+        or (body.target_season and int(body.target_season) != int(rec.season_number))
         or (body.total_episodes is not None and body.total_episodes > 0)
         or body.broadcast_status in ("finished", "airing")
+        or bool(douban_sid)
+        or bool(body.episode_mapping)
     )
     if not has_any_choice:
         raise HTTPException(
             status_code=400,
-            detail="请至少明确确认一项事实（如当前作品与季号正确、本季总集数或播出状态），全未选择不能作为有效确认提交",
+            detail="请至少明确确认一项事实（如当前作品与季号正确、豆瓣条目、本季总集数或播出状态），全未选择不能作为有效确认提交",
         )
 
     part_rows, _ = await _collect_work_season_records(db, rec)
@@ -1628,13 +1710,108 @@ async def save_manual_season_confirmation(
         if str(x).isdigit() and int(x) > 0
     })
 
+    # 1. 生成并可选执行单季实物修正计划（仅在身份/名称/季号/集号映射变更且 apply_file_changes=True 时写文件 · G17/G18/G19）
+    old_season_path = rec.season_path
+    old_show_path = rec.show_path
+    old_identity_key = build_identity_key(rec.tmdb_id, rec.show_name, rec.season_number)
+    correction_receipt: dict[str, Any] = {"has_file_changes": False, "ok": True}
+
+    from app.clients.clouddrive2 import CloudDrive2Client
+
+    cd2_fix: CloudDrive2Client | None = None
+    needs_fs_check = bool(
+        body.apply_file_changes
+        and (
+            (body.target_tmdb_id and str(body.target_tmdb_id) != str(rec.tmdb_id or ""))
+            or bool((body.target_title or "").strip())
+            or (body.target_season and int(body.target_season) != int(rec.season_number or 0))
+            or bool(body.episode_mapping)
+        )
+    )
+    if needs_fs_check:
+        cd2_fix = CloudDrive2Client()
+    try:
+        correction_plan, _ = await _build_correction_plan_for_record(db, rec, body, cd2=cd2_fix)
+        if body.apply_file_changes and correction_plan.get("has_file_changes"):
+            exec_res = await execute_manual_correction_plan(correction_plan, cd2_client=cd2_fix)
+            correction_receipt = {**correction_plan, **exec_res}
+            if not exec_res.get("ok"):
+                # 部分失败：记录已完成与剩余步骤，保持「修正未完成」，绝不假装成功
+                ev_fail = _safe_json(getattr(rec, "evidence_json", None), {})
+                if not isinstance(ev_fail, dict):
+                    ev_fail = {}
+                ev_fail["correction_state"] = {
+                    "plan_id": correction_plan.get("plan_id"),
+                    "completed_steps": exec_res.get("completed_steps") or [],
+                    "remaining_steps": exec_res.get("remaining_steps") or [],
+                    "errors": exec_res.get("errors") or [],
+                }
+                rec.status = "correction_incomplete"
+                rec.status_detail = f"修正未完成：已完成 {len(exec_res.get('completed_steps') or [])} 步，剩余 {len(exec_res.get('remaining_steps') or [])} 步待恢复"
+                rec.evidence_json = json.dumps(ev_fail, ensure_ascii=False)
+                await refresh_task_summary(task_id, db)
+                await db.commit()
+                return {
+                    "ok": False,
+                    "partial_failure": True,
+                    "correction_receipt": correction_receipt,
+                    "message": rec.status_detail,
+                }
+
+            # 实物修正核验通过：更新记录路径、身份与季号，并迁移关联补缺台账/回执 (G17, G18)
+            rec.show_name = correction_plan["new_show_name"]
+            rec.show_path = correction_plan["new_show_path"]
+            rec.season_path = correction_plan["new_season_path"]
+            rec.season_number = int(correction_plan["new_season_number"])
+            if correction_plan.get("new_tmdb_id"):
+                rec.tmdb_id = str(correction_plan["new_tmdb_id"])
+
+            new_identity_key = build_identity_key(rec.tmdb_id, rec.show_name, rec.season_number)
+            # 迁移补缺分集台账与批次运行记录，保留原身份关联以防重发已受理下载
+            if old_season_path:
+                gf_eps = list((await db.scalars(
+                    select(GapFillEpisode).where(
+                        GapFillEpisode.task_id == task_id,
+                        GapFillEpisode.season_path == old_season_path.rstrip("/"),
+                    )
+                )).all())
+                for gfe in gf_eps:
+                    gfe.season_path = rec.season_path.rstrip("/")
+                    gfe.season_number = rec.season_number
+                    gfe.show_name = rec.show_name
+                    gfe.tmdb_id = rec.tmdb_id
+                    if new_identity_key != old_identity_key:
+                        gfe.identity_key = new_identity_key
+                        gfe.reason = f"{gfe.reason or ''} [原身份:{old_identity_key}]".strip()
+
+                gf_runs = list((await db.scalars(
+                    select(GapFillSeasonRun).where(
+                        GapFillSeasonRun.task_id == task_id,
+                        GapFillSeasonRun.season_path == old_season_path.rstrip("/"),
+                    )
+                )).all())
+                for gfr in gf_runs:
+                    gfr.season_path = rec.season_path.rstrip("/")
+                    gfr.season_number = rec.season_number
+                    gfr.show_name = rec.show_name
+                    gfr.tmdb_id = rec.tmdb_id
+                    if new_identity_key != old_identity_key:
+                        gfr.identity_key = new_identity_key
+
+            # 更新 scope_paths 指向新路径
+            scope_paths = [rec.season_path if p == old_season_path else p for p in scope_paths]
+    finally:
+        if cd2_fix is not None:
+            await cd2_fix.close()
+
     # 若用户在人工确认中修正了目标 TMDB ID 或季号（跨条目映射），同步写入 SeasonMapping
     cur_tid_int = int(rec.tmdb_id) if rec.tmdb_id and str(rec.tmdb_id).isdigit() else None
     is_remapped = bool(
         (body.target_tmdb_id and body.target_tmdb_id != cur_tid_int)
         or (body.target_season and int(body.target_season) != int(rec.season_number))
+        or bool(douban_sid)
     )
-    if is_remapped and body.target_tmdb_id:
+    if is_remapped and (body.target_tmdb_id or douban_sid):
         for r in part_rows:
             old_maps = (
                 await db.scalars(
@@ -1654,7 +1831,8 @@ async def save_manual_season_confirmation(
                     show_path=r.show_path,
                     season_path=r.season_path,
                     mapping_kind="manual_confirm_remap",
-                    target_tmdb_id=int(body.target_tmdb_id),
+                    target_tmdb_id=int(body.target_tmdb_id or cur_tid_int or 0) or None,
+                    target_douban_id=douban_sid or "",
                     target_season=int(body.target_season or r.season_number),
                     target_title=str(body.target_title or "").strip(),
                     expected_total_episodes=body.total_episodes,
@@ -1669,11 +1847,12 @@ async def save_manual_season_confirmation(
     eff_sn = int(body.target_season or rec.season_number)
 
     # 停用同作用范围的旧 ManualSeasonConfirmation
+    lookup_paths = list(set(scope_paths + ([old_season_path] if old_season_path else [])))
     old_confs = (
         await db.scalars(
             select(ManualSeasonConfirmation).where(
                 ManualSeasonConfirmation.is_active.is_(True),
-                ManualSeasonConfirmation.season_path.in_(scope_paths),
+                ManualSeasonConfirmation.season_path.in_(lookup_paths),
             )
         )
     ).all()
@@ -1690,7 +1869,7 @@ async def save_manual_season_confirmation(
         show_name=rec.show_name,
         tmdb_id=str(rec.tmdb_id or ""),
         season_number=rec.season_number,
-        identity_confirmed=bool(body.confirm_current_identity or body.target_tmdb_id),
+        identity_confirmed=bool(body.confirm_current_identity or body.target_tmdb_id or douban_sid),
         confirmed_tmdb_id=eff_tid,
         confirmed_season_number=eff_sn,
         confirmed_total_episodes=body.total_episodes,
@@ -1706,8 +1885,21 @@ async def save_manual_season_confirmation(
     # 若此前同卡合并了多个目录的集数，对主记录与关联记录同步更新
     for r in part_rows:
         ev_r = _safe_json(getattr(r, "evidence_json", None), {})
-        if isinstance(ev_r, dict) and "hold_for_task" in ev_r:
+        if isinstance(ev_r, dict):
             ev_r.pop("hold_for_task", None)
+            ev_r.pop("correction_state", None)
+            if douban_sid:
+                ev_r["douban_binding"] = {"subject_id": douban_sid, "season_number": eff_sn}
+            if correction_receipt.get("has_file_changes"):
+                ev_r["last_correction_receipt"] = {
+                    "plan_id": correction_receipt.get("plan_id"),
+                    "old_show_path": old_show_path,
+                    "old_season_path": old_season_path,
+                    "new_show_path": rec.show_path,
+                    "new_season_path": rec.season_path,
+                    "moved_count": len(correction_receipt.get("completed_steps") or []),
+                    "updated_nfos": correction_receipt.get("updated_nfos") or [],
+                }
             r.evidence_json = json.dumps(ev_r, ensure_ascii=False)
         await _apply_in_place_recalculate(db, r, fetch_remote=False)
 
@@ -1724,16 +1916,21 @@ async def save_manual_season_confirmation(
     recorded_parts: list[str] = []
     if new_conf.identity_confirmed:
         recorded_parts.append(f"作品归属 TMDB:{eff_tid or '原目录'} S{eff_sn:02d}")
+    if douban_sid:
+        recorded_parts.append(f"豆瓣:{douban_sid}")
     if new_conf.confirmed_total_episodes:
         recorded_parts.append(f"本季共 {new_conf.confirmed_total_episodes} 集")
     if new_conf.broadcast_status == "finished":
         recorded_parts.append("已播毕")
     elif new_conf.broadcast_status == "airing":
         recorded_parts.append("仍在连载")
+    if correction_receipt.get("has_file_changes"):
+        recorded_parts.append(f"已迁移改名 {len(correction_receipt.get('completed_steps') or [])} 个文件")
 
     return {
         "ok": True,
         "confirmation": orm_confirmation_to_dict(new_conf),
+        "correction_receipt": correction_receipt,
         "season": updated_work,
         "summary": task_summary,
         "target_category": cat_key,

@@ -529,11 +529,11 @@ class TestAiringRetentionLifecycleL01ToL12(unittest.IsolatedAsyncioTestCase):
             res = await run_inspection("t-l04", show_dir, cd2_client=disk, mp_client=mp, tmdb_client=AsyncMock())
         diag = res.seasons[0]
         self.assertEqual(diag.status, "period_review")
-        self.assertIn("证据待决", diag.status_detail)
+        self.assertIn("播期资料待核实", diag.status_detail)
         w_recs, counts = consolidate_seasons_to_work_records([diag])
         self.assertEqual(counts["anomaly"], 1)
         self.assertEqual(counts["airing"], 0)
-        self.assertEqual(w_recs[0]["action_type"], "system_tracking")
+        self.assertEqual(w_recs[0]["action_type"], "verify_basis")
 
     async def test_l06_airing_dual_archive_coverage_stays_airing_and_recalc_preserves_fetched_at(self):
         """L06: 已确认在播的季，两库合计覆盖当前资料表全部集号；依次执行初检、缓存核算 -> 均保持留源且不刷新取证日期."""
@@ -759,8 +759,9 @@ class TestAiringRetentionLifecycleL01ToL12(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(counts_after["airing"], 0, "季终后原留源清单应全部转出归零")
         self.assertEqual(counts_after["archive"], 1)
         self.assertEqual(counts_after["download"], 1)
-        self.assertEqual(counts_after["review"], 1)
-        self.assertEqual(counts_after["anomaly"], 1)
+        # v2.5.45 G10: already_archived（已归档待清源）与 review_needed（重复版本）均统一收口至 review
+        self.assertEqual(counts_after["review"], 2)
+        self.assertEqual(counts_after["anomaly"], 0)
         self.assertEqual(
             counts_after["archive"] + counts_after["review"] + counts_after["download"] + counts_after["airing"] + counts_after["anomaly"],
             counts_after["total_work_seasons"],

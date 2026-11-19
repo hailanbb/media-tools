@@ -44,6 +44,7 @@ SUITES = [
     {"name": "18. 电影与剧集智能订阅清理验收测试 (v2.5.40)", "cmd": [sys.executable, "tests/test_v2540_subscription_cleaner.py"], "type": "python"},
     {"name": "19. 媒体整理智能修复全场景验收测试 (R01-R33)", "cmd": [sys.executable, "tests/test_transfer_repair.py"], "type": "python"},
     {"name": "20. 离线 P0 安全探针 (8/8 核心防线)", "cmd": [sys.executable, "-B", "p0_probe.py", "."], "type": "python"},
+    {"name": "21. 五模块流程重构与智能清理验收 (v2.5.45 G01-G28)", "cmd": [sys.executable, "tests/test_v2545_five_module_refactor.py"], "type": "python"},
 ]
 
 def run_suite():

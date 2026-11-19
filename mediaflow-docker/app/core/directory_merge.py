@@ -119,6 +119,142 @@ def extract_target_prefix_samples(
     return [f"{base_title} - ", f"{base_title}."]
 
 
+def sanitize_fs_name(name: str) -> str:
+    """文件系统非法字符规范化（保留空格、中文与括号，剔除 Windows/Linux 非法路径字符）。"""
+    cleaned = re.sub(r'[\\/:*?"<>|]+', " ", str(name or "")).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
+    return cleaned
+
+
+def build_canonical_show_dir_name(
+    *,
+    canonical_title: str = "",
+    first_air_year: str = "",
+    tmdb_id: str | int | None = None,
+    aliases: list[str] | None = None,
+    original_title: str = "",
+    existing_name: str = "",
+) -> tuple[str, str]:
+    """按“规范剧名 (作品首播年) [tmdbid=ID]”生成同 ID 规范目录名及本轮采用依据 (G06)。"""
+    chosen_title = ""
+    basis = ""
+    if sanitize_fs_name(canonical_title):
+        chosen_title = sanitize_fs_name(canonical_title)
+        basis = "TMDB 简体中文规范剧名"
+    else:
+        cn_alias = next(
+            (sanitize_fs_name(a) for a in (aliases or []) if re.search(r"[\u4e00-\u9fff]", str(a or ""))),
+            "",
+        )
+        if cn_alias:
+            chosen_title = cn_alias
+            basis = "有效中文别名"
+        elif sanitize_fs_name(original_title):
+            chosen_title = sanitize_fs_name(original_title)
+            basis = "作品原名"
+        else:
+            fallback = re.sub(r"\s*\[tmdbid=\d+\]\s*", " ", str(existing_name or ""), flags=re.I)
+            fallback = re.sub(r"\s*\(\d{4}\)\s*", " ", fallback).strip()
+            chosen_title = sanitize_fs_name(fallback) or "Unknown"
+            basis = "现有目录名称"
+
+    # 若 chosen_title 自身已含年份/ID，先剥离避免重复拼接
+    chosen_title = re.sub(r"\s*\[tmdbid=\d+\]\s*", "", chosen_title, flags=re.I).strip()
+    m_yr = re.search(r"\((\d{4})\)$", chosen_title)
+    yr = str(first_air_year or "").strip()[:4]
+    if not yr.isdigit() and m_yr:
+        yr = m_yr.group(1)
+    if m_yr:
+        chosen_title = chosen_title[:m_yr.start()].strip()
+
+    parts = [chosen_title]
+    if yr and yr.isdigit() and len(yr) == 4:
+        parts.append(f"({yr})")
+    tid_str = str(tmdb_id or "").strip()
+    if tid_str.isdigit():
+        parts.append(f"[tmdbid={tid_str}]")
+    return " ".join(parts), basis
+
+
+def _path_basename(p: str | None) -> str:
+    s = str(p or "").rstrip("/\\")
+    if not s:
+        return ""
+    if "\\" in s and "/" not in s:
+        import ntpath
+        return ntpath.basename(s)
+    return posixpath.basename(s.replace("\\", "/"))
+
+
+def _path_dirname(p: str | None) -> str:
+    s = str(p or "").rstrip("/\\")
+    if not s:
+        return ""
+    if "\\" in s and "/" not in s:
+        import ntpath
+        return ntpath.dirname(s)
+    return posixpath.dirname(s.replace("\\", "/"))
+
+
+def detect_explicit_file_tmdb_id(filename: str) -> str | None:
+    """提取文件名中显式标注的 TMDB ID（仅显式异 ID 才判异作品冲突，英文译名/压制组差异不算 · G07）。"""
+    m = re.search(r"\[?tmdbid[=:](\d+)\]?", str(filename or ""), re.IGNORECASE)
+    return m.group(1) if m else None
+
+
+def select_prefix_with_basis(
+    target_filenames: list[str],
+    season_number: int = 1,
+    canonical_title: str = "",
+    selected_prefix: str = "",
+) -> tuple[str, list[str], str]:
+    """按 4.2 节优先级自动选择前缀模板并给出可解释依据：
+    1. 用户明确指定且合法 -> 使用指定值；
+    2. 目标存在唯一前缀 -> 沿用目标前缀；
+    3. 目标存在多种前缀 -> 优先与规范名称一致的模板 -> 票数最多模板 -> 确定项目格式 `规范剧名 - `。
+    """
+    counts: dict[str, int] = {}
+    for fn in target_filenames:
+        if not is_video_file(fn) and not is_subtitle_file(fn):
+            continue
+        boundary = split_season_episode_boundary(fn, season_number)
+        if boundary:
+            p = boundary[0]
+            counts[p] = counts.get(p, 0) + 1
+
+    clean_canon = sanitize_fs_name(canonical_title)
+    default_fmt = f"{clean_canon} - " if clean_canon else "Show - "
+    alt_fmt = f"{clean_canon}." if clean_canon else "Show."
+
+    if not counts:
+        samples = [default_fmt, alt_fmt]
+        if selected_prefix and selected_prefix in samples:
+            return selected_prefix, samples, "用户指定前缀"
+        return default_fmt, samples, f"目标同季无已有样本，按规范剧名生成标准前缀「{default_fmt}」"
+
+    sorted_by_votes = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    samples = [k for k, _ in sorted_by_votes]
+    if selected_prefix and selected_prefix in samples:
+        return selected_prefix, samples, "用户指定前缀"
+
+    if len(samples) == 1:
+        return samples[0], samples, f"沿用目标同季一致前缀「{samples[0]}」({counts[samples[0]]} 个文件)"
+
+    # 多种前缀：优先匹配规范名称
+    if clean_canon:
+        norm_canon = normalize_dir_basename(clean_canon)
+        for cand_p, cnt in sorted_by_votes:
+            if normalize_dir_basename(cand_p) == norm_canon:
+                return cand_p, samples, f"目标存在多种前缀，自动优先采用与规范名称一致的模板「{cand_p}」({cnt} 个文件)"
+
+    # 次选数量最多的模板；同票采用确定项目格式
+    top_votes = sorted_by_votes[0][1]
+    top_cands = [k for k, v in sorted_by_votes if v == top_votes]
+    if len(top_cands) == 1:
+        return top_cands[0], samples, f"目标存在多种前缀，自动采用出现次数最多的模板「{top_cands[0]}」({top_votes} 个文件)"
+    return default_fmt, [default_fmt, *samples], f"目标多模板同票，采用项目标准格式「{default_fmt}」"
+
+
 async def list_files_robust(cd2: CloudDrive2Client | None, dir_path: str) -> list[dict[str, Any]]:
     """读取目录文件清单（兼容本地文件系统与 CloudDrive2）。"""
     norm_dir = normalize_dir_path(dir_path)
@@ -159,7 +295,7 @@ async def move_and_rename_file_robust(
     norm_src = normalize_dir_path(src_file_path)
     norm_target_dir = normalize_dir_path(target_dir_path)
     final_target_path = f"{norm_target_dir}/{new_filename}"
-    old_filename = posixpath.basename(norm_src)
+    old_filename = _path_basename(norm_src)
 
     # 检查本地文件系统
     if os.path.exists(norm_src):
@@ -225,10 +361,19 @@ async def build_directory_merge_plan(
     target_path: str = "",
     source_target_path: str = "",
     season_number: int = 1,
+    season_numbers: list[int] | None = None,
+    all_seasons: bool = False,
     selected_prefix: str = "",
+    canonical_title: str = "",
+    first_air_year: str = "",
+    auto_canonical_target: bool = False,
+    smart_collision: bool = False,
+    active_download_paths: set[str] | None = None,
     cd2_client: CloudDrive2Client | None = None,
 ) -> dict[str, Any]:
-    """生成只读目录合并与前缀统一执行计划（M01–M10）。"""
+    """生成只读目录合并与前缀统一执行计划（M01–M14, G06–G09）。"""
+    from app.core.episode_parser import classify_content_unit
+
     task = await db.get(Task, task_id)
     group = await db.get(DirectoryGroup, group_id)
     if not task or not group or group.task_id != task_id:
@@ -265,30 +410,62 @@ async def build_directory_merge_plan(
     if chosen_target_option is None and candidates:
         chosen_target_option = candidates[0]
 
+    # 计算规范目录名（G06: 规范剧名 (作品首播年) [tmdbid=ID]）
+    canon_dir_name, naming_basis = build_canonical_show_dir_name(
+        canonical_title=canonical_title or group.title or "",
+        first_air_year=first_air_year,
+        tmdb_id=group.tmdb_id,
+        existing_name=_path_basename(all_src_paths[0]) if all_src_paths else "",
+    )
+
     archive_target_show = (
         normalize_dir_path(chosen_target_option.get("target_path"))
         if chosen_target_option
         else (normalize_dir_path(target_path) or normalize_dir_path(group.confirmed_target_path))
     )
 
+    source_target_will_create = False
     # 确定本次源端主目录 (source_target_path)
     final_src_target = normalize_dir_path(source_target_path)
+    if not final_src_target and auto_canonical_target and all_src_paths and canon_dir_name:
+        # 大小写等价检查：若已有源目录与规范目录名一致则直接复用，否则新建受控规范目录 (G06)
+        matched_existing = next(
+            (p for p in all_src_paths if _path_basename(p).casefold() == canon_dir_name.casefold()),
+            None,
+        )
+        if matched_existing:
+            final_src_target = matched_existing
+        else:
+            parent_cat_dir = _path_dirname(all_src_paths[0]).rstrip("/\\")
+            sep = "\\" if ("\\" in parent_cat_dir and "/" not in parent_cat_dir) else "/"
+            final_src_target = normalize_dir_path(f"{parent_cat_dir}{sep}{canon_dir_name}")
+            source_target_will_create = True
+            if settings.archive_root and group.category_key:
+                archive_target_show = normalize_dir_path(
+                    f"{settings.archive_root.rstrip('/')}/{group.category_key.strip('/')}/{canon_dir_name}"
+                )
+            elif archive_target_show:
+                archive_target_show = normalize_dir_path(
+                    f"{_path_dirname(archive_target_show)}/{canon_dir_name}"
+                )
+
     if not final_src_target:
         if chosen_target_option and chosen_target_option.get("source_show_paths"):
             final_src_target = normalize_dir_path(chosen_target_option["source_show_paths"][0])
         elif all_src_paths:
-            # 优先选名称与 TMDB 标题一致或目录名最贴合的源目录
             canonical_name = normalize_dir_basename(group.title or "")
             best_match = None
             for p in all_src_paths:
-                bname = normalize_dir_basename(posixpath.basename(p))
+                bname = normalize_dir_basename(_path_basename(p))
                 if canonical_name and bname == canonical_name:
                     best_match = p
                     break
             final_src_target = best_match or all_src_paths[0]
 
-    # 待并入的其他源目录列表
-    merge_from_show_paths = [p for p in all_src_paths if p != final_src_target]
+    # 待并入的其他源目录列表（大小写等价去重）
+    merge_from_show_paths = [
+        p for p in all_src_paths if p.casefold() != final_src_target.casefold()
+    ]
 
     block_reasons: list[str] = []
     can_execute = True
@@ -306,60 +483,74 @@ async def build_directory_merge_plan(
             can_execute = False
             block_reasons.append(f"源目录与目标目录存在自指或嵌套包含关系: {p} <-> {final_src_target}")
 
-    target_season_dir = f"{final_src_target}/Season {season_number}"
-    target_files_raw = await list_files_robust(cd2_client, target_season_dir)
-    target_file_names = {f["name"] for f in target_files_raw if not f.get("isDirectory")}
+    # 确定本次作用季列表（G08: 支持一次组级计划覆盖多个季）
+    discovered_seasons: set[int] = set()
+    if season_numbers:
+        discovered_seasons.update(int(s) for s in season_numbers if int(s) > 0)
+    elif all_seasons:
+        for src_show in merge_from_show_paths:
+            root_entries_probe = await list_files_robust(cd2_client, src_show)
+            for re_item in root_entries_probe:
+                if re_item.get("isDirectory"):
+                    m_s = re.match(r"(?i)^(?:Season\s*|S)(\d{1,2})$", re_item["name"])
+                    if m_s and int(m_s.group(1)) > 0:
+                        discovered_seasons.add(int(m_s.group(1)))
+        if not discovered_seasons:
+            discovered_seasons.add(int(season_number))
+    else:
+        discovered_seasons.add(int(season_number))
 
-    # 提取目标同季前缀样本 (M04)
-    target_clean_name = posixpath.basename(final_src_target).split(" [tmdbid=")[0].split(" (")[0].strip()
-    prefix_samples = extract_target_prefix_samples(
-        list(target_file_names), season_number=season_number, fallback_title=target_clean_name
+    target_seasons = sorted(discovered_seasons)
+    primary_season = target_seasons[0]
+
+    target_clean_name = (
+        sanitize_fs_name(canonical_title)
+        or posixpath.basename(final_src_target).split(" [tmdbid=")[0].split(" (")[0].strip()
     )
-    chosen_prefix = selected_prefix if (selected_prefix and selected_prefix in prefix_samples) else prefix_samples[0]
+
+    active_dl_norm = {str(x).strip().rstrip("/").lower() for x in (active_download_paths or set()) if x}
 
     files_to_move: list[dict[str, Any]] = []
+    collision_dedup_items: list[dict[str, Any]] = []
+    isolated_conflicts: list[dict[str, Any]] = []
+    deferred_active_downloads: list[dict[str, Any]] = []
     assets_to_preserve: list[dict[str, Any]] = []
     remaining_seasons: list[str] = []
     directories_to_clean: list[str] = []
+    per_season_prefixes: dict[int, dict[str, Any]] = {}
 
-    planned_target_names: set[str] = set()
+    # 预先读取目标根文件以处理剧根公共资产 (M09)
+    target_root_files = await list_files_robust(cd2_client, final_src_target)
+    target_root_names_lower = {tf["name"].lower() for tf in target_root_files if not tf.get("isDirectory")}
 
+    # 检查旧剧根公共资产与未纳入本次合并的其他季
     for old_src_show in merge_from_show_paths:
-        old_season_dir = f"{old_src_show}/Season {season_number}"
-        old_season_files = await list_files_robust(cd2_client, old_season_dir)
-
-        # 检查旧剧根下是否还有其他季（M10）
         root_entries = await list_files_robust(cd2_client, old_src_show)
+        old_remaining_for_show: list[str] = []
         for re_item in root_entries:
             if re_item.get("isDirectory"):
                 dir_name = re_item["name"]
                 m_s = re.match(r"(?i)^(?:Season\s*|S)(\d{1,2})$", dir_name)
-                if m_s and int(m_s.group(1)) != season_number:
-                    remaining_seasons.append(f"{posixpath.basename(old_src_show)}/{dir_name}")
-
-        # 检查旧剧根下的公共资产（M09）
-        for re_item in root_entries:
-            if not re_item.get("isDirectory"):
+                if m_s and int(m_s.group(1)) not in target_seasons:
+                    rem_label = f"{posixpath.basename(old_src_show)}/{dir_name}"
+                    remaining_seasons.append(rem_label)
+                    old_remaining_for_show.append(rem_label)
+            else:
                 fname = re_item["name"]
                 fpath = re_item["path"]
-                # 公共刮削资产 (tvshow.nfo, poster.jpg 等)
                 is_public_asset = bool(
                     re.match(r"(?i)^(tvshow\.nfo|poster\..+|fanart\..+|banner\..+|clearlogo\..+|logo\..+)$", fname)
                 )
-                # 目标根是否存在同名
-                target_root_files = await list_files_robust(cd2_client, final_src_target)
-                target_has_asset = any(tf["name"].lower() == fname.lower() for tf in target_root_files)
                 old_dir_tag = posixpath.basename(old_src_show)
-
-                if is_public_asset and not target_has_asset:
+                if is_public_asset and fname.lower() not in target_root_names_lower:
                     dest_path = f"{final_src_target}/{fname}"
                     dest_dir = final_src_target
                     dest_desc = "迁入目标剧根"
+                    target_root_names_lower.add(fname.lower())
                 else:
                     dest_dir = f"{final_src_target}/合并保留/{old_dir_tag}"
                     dest_path = f"{dest_dir}/{fname}"
                     dest_desc = f"保全至合并保留子目录 ({old_dir_tag})"
-
                 assets_to_preserve.append({
                     "source_path": fpath,
                     "file_name": fname,
@@ -368,67 +559,205 @@ async def build_directory_merge_plan(
                     "description": dest_desc,
                 })
 
-        # 处理季目录内的文件
-        for f in old_season_files:
-            if f.get("isDirectory"):
-                continue
-            fname = f["name"]
-            fpath = f["path"]
-
-            # 错季校验 (M06)
-            if is_mismatched_season_file(fname, season_number):
-                can_execute = False
-                block_reasons.append(f"错季文件冲突：{fname} 包含非第 {season_number} 季集号标记，已拦截盲改")
+        # 逐季规划移动与改名 (G07, G08, G09)
+        show_has_isolated_or_deferred = False
+        for cur_sn in target_seasons:
+            old_season_dir = f"{old_src_show}/Season {cur_sn}"
+            old_season_files = await list_files_robust(cd2_client, old_season_dir)
+            if not old_season_files:
                 continue
 
-            # 拆分前缀与季集标记边界 (M03)
-            boundary = split_season_episode_boundary(fname, season_number)
-            if not boundary:
-                can_execute = False
-                block_reasons.append(f"命名标记冲突：{fname} 缺少代表本季的有效季集标记，需人工核实")
-                continue
+            target_season_dir = f"{final_src_target}/Season {cur_sn}"
+            if cur_sn not in per_season_prefixes:
+                t_files_raw = await list_files_robust(cd2_client, target_season_dir)
+                t_file_map = {f["name"]: f for f in t_files_raw if not f.get("isDirectory")}
+                chosen_p, p_samples, p_basis = select_prefix_with_basis(
+                    list(t_file_map.keys()),
+                    season_number=cur_sn,
+                    canonical_title=target_clean_name,
+                    selected_prefix=selected_prefix if cur_sn == primary_season else "",
+                )
+                per_season_prefixes[cur_sn] = {
+                    "chosen_prefix": chosen_p,
+                    "prefix_samples": p_samples,
+                    "prefix_selection_basis": p_basis,
+                    "target_file_map": t_file_map,
+                    "planned_target_names": set(),
+                }
 
-            orig_prefix, orig_suffix = boundary
-            new_filename = f"{chosen_prefix}{orig_suffix}"
+            s_ctx = per_season_prefixes[cur_sn]
+            s_chosen_prefix = s_ctx["chosen_prefix"]
+            t_file_map = s_ctx["target_file_map"]
+            planned_names = s_ctx["planned_target_names"]
+            season_has_blocked = False
 
-            # 冲突检测 (M07)
-            is_conflict = False
-            conflict_reason = ""
-            if new_filename in target_file_names:
-                is_conflict = True
-                conflict_reason = f"目标目录已存在同名文件: {new_filename}，禁止覆盖"
-                can_execute = False
-                block_reasons.append(conflict_reason)
-            elif new_filename in planned_target_names:
-                is_conflict = True
-                conflict_reason = f"待移入文件改名后同名冲突: {new_filename}"
-                can_execute = False
-                block_reasons.append(conflict_reason)
+            for f in old_season_files:
+                if f.get("isDirectory"):
+                    continue
+                fname = f["name"]
+                fpath = f["path"]
+                fpath_low = str(fpath).strip().rstrip("/").lower()
 
-            planned_target_names.add(new_filename)
+                # 检查活动下载器路径依赖：仅局部延后，不丢失下载器关联
+                if active_dl_norm and any(fpath_low == ap or ap in fpath_low for ap in active_dl_norm):
+                    deferred_active_downloads.append({
+                        "season_number": cur_sn,
+                        "source_path": fpath,
+                        "filename": fname,
+                        "reason": "下载器存在活动写入路径依赖，已局部延后",
+                    })
+                    season_has_blocked = True
+                    show_has_isolated_or_deferred = True
+                    continue
 
-            pe = parse_episode(fname, fpath, f.get("size", 0))
-            is_sub = is_subtitle_file(fname)
-            is_vid = is_video_file(fname)
+                # 检查显式异作品 TMDB ID 冲突（G07：局部隔离争议文件/季，不阻断其他干净季）
+                explicit_fid = detect_explicit_file_tmdb_id(fname)
+                if explicit_fid and group.tmdb_id and str(explicit_fid) != str(group.tmdb_id):
+                    isolated_conflicts.append({
+                        "season_number": cur_sn,
+                        "source_path": fpath,
+                        "filename": fname,
+                        "file_tmdb_id": explicit_fid,
+                        "group_tmdb_id": str(group.tmdb_id),
+                        "reason": f"文件显式标注异作品 TMDB ID ({explicit_fid} != {group.tmdb_id})，已局部隔离",
+                    })
+                    season_has_blocked = True
+                    show_has_isolated_or_deferred = True
+                    continue
 
-            files_to_move.append({
-                "source_path": fpath,
-                "source_filename": fname,
-                "new_filename": new_filename,
-                "target_dir": target_season_dir,
-                "target_path": f"{target_season_dir}/{new_filename}",
-                "kind": "video" if is_vid else ("subtitle" if is_sub else "other"),
-                "episode_numbers": pe.episode_numbers,
-                "is_special": pe.is_special,
-                "size_bytes": f.get("size", 0),
-                "is_conflict": is_conflict,
-                "conflict_reason": conflict_reason,
-            })
+                # 错季校验 (M06)
+                if is_mismatched_season_file(fname, cur_sn):
+                    if all_seasons:
+                        isolated_conflicts.append({
+                            "season_number": cur_sn,
+                            "source_path": fpath,
+                            "filename": fname,
+                            "reason": f"错季文件冲突：{fname} 包含非第 {cur_sn} 季标记，已局部隔离",
+                        })
+                        season_has_blocked = True
+                        show_has_isolated_or_deferred = True
+                    else:
+                        can_execute = False
+                        block_reasons.append(f"错季文件冲突：{fname} 包含非第 {cur_sn} 季集号标记，已拦截盲改")
+                    continue
 
-        # 待清理目录
-        directories_to_clean.append(old_season_dir)
-        if not remaining_seasons:
+                # 拆分前缀与季集标记边界 (M03)
+                boundary = split_season_episode_boundary(fname, cur_sn)
+                if not boundary:
+                    if all_seasons:
+                        isolated_conflicts.append({
+                            "season_number": cur_sn,
+                            "source_path": fpath,
+                            "filename": fname,
+                            "reason": f"命名标记冲突：{fname} 缺少有效季集标记，已局部隔离",
+                        })
+                        season_has_blocked = True
+                        show_has_isolated_or_deferred = True
+                    else:
+                        can_execute = False
+                        block_reasons.append(f"命名标记冲突：{fname} 缺少代表本季的有效季集标记，需人工核实")
+                    continue
+
+                orig_prefix, orig_suffix = boundary
+                new_filename = f"{s_chosen_prefix}{orig_suffix}"
+                dest_season_dir = target_season_dir
+
+                # 冲突检测与智能防覆盖处置 (M07, G09)
+                is_conflict = False
+                conflict_reason = ""
+                collision_resolution = ""
+
+                if new_filename in t_file_map or new_filename in planned_names:
+                    if smart_collision:
+                        existing_f = t_file_map.get(new_filename)
+                        src_unit = classify_content_unit(fname, season_number=cur_sn, filepath=fpath, file_size=int(f.get("size") or 0))
+                        tgt_unit = (
+                            classify_content_unit(existing_f["name"], season_number=cur_sn, filepath=existing_f.get("path", ""), file_size=int(existing_f.get("size") or 0))
+                            if existing_f
+                            else None
+                        )
+                        if (
+                            existing_f
+                            and src_unit["content_unit_key"] == tgt_unit["content_unit_key"]
+                            and int(f.get("size") or 0) > 0
+                            and int(existing_f.get("size") or 0) > 0
+                            and int(f.get("size") or 0) <= int(existing_f.get("size") or 0)
+                        ):
+                            # 已证实等价副本且目标侧不劣于源侧 -> 归入副本清理，绝不覆盖
+                            collision_dedup_items.append({
+                                "season_number": cur_sn,
+                                "source_path": fpath,
+                                "source_filename": fname,
+                                "replaced_by": existing_f["name"],
+                                "replaced_by_path": existing_f.get("path", ""),
+                                "reason": f"与目标目录同名文件 [{existing_f['name']}] 为同内容等价副本，转入副本清理",
+                            })
+                            continue
+                        # 不同内容或无法证明等价 -> 优先保留原区分前缀，仍碰撞则放入保留子目录 (G09)
+                        if fname not in t_file_map and fname not in planned_names:
+                            new_filename = fname
+                            collision_resolution = "keep_original_prefix"
+                        else:
+                            old_dir_tag = posixpath.basename(old_src_show)
+                            dest_season_dir = f"{target_season_dir}/合并保留/{old_dir_tag}"
+                            new_filename = fname
+                            collision_resolution = "preserve_in_subdir"
+                    else:
+                        is_conflict = True
+                        conflict_reason = (
+                            f"目标目录已存在同名文件: {new_filename}，禁止覆盖"
+                            if new_filename in t_file_map
+                            else f"待移入文件改名后同名冲突: {new_filename}"
+                        )
+                        can_execute = False
+                        block_reasons.append(conflict_reason)
+
+                planned_names.add(new_filename)
+
+                pe = parse_episode(fname, fpath, f.get("size", 0))
+                is_sub = is_subtitle_file(fname)
+                is_vid = is_video_file(fname)
+
+                files_to_move.append({
+                    "season_number": cur_sn,
+                    "source_path": fpath,
+                    "source_filename": fname,
+                    "new_filename": new_filename,
+                    "target_dir": dest_season_dir,
+                    "target_path": f"{dest_season_dir}/{new_filename}",
+                    "kind": "video" if is_vid else ("subtitle" if is_sub else "other"),
+                    "episode_numbers": pe.episode_numbers,
+                    "is_special": pe.is_special,
+                    "size_bytes": f.get("size", 0),
+                    "is_conflict": is_conflict,
+                    "conflict_reason": conflict_reason,
+                    "collision_resolution": collision_resolution,
+                })
+
+            if not season_has_blocked:
+                directories_to_clean.append(old_season_dir)
+
+        if not old_remaining_for_show and not show_has_isolated_or_deferred:
             directories_to_clean.append(old_src_show)
+
+    # 若主季尚未填充前缀信息（例如单季目录为空）
+    if primary_season not in per_season_prefixes:
+        target_season_dir = f"{final_src_target}/Season {primary_season}"
+        t_files_raw = await list_files_robust(cd2_client, target_season_dir)
+        t_names = [f["name"] for f in t_files_raw if not f.get("isDirectory")]
+        chosen_p, p_samples, p_basis = select_prefix_with_basis(
+            t_names, season_number=primary_season, canonical_title=target_clean_name, selected_prefix=selected_prefix
+        )
+        per_season_prefixes[primary_season] = {
+            "chosen_prefix": chosen_p,
+            "prefix_samples": p_samples,
+            "prefix_selection_basis": p_basis,
+        }
+
+    primary_p_ctx = per_season_prefixes[primary_season]
+    prefix_samples = primary_p_ctx["prefix_samples"]
+    chosen_prefix = primary_p_ctx["chosen_prefix"]
+    prefix_selection_basis = primary_p_ctx["prefix_selection_basis"]
 
     # 检查是否连载中（用于前端提示）
     is_airing = False
@@ -436,7 +765,7 @@ async def build_directory_merge_plan(
         select(SeasonRecord).where(
             SeasonRecord.task_id == task_id,
             SeasonRecord.show_path == final_src_target,
-            SeasonRecord.season_number == season_number,
+            SeasonRecord.season_number.in_(target_seasons),
         )
     )).all())
     if target_recs:
@@ -448,17 +777,33 @@ async def build_directory_merge_plan(
     plan_id = f"plan_merge_{uuid4().hex[:12]}"
     plan = {
         "plan_id": plan_id,
+        "rules_version": "v2.5.45",
         "task_id": task_id,
         "group_id": group_id,
+        "canonical_dir_name": canon_dir_name,
+        "naming_basis": naming_basis,
         "source_target_show_path": final_src_target,
+        "source_target_will_create": source_target_will_create,
         "archive_target_show_path": archive_target_show,
-        "season_number": season_number,
+        "season_number": primary_season,
+        "affected_seasons": target_seasons,
         "is_airing": is_airing,
         "airing_notice": "合并后继续留源，不表示全季已归档" if is_airing else "",
         "prefix_samples": prefix_samples,
         "chosen_prefix": chosen_prefix,
+        "prefix_selection_basis": prefix_selection_basis,
+        "per_season_prefixes": {
+            str(sn): {
+                "chosen_prefix": ctx["chosen_prefix"],
+                "prefix_selection_basis": ctx["prefix_selection_basis"],
+            }
+            for sn, ctx in per_season_prefixes.items()
+        },
         "merge_from_show_paths": merge_from_show_paths,
         "files_to_move": files_to_move,
+        "collision_dedup_items": collision_dedup_items,
+        "isolated_conflicts": isolated_conflicts,
+        "deferred_active_downloads": deferred_active_downloads,
         "assets_to_preserve": assets_to_preserve,
         "directories_to_clean": list(dict.fromkeys(directories_to_clean)),
         "remaining_seasons": remaining_seasons,
@@ -508,20 +853,24 @@ async def execute_directory_merge(
     source_target_show = plan["source_target_show_path"]
     archive_target_show = plan["archive_target_show_path"]
     season_number = plan.get("season_number", 1)
-    target_season_dir = f"{source_target_show}/Season {season_number}"
+    affected_seasons = [int(s) for s in (plan.get("affected_seasons") or [season_number]) if int(s) > 0]
 
     files_to_move = plan.get("files_to_move") or []
+    collision_dedup_items = plan.get("collision_dedup_items") or []
     assets_to_preserve = plan.get("assets_to_preserve") or []
     directories_to_clean = plan.get("directories_to_clean") or []
     remaining_seasons = plan.get("remaining_seasons") or []
+    merge_from_norm = {normalize_dir_path(p) for p in (plan.get("merge_from_show_paths") or [])}
 
     moved_files: list[str] = []
     renamed_files: list[str] = []
+    dedup_cleaned_files: list[str] = []
     preserved_assets: list[str] = []
     cleaned_dirs: list[str] = []
+    refresh_failed: list[str] = []
     errors: list[str] = []
 
-    # 1. 移动并重命名视频与伴生文件 (M01, M03, M05, M12 幂等)
+    # 1. 移动并重命名视频与伴生文件 (M01, M03, M05, M12 幂等, G06/G08)
     for item in files_to_move:
         src_path = item["source_path"]
         t_dir = item["target_dir"]
@@ -529,7 +878,6 @@ async def execute_directory_merge(
         old_name = item["source_filename"]
 
         try:
-            # 幂等检查：目标已存在且源已离开
             final_path = f"{t_dir}/{new_name}"
             if os.path.exists(final_path) and not os.path.exists(src_path):
                 moved_files.append(new_name)
@@ -549,6 +897,19 @@ async def execute_directory_merge(
     if errors:
         raise RuntimeError(f"文件合并中断，部分文件未就位: {'; '.join(errors)}")
 
+    # 1B. 同名碰撞中的已证实等价副本清理（不覆盖目标，安全回收源端冗余 · G09）
+    for c_item in collision_dedup_items:
+        src_path = c_item["source_path"]
+        try:
+            if os.path.exists(src_path):
+                os.remove(src_path)
+                dedup_cleaned_files.append(c_item["source_filename"])
+            elif cd2 is not None:
+                await cd2.delete_file(src_path)
+                dedup_cleaned_files.append(c_item["source_filename"])
+        except Exception as e:
+            log.warning("清理同名等价副本失败 %s: %s", src_path, e)
+
     # 2. 保全剧根公共资产与附件 (M09)
     for asset in assets_to_preserve:
         src_path = asset["source_path"]
@@ -564,26 +925,28 @@ async def execute_directory_merge(
         except Exception as e:
             log.warning("保全资产失败 %s: %s", src_path, e)
 
-    # 3. 双端后验 (M11)
-    target_files_after = await list_files_robust(cd2, target_season_dir)
-    target_names_after = {f["name"] for f in target_files_after}
+    # 3. 双端后验 (M11, G08 支持多季后验)
+    checked_dirs_cache: dict[str, set[str]] = {}
     for item in files_to_move:
-        if item["new_filename"] not in target_names_after:
-            raise RuntimeError(f"双端后验失败：目标目录未见合并文件 {item['new_filename']}")
+        t_dir = item["target_dir"]
+        if t_dir not in checked_dirs_cache:
+            t_files_after = await list_files_robust(cd2, t_dir)
+            checked_dirs_cache[t_dir] = {f["name"] for f in t_files_after}
+        if item["new_filename"] not in checked_dirs_cache[t_dir]:
+            raise RuntimeError(f"双端后验失败：目标目录 {t_dir} 未见合并文件 {item['new_filename']}")
 
     # 4. 回收旧目录空壳 (M01, M10, M11)
     for dpath in directories_to_clean:
         if dpath in remaining_seasons:
             continue
-        # 如果是剧根目录，且存在剩余季度，绝对不删除 (M10)
-        is_root = any(dpath == p for p in plan.get("merge_from_show_paths", []))
+        is_root = any(normalize_dir_path(dpath) == p for p in merge_from_norm)
         if is_root and remaining_seasons:
             continue
         ok = await delete_dir_robust(cd2, dpath)
         if ok:
             cleaned_dirs.append(dpath)
 
-    # 5. 局部云盘强制刷新 (M01, M14)
+    # 5. 局部云盘强制刷新 (M01, M14, 刷新失败单列不掩盖媒体合并成功)
     refresh_candidates = {
         task.source_path,
         source_target_show,
@@ -591,6 +954,8 @@ async def execute_directory_merge(
     }
     for p in plan.get("merge_from_show_paths", []):
         refresh_candidates.add(posixpath.dirname(p))
+    for sn in affected_seasons:
+        refresh_candidates.add(f"{source_target_show}/Season {sn}")
 
     for r_dir in refresh_candidates:
         if r_dir:
@@ -598,65 +963,78 @@ async def execute_directory_merge(
                 await cd2.list_files(r_dir, force_refresh=True)
             except Exception as e:
                 log.warning("刷新云盘目录缓存异常 %s: %s", r_dir, e)
+                refresh_failed.append(f"{r_dir}: {e}")
 
-    # 6. 数据库记录更新与五模块分流重算 (M13)
-    # 查找目标记录与旧记录
-    target_records = list((await db.scalars(
-        select(SeasonRecord).where(
-            SeasonRecord.task_id == task_id,
-            SeasonRecord.show_path == source_target_show,
-            SeasonRecord.season_number == season_number,
-        )
-    )).all())
-
+    # 6. 数据库记录按季独立更新与五模块分流重算 (M13, G06, G08 不串季)
     all_group_recs = list((await db.scalars(
         select(SeasonRecord).where(SeasonRecord.task_id == task_id)
     )).all())
 
-    # 找出参与合并的旧源端季记录
-    merged_eps: set[int] = set()
+    merged_eps_by_season: dict[int, set[int]] = {sn: set() for sn in affected_seasons}
     for item in files_to_move:
+        sn_i = int(item.get("season_number") or season_number)
         for ep in item.get("episode_numbers") or []:
             if isinstance(ep, int) and ep > 0:
-                merged_eps.add(ep)
+                merged_eps_by_season.setdefault(sn_i, set()).add(ep)
 
-    target_rec = target_records[0] if target_records else None
-    if target_rec is not None:
-        try:
-            curr_eps = set(json.loads(target_rec.recognized_episodes_json or "[]"))
-        except Exception:
-            curr_eps = set()
-        union_eps = sorted(curr_eps | merged_eps)
-        target_rec.recognized_episodes_json = json.dumps(union_eps)
-        target_rec.local_episode_count = len(union_eps)
-        target_rec.archive_target_path = f"{archive_target_show}/Season {season_number}"
+    target_show_basename = posixpath.basename(source_target_show)
+    norm_source_target = normalize_dir_path(source_target_show)
 
-        # 解除目录组阻塞
-        try:
-            t_ev = json.loads(target_rec.evidence_json or "{}")
-        except Exception:
-            t_ev = {}
-        old_dg = t_ev.get("directory_group") or {}
-        t_ev["directory_group"] = {
-            **old_dg,
-            "id": group.id,
-            "status": "confirmed",
-            "requires_confirm": False,
-            "confirmation_mode": "use_archive_target",
-            "confirmed_target_path": archive_target_show,
-            "invalidated_reason": "",
-            "merged_from": plan.get("merge_from_show_paths", []),
-        }
-        target_rec.evidence_json = json.dumps(t_ev, ensure_ascii=False)
+    for sn in affected_seasons:
+        t_recs = [
+            r for r in all_group_recs
+            if normalize_dir_path(r.show_path) == norm_source_target and int(r.season_number) == sn
+        ]
+        src_recs = [
+            r for r in all_group_recs
+            if normalize_dir_path(r.show_path) in merge_from_norm and int(r.season_number) == sn
+        ]
 
-    # 将已被并入的旧记录标为已结案/源端已离开
-    for rec in all_group_recs:
-        if normalize_dir_path(rec.show_path) in [normalize_dir_path(p) for p in plan.get("merge_from_show_paths", [])]:
-            if rec.season_number == season_number:
-                rec.status = "source_absent"
-                rec.status_detail = f"文件已全部合并至 {source_target_show} 并统一前缀"
-                rec.recognized_episodes_json = "[]"
-                rec.local_episode_count = 0
+        # G06: 若目标为新建规范目录，尚无对应 SeasonRecord，则将首个源季记录就地迁移为新规范目录的主记录
+        target_rec = t_recs[0] if t_recs else None
+        migrated_primary = None
+        if target_rec is None and src_recs:
+            target_rec = src_recs[0]
+            migrated_primary = target_rec
+            target_rec.show_name = target_show_basename
+            target_rec.show_path = source_target_show
+            target_rec.season_path = f"{source_target_show}/Season {sn}"
+
+        if target_rec is not None:
+            try:
+                curr_eps = set(json.loads(target_rec.recognized_episodes_json or "[]"))
+            except Exception:
+                curr_eps = set()
+            union_eps = sorted(curr_eps | merged_eps_by_season.get(sn, set()))
+            target_rec.recognized_episodes_json = json.dumps(union_eps)
+            target_rec.local_episode_count = len(union_eps)
+            target_rec.archive_target_path = f"{archive_target_show}/Season {sn}"
+
+            try:
+                t_ev = json.loads(target_rec.evidence_json or "{}")
+            except Exception:
+                t_ev = {}
+            old_dg = t_ev.get("directory_group") or {}
+            t_ev["directory_group"] = {
+                **old_dg,
+                "id": group.id,
+                "status": "confirmed",
+                "requires_confirm": False,
+                "confirmation_mode": "use_archive_target",
+                "confirmed_target_path": archive_target_show,
+                "invalidated_reason": "",
+                "merged_from": plan.get("merge_from_show_paths", []),
+            }
+            target_rec.evidence_json = json.dumps(t_ev, ensure_ascii=False)
+
+        # 将其余已被并入的旧记录标为 source_absent
+        for rec in src_recs:
+            if rec is migrated_primary:
+                continue
+            rec.status = "source_absent"
+            rec.status_detail = f"文件已全部合并至 {source_target_show} 并统一前缀"
+            rec.recognized_episodes_json = "[]"
+            rec.local_episode_count = 0
 
     # 更新 DirectoryGroup 状态
     group.status = "confirmed"
@@ -668,29 +1046,36 @@ async def execute_directory_merge(
     grp_ev["last_merge_receipt"] = {
         "plan_id": plan.get("plan_id"),
         "executed_at": datetime.now(timezone.utc).isoformat(),
+        "affected_seasons": affected_seasons,
         "moved_files": moved_files,
         "renamed_files": renamed_files,
+        "dedup_cleaned_files": dedup_cleaned_files,
         "preserved_assets": preserved_assets,
         "cleaned_dirs": cleaned_dirs,
+        "refresh_failed": refresh_failed,
     }
     group.evidence_json = json.dumps(grp_ev, ensure_ascii=False)
 
-    # 统一重算任务摘要与分类
     summary = await refresh_task_summary(task_id, db)
     await db.commit()
     await db.refresh(group)
 
     target_show_name = posixpath.basename(source_target_show).split(" [tmdbid=")[0]
     success_msg = f"已合并到{target_show_name}目录，已统一 {len(renamed_files)} 个文件名，旧目录已清理，目录已刷新"
+    if refresh_failed:
+        success_msg += f"（{len(refresh_failed)} 个目录刷新待重试）"
 
     return {
         "ok": True,
         "group_id": group.id,
         "plan_id": plan.get("plan_id"),
+        "affected_seasons": affected_seasons,
         "summary": summary,
         "moved_count": len(moved_files),
         "renamed_count": len(renamed_files),
+        "dedup_cleaned_count": len(dedup_cleaned_files),
         "cleaned_dirs": cleaned_dirs,
         "preserved_assets": preserved_assets,
+        "refresh_failed": refresh_failed,
         "message": success_msg,
     }

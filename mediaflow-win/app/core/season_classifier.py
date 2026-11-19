@@ -1,48 +1,63 @@
-"""MediaFlow 五模块互斥分流与作品季归并核心决策器.
+"""MediaFlow 五模块互斥分流与作品季归并核心决策器 (v2.5.45 重构版).
 
-严格遵循《MediaFlow五模块互斥分流与操作纠错方案-v2.5.23-2026-11-14.md》：
-1. 五大主模块严格按优先级互斥分流（短路求值，绝不同时落入两处）：
-   优先级 1: 异常剧集 (anomaly)
-   优先级 2: 连载留源 (airing)
-   优先级 3: 真缺集待补 (download)
-   优先级 4: 待复核清理 (review)
-   优先级 5: 齐全可归档 (archive)
+严格遵循《MediaFlow五模块处理流程重构与智能清理方案-v2.5.44.md》：
+1. 页面/导航展示顺序（全端一致）：
+   待复核清理 (review) → 异常剧集 (anomaly) → 缺集待补 (download) → 连载留源 (airing) → 齐全可归档 (archive)
 
-2. 作品季维度唯一主待办归并：
-   以 (tmdb_id, season_number)（未识别时为 (show_name, season_number)）为聚合主键。
-   同一作品季无论存在几个物理目录，在初检主界面只呈现 1 个主待办卡片。
-   主卡片取组内最优先模块作为该作品季的唯一主分类，其余物理记录作为关联记录挂载。
+2. 分流计算优先级（短路求值，播期判断在下载资格之前，避免将未播内容误推为缺集）：
+   优先级 1: 待复核清理 (review) — 有源端同内容多余副本（含缺集兼副本、连载稳定副本）、同 ID 目录规范化归并、归档已齐待清源
+   优先级 2: 异常剧集 (anomaly) — 身份冲突、编号/口径冲突、资料或目录读取失败、文件内容待识别、播期未知、修正未完成
+   优先级 3: 连载留源 (airing) — 已确认正在连载或待播
+   优先级 4: 缺集待补 (download) — 已播毕且有确认缺口（含源端仅附件且两端无正片）
+   优先级 5: 齐全可归档 (archive) — 已播毕、覆盖齐全且清理/修正已完成
 
-3. 数学不变量：
-   catCountArchive + catCountReview + catCountDownload + catCountAiring + catCountAnomaly == total_work_seasons
-   待确认目录组数作为异常剧集的后缀提示展示，绝不与季数混加。
+3. 消除分流循环 (G26)：
+   若清理分析确认同集多文件全部属于不同内容/剪辑版本（review_resolution.all_distinct_retained 且指纹未变），
+   不再因原始重复集号送回待复核清理，直接按实际播期与覆盖分流。
+
+4. 数学不变量：
+   catCountReview + catCountAnomaly + catCountDownload + catCountAiring + catCountArchive + catCountHeld == total_work_seasons
 """
 
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Sequence
 
-# 分流优先级定义（数值越小优先级越高）
+# 导航与汇总展示统一顺序 (G21)
+MODULE_DISPLAY_ORDER: tuple[str, ...] = ("review", "anomaly", "download", "airing", "archive")
+
+MODULE_LABELS: dict[str, str] = {
+    "review": "待复核清理",
+    "anomaly": "异常剧集",
+    "download": "缺集待补",
+    "airing": "连载留源",
+    "archive": "齐全可归档",
+    "held": "已跳过本轮",
+}
+
+# 分流优先级定义（数值越小优先级越高；播期判断优先于下载资格）
 CATEGORY_PRIORITY: dict[str, int] = {
-    "anomaly": 1,
-    "airing": 2,
-    "download": 3,
-    "review": 4,
+    "review": 1,
+    "anomaly": 2,
+    "airing": 3,
+    "download": 4,
     "archive": 5,
 }
 
-# 属于异常剧集的状态集合
+# 属于异常剧集的状态集合（already_archived 已正式迁入待复核清理）
 ANOMALY_STATUSES = {
     "identity_review",
     "period_review",
-    "already_archived",
     "archive_check",
     "unknown",
     "conflict",
     "failed",
     "partial_archived",
     "archive_unverified",
+    "correction_incomplete",
+    "read_failed",
 }
 
 # 属于已完结/终态的状态集合，不落入五大待办模块中的任何一类
@@ -86,18 +101,79 @@ def get_record_field(rec: Any, field_name: str, default: Any = None) -> Any:
 
 def is_airing_protected(rec: Any) -> bool:
     evidence = _safe_json(get_record_field(rec, "evidence_json") or get_record_field(rec, "evidence"), {})
-    return (get_record_field(rec, "status") == "airing"
-            or (evidence.get("broadcast_evidence") or {}).get("status") in ("airing", "upcoming"))
+    b_status = str((evidence.get("broadcast_evidence") or {}).get("status") or "")
+    return get_record_field(rec, "status") == "airing" or b_status in ("airing", "upcoming")
+
+
+def _is_distinct_retained_valid(evidence: dict[str, Any]) -> bool:
+    """检查 G26 防循环标记：多版本均已确认独立保留且当前文件指纹未变化。"""
+    rev_res = (evidence or {}).get("review_resolution") or {}
+    if not isinstance(rev_res, dict) or not rev_res.get("all_distinct_retained"):
+        return False
+    saved_fp = str(rev_res.get("fingerprint") or "")
+    curr_fp = str((evidence or {}).get("asset_fingerprint") or "")
+    if saved_fp and curr_fp and saved_fp != curr_fp:
+        return False
+    return True
+
+
+def _predict_post_review_category(rec: Any, evidence: dict[str, Any]) -> str:
+    """预测在待复核清理完成本季动作后的去向模块。"""
+    status = str(get_record_field(rec, "status") or "")
+    if status == "already_archived":
+        return "completed_source_cleaned"
+    b_ev = (evidence.get("broadcast_evidence") or {}) if isinstance(evidence, dict) else {}
+    b_status = str(b_ev.get("status") or "")
+    meta_status = str(evidence.get("meta_status") or evidence.get("metadata_status") or "")
+    conflict = _safe_json(
+        get_record_field(rec, "conflict_json", None) or get_record_field(rec, "conflict", None), {}
+    )
+    missing = _safe_json(
+        get_record_field(rec, "missing_episodes_json", None)
+        or get_record_field(rec, "missing_episodes", None),
+        [],
+    )
+    rec_eps = _safe_json(
+        get_record_field(rec, "recognized_episodes_json", None)
+        or get_record_field(rec, "recognized_episodes", None),
+        [],
+    )
+    total_eps = get_record_field(rec, "total_episodes")
+    season_finished = get_record_field(rec, "season_finished")
+
+    if (
+        conflict.get("blocking")
+        or meta_status in ANOMALY_META_STATUSES
+        or status in ANOMALY_STATUSES
+        or b_status == "evidence_pending"
+        or evidence.get("schedule_evidence_pending")
+    ):
+        return "anomaly"
+    status_detail_txt = str(get_record_field(rec, "status_detail") or "")
+    if (
+        status == "airing"
+        or b_status in ("airing", "upcoming")
+        or is_airing_protected(rec)
+        or (season_finished is False and ("连载" in status_detail_txt or "待首播" in status_detail_txt))
+    ):
+        return "airing"
+    if status in ("download_needed", "period_missing") or missing:
+        return "download"
+    if total_eps and int(total_eps) > 0 and season_finished is not False and len([e for e in rec_eps if isinstance(e, int) and e > 0]) >= int(total_eps):
+        return "archive"
+    if status in ("archive_ready", "period_ready", "review_needed") and season_finished is not False and total_eps:
+        return "archive"
+    return "anomaly"
 
 
 def classify_single_record(
     rec: Any,
     pending_dir_group_ids: set[str] | None = None,
 ) -> tuple[str, str]:
-    """判定单个物理剧季记录的基础分类与动作类型.
+    """判定单个物理剧季记录的基础分类与动作类型 (v2.5.45 清理优先规则).
 
     返回: (category, action_type)
-    category in ('anomaly', 'airing', 'download', 'review', 'archive')
+    category in ('review', 'anomaly', 'airing', 'download', 'archive')
     """
     status = str(get_record_field(rec, "status") or "")
     if status in TERMINAL_STATUSES:
@@ -105,9 +181,13 @@ def classify_single_record(
     evidence = _safe_json(
         get_record_field(rec, "evidence_json", None) or get_record_field(rec, "evidence", None), {}
     )
+    if not isinstance(evidence, dict):
+        evidence = {}
     conflict = _safe_json(
         get_record_field(rec, "conflict_json", None) or get_record_field(rec, "conflict", None), {}
     )
+    if not isinstance(conflict, dict):
+        conflict = {}
     rec_eps = _safe_json(
         get_record_field(rec, "recognized_episodes_json", None)
         or get_record_field(rec, "recognized_episodes", None),
@@ -135,34 +215,61 @@ def classify_single_record(
     meta_status = str(evidence.get("meta_status") or evidence.get("metadata_status") or "")
     b_ev = (evidence.get("broadcast_evidence") or {}) if isinstance(evidence, dict) else {}
     b_status = str(b_ev.get("status") or "")
-    status_detail_str = str(get_record_field(rec, "status_detail") or "")
 
-    # 1. 异常剧集 (anomaly) 判定
+    regular_duplicates = [d for d in duplicates if isinstance(d, int) and d > 0]
+    distinct_retained = _is_distinct_retained_valid(evidence)
+    rp_preview = evidence.get("review_plan_preview") or {}
+    if isinstance(rp_preview, dict) and "can_clean" in rp_preview:
+        has_cleanable_dups = bool(rp_preview.get("can_clean"))
+    else:
+        has_cleanable_dups = bool(regular_duplicates) and not distinct_retained and status != "period_ready"
+
+    # 显式身份/混放/修正未完成/读取失败/集数超标矛盾属于阻塞级异常，不跳过身份核查直接清理
+    mc_contra = (evidence.get("manual_confirmation") or {}).get("contradiction") or {}
+    max_rec_ep = max((e for e in rec_eps if isinstance(e, int) and e > 0), default=0)
+    has_overflow_contradiction = bool(
+        mc_contra.get("has_contradiction")
+        or (total_eps and int(total_eps) > 0 and max_rec_ep > int(total_eps) and not evidence.get("is_segmented"))
+    )
+    has_blocking_identity = bool(
+        conflict.get("blocking")
+        or status in ("identity_review", "correction_incomplete", "read_failed")
+        or has_overflow_contradiction
+    )
+
+    # 1. 待复核清理 (review) 优先分流（G01, G02, G06-G08, G10）
+    if not has_blocking_identity:
+        # 1A. 归档已齐待清源 -> 迁入待复核清理
+        if status == "already_archived":
+            return "review", "clean_redundant"
+        # 1B. 同 TMDB ID 多目录规范化归并 -> 纳入待复核清理
+        if dir_grp_requires_confirm:
+            return "review", "merge_directory"
+        # 1C. 源端有可证实清理的同内容重复副本（含缺集兼副本 G01、连载期稳定副本 G02）
+        if has_cleanable_dups or (status == "review_needed" and not distinct_retained):
+            return "review", "clean"
+
+    # 2. 异常剧集 (anomaly) 判定
     is_anomaly = False
     action_type = "inspect_info"
 
-    if dir_grp_requires_confirm:
+    if has_blocking_identity:
         is_anomaly = True
-        action_type = "inspect_info"
+        action_type = "correction_resume" if status == "correction_incomplete" else "inspect_info"
     elif status in ANOMALY_STATUSES:
         is_anomaly = True
-        if status == "already_archived":
-            action_type = "clean_redundant"
-        elif status == "unknown":
+        if status == "unknown":
             action_type = "calibrate"
         elif status == "period_review":
-            action_type = "system_tracking"
+            action_type = "verify_basis"
         else:
             action_type = "inspect_info"
-    elif conflict.get("blocking"):
-        is_anomaly = True
-        action_type = "inspect_info"
     elif meta_status in ANOMALY_META_STATUSES:
         is_anomaly = True
-        action_type = "inspect_info"
+        action_type = "retry_failed" if meta_status in ("fetch_failed", "query_failed") else "inspect_info"
     elif b_status == "evidence_pending" or evidence.get("schedule_evidence_pending") or b_ev.get("heuristic_180d_blocked"):
         is_anomaly = True
-        action_type = "system_tracking"
+        action_type = "verify_broadcast"
     elif total_eps and rec_eps and max(rec_eps) > total_eps and status not in ("archive_ready", "airing"):
         is_anomaly = True
         action_type = "inspect_info"
@@ -170,29 +277,26 @@ def classify_single_record(
     if is_anomaly:
         return "anomaly", action_type
 
-    # 2. 连载留源 (airing) 判定
-    # L04/L05: 须有明确在播/待播状态或连载期重复诊断；旧记录仅存 season_finished=false 且无状态/无依据时归入证据待决
-    if status == "airing" or b_status in ("airing", "upcoming"):
-        return "airing", "skip"
-    if season_finished is False and status == "review_needed" and (
-        "连载中" in status_detail_str or b_ev.get("schedule_verified")
+    # 3. 连载留源 (airing) 判定（播期判断在下载资格之前，且仅限已确认连载/待播，不将未知播期显示为连载）
+    status_detail_txt = str(get_record_field(rec, "status_detail") or "")
+    if (
+        status == "airing"
+        or b_status in ("airing", "upcoming")
+        or is_airing_protected(rec)
+        or (season_finished is False and ("连载" in status_detail_txt or "待首播" in status_detail_txt))
     ):
         return "airing", "skip"
+    if season_finished is False and b_ev.get("schedule_verified"):
+        return "airing", "skip"
     if season_finished is False and not status:
-        return "anomaly", "system_tracking"
+        return "anomaly", "verify_broadcast"
 
-    # 3. 真缺集待补 (download) 判定（含缺集兼重复，缺集优先补齐；历史状态与缺集证据矛盾时以缺集为准）
+    # 4. 缺集待补 (download) 判定（已播毕且有确认缺口，含源端仅附件且两端无正片）
     if status in ("download_needed", "period_missing") or missing:
         gap_state = get_record_field(rec, "gap_fill_state") or {}
         if gap_state.get("view_bucket") == "pushed_pending":
             return "download", "inspect_gap_detail"
         return "download", "download"
-
-    regular_duplicates = [d for d in duplicates if isinstance(d, int) and d > 0]
-
-    # 4. 待复核清理 (review) 判定（正片已齐但有正片重复副本或可淘汰冗余）
-    if status == "review_needed" or (regular_duplicates and status != "period_ready"):
-        return "review", "clean"
 
     # 5. 齐全可归档 (archive) 判定（须具备总集数与本地/跨端覆盖依据）
     local_ep_count = int(get_record_field(rec, "local_episode_count") or 0)
@@ -208,7 +312,7 @@ def classify_single_record(
 
     if (
         not missing
-        and not regular_duplicates
+        and not has_cleanable_dups
         and valid_total_eps
         and len([e for e in rec_eps if isinstance(e, int) and e > 0]) >= int(total_eps)
     ):
@@ -489,7 +593,7 @@ def consolidate_seasons_to_work_records(
         gap_state = base_dict.get("gap_fill_state") or {}
         is_pushed_pending = (best_cat == "download" and gap_state.get("view_bucket") == "pushed_pending")
 
-        # 计算异常剧集唯一互斥子分类与条件式主动作 (v2.5.38)
+        # 计算待复核清理子动作与完成后预测去向 + 异常剧集具体问题分类 (v2.5.45)
         ev_b = dict(base_dict.get("evidence") or {})
         conf_b = dict(base_dict.get("conflict") or {})
         dir_grp_b = dict(ev_b.get("directory_group") or {})
@@ -500,39 +604,99 @@ def consolidate_seasons_to_work_records(
         m_contradiction = bool((m_conf_b.get("contradiction") or {}).get("has_contradiction"))
         meta_st_b = str(ev_b.get("meta_status") or ev_b.get("metadata_status") or "")
         rec_eps_b = [int(x) for x in (base_dict.get("recognized_episodes") or []) if str(x).isdigit() and int(x) > 0]
+        dups_b = [int(x) for x in (base_dict.get("duplicate_episodes") or []) if str(x).isdigit() and int(x) > 0]
         tot_eps_b = base_dict.get("total_episodes")
         st_b = str(base_dict.get("status") or "")
         is_overflow_b = bool(tot_eps_b and rec_eps_b and max(rec_eps_b) > int(tot_eps_b) and st_b not in ("archive_ready", "airing"))
+        rp_prev_b = (ev_b.get("review_plan_preview") or {}) if isinstance(ev_b.get("review_plan_preview"), dict) else {}
+
+        review_actions: list[str] = []
+        review_action_kind = ""
+        predicted_next_category = ""
+        predicted_next_category_label = ""
+        if best_cat == "review":
+            if dir_grp_req or primary_act == "merge_directory":
+                review_actions.append("merge_directory")
+            if st_b == "already_archived" or primary_act == "clean_redundant":
+                review_actions.append("clean_redundant_source")
+            if bool(rp_prev_b.get("can_clean")) or (dups_b and not _is_distinct_retained_valid(ev_b)) or primary_act == "clean":
+                review_actions.append("clean_duplicates")
+            if not review_actions:
+                review_actions.append("clean_duplicates")
+            review_action_kind = review_actions[0]
+            predicted_next_category = _predict_post_review_category(primary_rec, ev_b)
+            pred_label_map = {
+                "archive": "完成后进入齐全可归档",
+                "download": "完成后进入缺集待补",
+                "airing": "完成后返回连载留源",
+                "anomaly": "完成后进入异常剧集继续核对",
+                "completed_source_cleaned": "源端已清理，归档已保留",
+            }
+            predicted_next_category_label = pred_label_map.get(predicted_next_category, "")
+            base_dict["primary_action_kind"] = review_action_kind
 
         anomaly_sub = ""
-        primary_action_kind = ""
+        anomaly_problem_kind = ""
+        anomaly_problem_label = ""
+        primary_action_kind = base_dict.get("primary_action_kind") or ""
         if best_cat == "anomaly":
-            if dir_grp_req or conf_b.get("blocking") or st_b == "identity_review" or m_contradiction or is_overflow_b:
+            if st_b == "correction_incomplete":
                 anomaly_sub = "decision"
-                primary_action_kind = "confirm_directory" if dir_grp_req else "verify_identity"
-            elif (
-                st_b == "already_archived"
-                and not base_dict["airing_protected"]
-                and base_dict.get("season_finished") is not False
-                and (tot_eps_b is None or int(tot_eps_b or 0) > 0)
-            ):
-                anomaly_sub = "cleanable"
-                primary_action_kind = "clean_redundant"
+                anomaly_problem_kind = "correction_incomplete"
+                anomaly_problem_label = "修正未完成"
+                primary_action_kind = "resume_correction"
+            elif st_b == "read_failed":
+                anomaly_sub = "pending_evidence"
+                anomaly_problem_kind = "directory_read_failed"
+                anomaly_problem_label = "目录读取失败"
+                primary_action_kind = "retry_failed"
+            elif conf_b.get("blocking") or st_b == "identity_review" or m_contradiction:
+                anomaly_sub = "decision"
+                anomaly_problem_kind = "season_work_mismatch"
+                anomaly_problem_label = "季号与作品不符" if (meta_st_b == "not_listed" or "季" in str(conf_b.get("message") or "")) else "作品归属待核对"
+                primary_action_kind = "verify_identity"
+            elif is_overflow_b:
+                anomaly_sub = "decision"
+                anomaly_problem_kind = "episode_basis_mismatch"
+                anomaly_problem_label = "集数口径待核对"
+                primary_action_kind = "verify_identity"
+            elif meta_st_b in ("fetch_failed", "query_failed") or ev_b.get("last_remote_recheck_error"):
+                anomaly_sub = "pending_evidence"
+                anomaly_problem_kind = "metadata_read_failed"
+                anomaly_problem_label = "资料读取失败"
+                primary_action_kind = "retry_failed"
+            elif meta_st_b == "not_listed":
+                anomaly_sub = "decision"
+                anomaly_problem_kind = "season_work_mismatch"
+                anomaly_problem_label = "季号与作品不符"
+                primary_action_kind = "manual_confirm"
+            elif st_b == "archive_check":
+                anomaly_sub = "pending_evidence"
+                anomaly_problem_kind = "content_unrecognized"
+                anomaly_problem_label = "文件内容待识别"
+                primary_action_kind = "manual_confirm"
+            elif st_b == "period_review":
+                anomaly_sub = "pending_evidence"
+                is_seg_b = bool((ev_b.get("period_evidence") or {}).get("is_segmented"))
+                anomaly_problem_kind = "episode_basis_mismatch" if is_seg_b else "broadcast_unknown"
+                anomaly_problem_label = "集数口径待核对" if is_seg_b else "播期资料待核实"
+                primary_action_kind = "manual_confirm"
             else:
                 anomaly_sub = "pending_evidence"
-                if meta_st_b in ("fetch_failed", "query_failed") or ev_b.get("last_remote_recheck_error"):
-                    primary_action_kind = "retry_failed"
-                elif st_b == "period_review" and bool((ev_b.get("period_evidence") or {}).get("is_segmented")):
-                    primary_action_kind = "safety_hold"
-                elif st_b == "archive_check":
-                    primary_action_kind = "safety_hold"
-                else:
-                    primary_action_kind = "manual_confirm"
+                anomaly_problem_kind = "broadcast_unknown" if (ev_b.get("broadcast_evidence") or {}).get("status") == "evidence_pending" else "episode_basis_mismatch"
+                anomaly_problem_label = "播期资料待核实" if anomaly_problem_kind == "broadcast_unknown" else "集数口径待核对"
+                primary_action_kind = "manual_confirm"
 
+        base_dict["review_actions"] = review_actions
+        base_dict["review_action_kind"] = review_action_kind
+        base_dict["predicted_next_category"] = predicted_next_category
+        base_dict["predicted_next_category_label"] = predicted_next_category_label
         base_dict["anomaly_sub_category"] = anomaly_sub
+        base_dict["anomaly_problem_kind"] = anomaly_problem_kind
+        base_dict["anomaly_problem_label"] = anomaly_problem_label
         base_dict["primary_action_kind"] = primary_action_kind
 
-        # 检查任务级「本次保留，不再提示」标记
+        # 检查任务级「跳过本轮」标记
         hold_info = None
         for it_r, _, _ in active_items:
             it_ev = _safe_json(get_record_field(it_r, "evidence_json") or get_record_field(it_r, "evidence"), {})
@@ -562,8 +726,6 @@ def consolidate_seasons_to_work_records(
                 counts["anomaly_cleanable"] += 1
             else:
                 counts["anomaly_pending_evidence"] += 1
-            if primary_act == "system_tracking" or getattr(primary_rec, "status", None) == "period_review":
-                counts["system_tracking"] += 1
         counts["total_work_seasons"] += 1
 
         work_records.append(base_dict)
@@ -895,20 +1057,106 @@ async def get_record_work_main_category(db: Any, rec: Any) -> str:
     return str((await get_record_work_context(db, rec)).get("main_category") or "")
 
 
+_ANIME_DIR_TOKENS = {
+    "动漫", "动画", "動漫", "動畫", "国漫", "國漫", "日漫", "国产动漫", "國產動漫",
+    "日本动漫", "日本動漫", "欧美动漫", "歐美動漫", "番剧", "番劇", "里番", "新番",
+    "anime", "animation", "donghua", "cartoon", "cartoons",
+}
+_NON_ANIME_DIR_TOKENS = {
+    "综艺", "綜藝", "真人秀", "脱口秀", "脫口秀", "真人剧集", "真人劇集", "真人剧", "真人劇",
+    "纪录片", "紀錄片", "韩剧", "韓劇", "日剧", "日劇", "美剧", "美劇", "国产剧", "國產劇",
+    "华语剧", "華語劇", "港剧", "港劇", "台剧", "台劇", "英剧", "英劇", "泰剧", "泰劇",
+    "韩国剧集", "日本剧集", "欧美剧集", "华语剧集", "国产剧集",
+    "variety", "reality", "talk show", "talkshow", "documentary", "live action", "live-action",
+}
+_BROAD_MIXED_DIR_TOKENS = {
+    "电视剧", "電視劇", "剧集", "劇集", "媒体库", "媒體庫", "下载", "下載", "待整理",
+    "nas", "115", "library", "library_incs", "tv", "tvshows", "shows", "series", "downloads",
+    "media", "media_archive", "nas.finish", "finish", "src", "qa",
+}
+_SEASON_DIR_RE = re.compile(r"^(?:season\s*\d+|s\d{1,2}|specials?)$", re.IGNORECASE)
+
+
+def _match_category_dir_segment(segment: str) -> tuple[str | None, str]:
+    """按目录名/明确词组判定分类（兼容简繁体与英文大小写，不因片名偶含单字误判）。"""
+    raw = str(segment or "").strip()
+    if not raw or _SEASON_DIR_RE.match(raw):
+        return None, ""
+    low = raw.lower()
+    if low in _BROAD_MIXED_DIR_TOKENS:
+        return None, ""
+    if low in _ANIME_DIR_TOKENS:
+        return "anime", raw
+    if low in _NON_ANIME_DIR_TOKENS:
+        return "non_anime", raw
+    # 检查以分隔符拆分的明确词组（如 "日本-动漫"、"国产_动画"、"TV_Anime"）
+    parts = [p.strip().lower() for p in re.split(r"[\s_\-/\\·|]+", raw) if p.strip()]
+    if len(parts) > 1:
+        for p in parts:
+            if p in _ANIME_DIR_TOKENS:
+                return "anime", raw
+        for p in parts:
+            if p in _NON_ANIME_DIR_TOKENS:
+                return "non_anime", raw
+    # 明确复合前缀/后缀分类目录（如 "国产动漫剧集"、"日本动画"、"华语综艺"）
+    for tok in ("国产动漫", "國產動漫", "日本动漫", "日本動漫", "欧美动漫", "歐美動漫", "国漫", "國漫", "日漫", "动漫", "動漫", "动画", "動畫", "番剧", "番劇"):
+        if raw.startswith(tok) or raw.endswith(tok):
+            return "anime", raw
+    for tok in ("真人剧集", "真人劇集", "真人秀", "脱口秀", "脫口秀", "纪录片", "紀錄片", "综艺", "綜藝", "韩剧", "日剧", "美剧", "国产剧", "华语剧"):
+        if raw.startswith(tok) or raw.endswith(tok):
+            return "non_anime", raw
+    return None, ""
+
+
+def detect_category_from_path(
+    path_str: str | None,
+    *,
+    show_folder_name: str = "",
+) -> tuple[str | None, str]:
+    """从路径最具体层级向上查找最近的有效分类目录（G20）。
+
+    - 跳过 Season N 及作品自身目录名（避免片名偶含字样误判为分类目录）；
+    - 跳过“电视剧/媒体库/下载/待整理”等宽泛目录；
+    - 祖先目录“电视剧”绝不覆盖更具体的“动漫”或“综艺”子目录。
+    """
+    raw = str(path_str or "").replace("\\", "/").strip("/")
+    if not raw:
+        return None, ""
+    segments = [s for s in raw.split("/") if s]
+    if not segments:
+        return None, ""
+
+    # 剥离末尾 Season N 及作品自身目录（若传入 show_folder_name 或路径含 [tmdbid=]）
+    clean_show = str(show_folder_name or "").strip().lower()
+    while segments and _SEASON_DIR_RE.match(segments[-1]):
+        segments.pop()
+    if segments:
+        last_low = segments[-1].strip().lower()
+        if (clean_show and last_low == clean_show) or "[tmdbid=" in last_low or re.search(r"\(\d{4}\)", last_low):
+            segments.pop()
+
+    # 从最深层向上逐级查找最近明确分类目录
+    for seg in reversed(segments):
+        cat, label = _match_category_dir_segment(seg)
+        if cat:
+            return cat, label
+    return None, ""
+
+
 async def resolve_record_gap_category(
     db: Any,
     rec: Any,
     instance_key: str | None = None,
-) -> dict[str, str]:
-    """逐季作品分类路由 (v2.5.40 规范):
+) -> dict[str, Any]:
+    """逐季作品补缺规则自动判定 (v2.5.45 规范 · 取消强制「类型待确认」 · G20):
 
-    优先级：
-    1. 用户对该作品明确保存的「补缺类型」偏好 (GapFillWorkPreference)，跨初检复用；
-    2. 元数据中的动画/动漫分类 (TMDB 动画类别 16、关键词 '动画'/'动漫'/'Animation')；
-    3. 任务/目录类型 (Task.media_type=='anime' 或路径含有 '动漫'/'动画'/'Anime')；
-    4. 存在元数据与目录冲突或元数据不足时，标记为 'pending' (待确认)。
+    优先级（先按初检目录建立默认规则，再应用作品级证据）：
+    1. 用户既有有效设置 (GapFillWorkPreference)，跨初检复用；
+    2. 已核实同作品的元数据 / 可信 NFO 动画类型（如综艺目录中误放动画作品，自动改用动漫规则）；
+    3. 最近明确分类目录（从 Season N / 剧集目录向上查找最近有效分类目录，如 动漫/国漫/日漫 → 动漫规则，综艺/真人秀 → 非动漫规则）；
+    4. 剧集目录名、文件名及已有标签中的明确类型标记（不因标题语言、国家或压制组本身武断判动漫）；
+    5. 目录与文件均无类型线索时记录明确诊断来源，绝不生成强制「⚠️ 类型待确认」阻塞选择项。
     """
-    import re
     from sqlalchemy import select
     from app.models.gap_fill_site_rule import GapFillWorkPreference
     from app.models.task import Task
@@ -925,7 +1173,7 @@ async def resolve_record_gap_category(
     clean_name = re.sub(r"[\(\[（].*?[\)\]）]", " ", clean_name)
     clean_name = re.sub(r"\s+\d{4}$", "", clean_name).strip() or show_name
 
-    # 1. 用户人工指定偏好
+    # 1. 用户既有有效人工设置（最高优先级，支持随时自愿修改并跨初检复用）
     if db is not None:
         try:
             pref = None
@@ -944,82 +1192,139 @@ async def resolve_record_gap_category(
                 return {
                     "category": pref.category,
                     "source": "manual",
-                    "reason": f"用户人工指定({cat_label})",
+                    "reason": f"用户已保存作品规则({cat_label})",
+                    "auto_resolved": True,
                 }
         except Exception:
             pass
 
-    # 2. 元数据动画分类检测
-    evidence = _safe_json(get_record_field(rec, "evidence_json", None), {})
-    if not isinstance(evidence, dict):
-        evidence = {}
-    genres = evidence.get("genres") or evidence.get("genre_ids") or []
-    if isinstance(genres, str):
-        genres = [genres]
-    type_name = str(evidence.get("type_name") or evidence.get("type") or "").strip()
-
-    is_anime_meta: bool | None = None
-    if 16 in genres or "16" in [str(g) for g in genres]:
-        is_anime_meta = True
-    elif any("动画" in str(g) or "动漫" in str(g) or "animation" in str(g).lower() for g in genres):
-        is_anime_meta = True
-    elif "动漫" in type_name or "动画" in type_name:
-        is_anime_meta = True
-    elif genres:
-        # 有明确且非空的分类列表，且不含动画
-        is_anime_meta = False
-
-    # 3. 任务与目录分类检测
-    task_hint_anime = False
+    # 2. 从路径层级建立目录默认规则（向上查找最近明确分类目录，兼顾 Season N / 剧集目录 / 混合目录）
+    season_path = str(get_record_field(rec, "season_path", "") or "")
+    show_path = str(get_record_field(rec, "show_path", "") or "")
+    show_folder = show_path.replace("\\", "/").rstrip("/").split("/")[-1] if show_path else show_name
+    task_source_path = ""
+    task_media_type = ""
     task_id = get_record_field(rec, "task_id")
     if task_id and db is not None:
         try:
             task = await db.get(Task, task_id)
             if task:
-                if str(getattr(task, "media_type", "")).lower() == "anime":
-                    task_hint_anime = True
-                sp = str(getattr(task, "source_path", "")).lower()
-                if "动漫" in sp or "动画" in sp or "anime" in sp:
-                    task_hint_anime = True
+                task_media_type = str(getattr(task, "media_type", "") or "").lower()
+                task_source_path = str(getattr(task, "source_path", "") or "")
         except Exception:
             pass
 
-    season_path = str(get_record_field(rec, "season_path", "") or "").lower()
-    if "动漫" in season_path or "动画" in season_path:
-        task_hint_anime = True
+    dir_cat: str | None = None
+    dir_label = ""
+    for candidate_path in (season_path, show_path, task_source_path):
+        if not candidate_path:
+            continue
+        c_cat, c_lbl = detect_category_from_path(candidate_path, show_folder_name=show_folder)
+        if c_cat:
+            dir_cat, dir_label = c_cat, c_lbl
+            break
+    if not dir_cat and task_media_type == "anime":
+        dir_cat, dir_label = "anime", "动漫任务"
 
-    # 4. 冲突检测与综合判定
-    if is_anime_meta is False and task_hint_anime:
-        return {
-            "category": "pending",
-            "source": "conflict",
-            "reason": "作品元数据为非动画，但初检目录为动漫，分类待确认",
-        }
+    # 3. 作品级元数据 / 可信 NFO 类型检测（优先级高于目录默认，可纠正错放目录的作品）
+    evidence = _safe_json(
+        get_record_field(rec, "evidence_json", None) or get_record_field(rec, "evidence", None), {}
+    )
+    if not isinstance(evidence, dict):
+        evidence = {}
+    matched_work = evidence.get("matched_work") or {}
+    genres = (
+        evidence.get("genres")
+        or evidence.get("genre_ids")
+        or (matched_work.get("genres") if isinstance(matched_work, dict) else None)
+        or (matched_work.get("genre_ids") if isinstance(matched_work, dict) else None)
+        or []
+    )
+    if isinstance(genres, str):
+        genres = [genres]
+    type_name = str(
+        evidence.get("type_name")
+        or evidence.get("type")
+        or evidence.get("nfo_genre")
+        or ""
+    ).strip()
+
+    is_anime_meta: bool | None = None
+    if 16 in genres or "16" in [str(g) for g in genres]:
+        is_anime_meta = True
+    elif any("动画" in str(g) or "动漫" in str(g) or "animation" in str(g).lower() or "anime" in str(g).lower() for g in genres):
+        is_anime_meta = True
+    elif any(k in type_name.lower() for k in ("动漫", "动画", "動漫", "動畫", "animation", "anime")):
+        is_anime_meta = True
+    elif genres:
+        # 具备非空且已核实的非动画分类列表
+        is_anime_meta = False
 
     if is_anime_meta is True:
+        override_note = f"（已按作品动画资料覆盖初检目录「{dir_label}」默认）" if (dir_cat == "non_anime" and dir_label) else ""
         return {
             "category": "anime",
             "source": "tmdb",
-            "reason": "TMDB元数据(动画分类)",
+            "reason": f"根据已核实作品元数据（动画分类）采用动漫规则{override_note}",
+            "directory_default": dir_cat or "",
+            "auto_resolved": True,
         }
 
-    if is_anime_meta is False and not task_hint_anime:
+    if is_anime_meta is False:
+        override_note = f"（已按作品真人资料覆盖初检目录「{dir_label}」默认）" if (dir_cat == "anime" and dir_label) else ""
         return {
             "category": "non_anime",
             "source": "tmdb",
-            "reason": "TMDB元数据(非动画分类)",
+            "reason": f"根据已核实作品元数据（非动画分类）采用非动漫规则{override_note}",
+            "directory_default": dir_cat or "",
+            "auto_resolved": True,
         }
 
-    if task_hint_anime:
+    # 4. 元数据未含明确类型字段时，采用已建立的目录默认规则（不因接口缺字段一律降为非动漫）
+    if dir_cat in ("anime", "non_anime"):
+        rule_name = "动漫规则" if dir_cat == "anime" else "非动漫规则"
+        return {
+            "category": dir_cat,
+            "source": "directory",
+            "reason": f"根据初检目录「{dir_label}」采用{rule_name}",
+            "directory_default": dir_cat,
+            "auto_resolved": True,
+        }
+
+    # 5. 宽泛/混合目录且元数据缺字段：综合检查剧集目录名与样本文件名中的明确类型标记
+    sample_files = ((evidence.get("release_evidence") or {}).get("sample_files") or []) if isinstance(evidence, dict) else []
+    clue_text = " ".join([show_folder, show_name, *[str(x) for x in sample_files[:5]]])
+    if re.search(r"(?:\[(?:Anime|动漫|动画|国漫|日漫|番剧)\]|(?:^|[\s._\-\[\(])(?:Anime|OVA|OAD|Animation)(?:$|[\s._\-\]\)]))", clue_text, re.I):
         return {
             "category": "anime",
-            "source": "task",
-            "reason": "任务/目录类型(动漫)",
+            "source": "filename_clue",
+            "reason": "根据作品目录/文件名明确动画标记采用动漫规则",
+            "auto_resolved": True,
+        }
+    if re.search(r"(?:综艺|真人秀|脱口秀|纪录片|加更版|纯享版|先导片)", clue_text, re.I):
+        return {
+            "category": "non_anime",
+            "source": "filename_clue",
+            "reason": "根据作品目录/文件名明确综艺/真人标记采用非动漫规则",
+            "auto_resolved": True,
+        }
+
+    # 6. 混合目录且完全无类型线索：检查是否为元数据读取失败，记录可恢复诊断而非弹强制「类型待确认」
+    meta_err = str(evidence.get("meta_error") or "").strip()
+    if meta_err or evidence.get("meta_status") in ("fetch_failed", "query_failed"):
+        return {
+            "category": "non_anime",
+            "source": "metadata_fetch_failed_fallback",
+            "reason": f"混合目录且作品资料读取失败（{meta_err or '接口暂不可用'}），暂按非动漫规则处理，资料恢复后自动复核",
+            "metadata_fetch_failed": True,
+            "recovery_hint": "可刷新作品元数据或在详情中手动切换规则类型",
+            "auto_resolved": True,
         }
 
     return {
-        "category": "pending",
-        "source": "pending",
-        "reason": "补缺类型待确认",
+        "category": "non_anime",
+        "source": "mixed_default",
+        "reason": "混合目录未见动画分类标记，按非动漫规则处理（可在详情中自愿切换）",
+        "auto_resolved": True,
     }
 

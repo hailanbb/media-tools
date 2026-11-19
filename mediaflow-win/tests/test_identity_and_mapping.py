@@ -829,7 +829,8 @@ class IdentityAndMappingAcceptanceTests(unittest.IsolatedAsyncioTestCase):
         response = await self.http.get("/api/tasks/air-group/seasons")
         self.assertEqual(response.status_code, 200, response.text)
         work = response.json()[0]
-        self.assertEqual(work["main_category"], "anomaly")
+        # v2.5.45 G06: 同 TMDB 待确认目录组收口至 review，但连载保护与禁止直接标已手动处理依然严格生效
+        self.assertEqual(work["main_category"], "review")
         self.assertTrue(work["airing_protected"])
         self.assertFalse(work["can_mark_handled"])
         self.assertEqual(work["airing_view"]["source_episodes"], [1, 2])
