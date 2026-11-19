@@ -1,6 +1,16 @@
 # MediaFlow 版本管理
 
-当前源码版本为 v2.5.46，修订日期为 2026-11-19。
+当前源码版本为 v2.5.47，修订日期为 2026-11-19。
+
+v2.5.47 修复同 ID 规范化合并目标与前缀脱节 Bug，完成目录组面板归位至「待复核清理」及缺集模块按钮降噪：
+1. **规范化合并目标目录与前缀样本联动修复（`app/core/directory_merge.py` + `frontend/index.html` + `tests/test_v2539_directory_merge.py`）**：
+   - 修复 `build_directory_merge_plan` 取候选列表写错字典键名（`candidates` -> `candidate_targets`）的隐蔽缺陷，并补全 `tmdb_meta` 透传；
+   - 严格对齐用户在弹窗上方单选/自定义的目标归档目录名至「本次实际合并到 (源端主目录)」及 `target_clean_name` 前缀样本；若目标目录仅有旧前缀样本，仍向 `prefix_samples` 注入规范名标准模板供自由切换；前端自定义输入框支持 450ms 防抖自动刷新预览；
+   - 新增 `test_05_selected_target_path_drives_source_target_and_prefix` 回归测试。
+2. **目录组确认区从「异常剧集」归位「待复核清理」（`frontend/index.html` + `tests/test_frontend_logic.js`）**：
+   - 落实 v2.5.45 五模块清理优先规范：`renderDirectoryGroupsPanel()` 改为仅在 `review`（待复核清理）分类展示，「异常剧集 (`anomaly`)」彻底隐藏；移除前端 `anomalySubCategory` 将无阻塞目录组判为异常的旧逻辑；`locateDirectoryGroupInReview` / `locateDirectoryGroupInAnomaly` 统一跳转至 `review`。
+3. **「缺集待补」核对入库按钮按需露出优化（`frontend/index.html`）**：
+   - 仅当存在在途/待确认分集或处于「提交待确认/等待入库」页签时才展示「核对入库」按钮，平时无在途项时自动隐藏。
 
 v2.5.46 重点加固统一批量「执行推荐处理」性能与长事务防死锁，全面修复前端交互缺陷：
 1. **执行推荐处理并发加速与长事务防死锁（`app/core/directory_merge.py` + `app/api/archive.py` + `frontend/index.html`）**：

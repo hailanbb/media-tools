@@ -399,6 +399,63 @@ class TestV2539DirectoryMerge(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(os.path.exists(old_s2))
         self.assertTrue(os.path.exists(old_show))
 
+    async def test_05_selected_target_path_drives_source_target_and_prefix(self):
+        """选择特定目标归档目录后，源端合并主目录与前缀样本必须严格同步对齐（修复 Hot Ones 问题）。"""
+        task_id = "t_hot_ones"
+        grp_id = "grp_hot_326194"
+        norm_src_root = temp_src_dir.replace("\\", "/")
+        norm_dst_root = temp_dst_dir.replace("\\", "/")
+
+        en_show = f"{norm_src_root}/电视剧/综艺/Hot Ones： Extra Heat (2026) [tmdbid=326194]"
+        cn_show = f"{norm_src_root}/电视剧/综艺/Hot Ones：劲辣专访 (2026) [tmdbid=326194]"
+        cn_archive = f"{norm_dst_root}/电视剧/综艺/Hot Ones：劲辣专访 (2026) [tmdbid=326194]"
+        custom_archive = f"{norm_dst_root}/电视剧/综艺/劲辣专访特别篇 (2026) [tmdbid=326194]"
+
+        en_s1 = f"{en_show}/Season 1"
+        cn_s1 = f"{cn_show}/Season 1"
+        os.makedirs(en_s1, exist_ok=True)
+        os.makedirs(cn_s1, exist_ok=True)
+        Path(f"{en_s1}/Hot Ones Extra Heat - S01E01.mkv").write_text("v1", encoding="utf-8")
+
+        async with async_session() as db:
+            db.add(Task(id=task_id, name="综艺", source_path=norm_src_root, status="completed"))
+            db.add(DirectoryGroup(
+                id=grp_id,
+                task_id=task_id,
+                tmdb_id="326194",
+                title="同一作品有多个目录",
+                category_key="cat:电视剧/综艺",
+                paths_json=json.dumps([
+                    {"side": "source", "category": "cat:电视剧/综艺", "norm_path": en_show, "raw_name": "Hot Ones： Extra Heat (2026) [tmdbid=326194]", "seasons": [1]},
+                    {"side": "source", "category": "cat:电视剧/综艺", "norm_path": cn_show, "raw_name": "Hot Ones：劲辣专访 (2026) [tmdbid=326194]", "seasons": [1]},
+                ]),
+                evidence_json=json.dumps({"canonical_tmdb_title": "Hot Ones：劲辣专访", "canonical_tmdb_year": "2026"}),
+            ))
+            await db.commit()
+
+        # 1. 仅传入 target_path（勾选中文目标归档目录），未传 source_target_path
+        resp = await self.http.post(
+            f"/api/tasks/{task_id}/directory-groups/{grp_id}/merge-preview",
+            json={"target_path": cn_archive, "season_number": 1},
+        )
+        self.assertEqual(resp.status_code, 200)
+        plan = resp.json()["plan"]
+        self.assertEqual(plan["source_target_show_path"], cn_show)
+        self.assertEqual(plan["archive_target_show_path"], cn_archive)
+        self.assertEqual(plan["chosen_prefix"], "Hot Ones：劲辣专访 - ")
+        self.assertIn("Hot Ones：劲辣专访 - ", plan["prefix_samples"])
+        self.assertEqual(plan["files_to_move"][0]["new_filename"], "Hot Ones：劲辣专访 - S01E01.mkv")
+
+        # 2. 传入自定义目标目录路径，源端主目录与前缀均随之同步对齐
+        resp_custom = await self.http.post(
+            f"/api/tasks/{task_id}/directory-groups/{grp_id}/merge-preview",
+            json={"target_path": custom_archive, "season_number": 1},
+        )
+        self.assertEqual(resp_custom.status_code, 200)
+        plan_c = resp_custom.json()["plan"]
+        self.assertTrue(plan_c["source_target_show_path"].endswith("/劲辣专访特别篇 (2026) [tmdbid=326194]"))
+        self.assertEqual(plan_c["chosen_prefix"], "劲辣专访特别篇 - ")
+
 
 if __name__ == "__main__":
     unittest.main()

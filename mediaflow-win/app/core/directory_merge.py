@@ -233,12 +233,24 @@ def select_prefix_with_basis(
         return default_fmt, samples, f"目标同季无已有样本，按规范剧名生成标准前缀「{default_fmt}」"
 
     sorted_by_votes = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
-    samples = [k for k, _ in sorted_by_votes]
+    existing_samples = [k for k, _ in sorted_by_votes]
+    samples = list(existing_samples)
+    if clean_canon:
+        for cand_fmt in (default_fmt, alt_fmt):
+            if cand_fmt and cand_fmt not in samples:
+                samples.append(cand_fmt)
+
     if selected_prefix and selected_prefix in samples:
         return selected_prefix, samples, "用户指定前缀"
+    if selected_prefix and selected_prefix.strip():
+        return selected_prefix, [selected_prefix, *samples], "用户指定前缀"
 
-    if len(samples) == 1:
-        return samples[0], samples, f"沿用目标同季一致前缀「{samples[0]}」({counts[samples[0]]} 个文件)"
+    if len(existing_samples) == 1:
+        only_p = existing_samples[0]
+        if clean_canon and normalize_dir_basename(only_p) != normalize_dir_basename(clean_canon):
+            # 若目标同季仅有旧前缀且与选定规范目录剧名不同，仍提供标准规范前缀供下拉切换，默认沿用已有或切为规范模板
+            return only_p, samples, f"沿用目标同季一致前缀「{only_p}」({counts[only_p]} 个文件)"
+        return only_p, samples, f"沿用目标同季一致前缀「{only_p}」({counts[only_p]} 个文件)"
 
     # 多种前缀：优先匹配规范名称
     if clean_canon:
@@ -252,7 +264,7 @@ def select_prefix_with_basis(
     top_cands = [k for k, v in sorted_by_votes if v == top_votes]
     if len(top_cands) == 1:
         return top_cands[0], samples, f"目标存在多种前缀，自动采用出现次数最多的模板「{top_cands[0]}」({top_votes} 个文件)"
-    return default_fmt, [default_fmt, *samples], f"目标多模板同票，采用项目标准格式「{default_fmt}」"
+    return default_fmt, [default_fmt, *[s for s in samples if s != default_fmt]], f"目标多模板同票，采用项目标准格式「{default_fmt}」"
 
 
 async def list_files_robust(cd2: CloudDrive2Client | None, dir_path: str) -> list[dict[str, Any]]:
@@ -394,43 +406,81 @@ async def build_directory_merge_plan(
     all_src_paths = [normalize_dir_path(e.get("norm_path")) for e in src_entries if e.get("norm_path")]
 
     # 1. 解析目标归档路径与源端主目标路径
+    try:
+        grp_ev_in = json.loads(group.evidence_json or "{}") if getattr(group, "evidence_json", None) else {}
+    except Exception:
+        grp_ev_in = {}
+    if not isinstance(grp_ev_in, dict):
+        grp_ev_in = {}
+
+    tmdb_meta_from_ev = None
+    if grp_ev_in.get("canonical_tmdb_title"):
+        tmdb_year_ev = str(grp_ev_in.get("canonical_tmdb_year") or "").strip()[:4]
+        tmdb_meta_from_ev = {
+            "name": grp_ev_in.get("canonical_tmdb_title"),
+            "original_name": grp_ev_in.get("canonical_tmdb_original_name") or "",
+            "first_air_date": f"{tmdb_year_ev}-01-01" if tmdb_year_ev.isdigit() else "",
+        }
+
     target_options = build_directory_group_target_options(
         entries,
         category=group.category_key,
         tmdb_id=group.tmdb_id,
+        tmdb_meta=tmdb_meta_from_ev,
         source_root=settings.source_root,
         archive_root=settings.archive_root,
     )
-    candidates = target_options.get("candidates") or []
+    candidates = target_options.get("candidate_targets") or target_options.get("candidates") or []
 
+    norm_req_target = normalize_dir_path(target_path) if target_path else ""
     chosen_target_option = None
-    if target_path:
-        norm_req_target = normalize_dir_path(target_path)
+    if norm_req_target:
         for c in candidates:
             if normalize_dir_path(c.get("target_path")) == norm_req_target:
                 chosen_target_option = c
                 break
 
-    if chosen_target_option is None and candidates:
+    if chosen_target_option is None and not norm_req_target and candidates:
         chosen_target_option = candidates[0]
+
+    grp_title_clean = "" if (group.title or "").strip() in ("同一作品有多个目录", "同一作品在归档库有多个目录", "同 ID 异名目录") else (group.title or "")
+    eff_canon_title = canonical_title or str(grp_ev_in.get("canonical_tmdb_title") or "").strip() or grp_title_clean
+    eff_first_year = first_air_year or str(grp_ev_in.get("canonical_tmdb_year") or "").strip()
 
     # 计算规范目录名（G06: 规范剧名 (作品首播年) [tmdbid=ID]）
     canon_dir_name, naming_basis = build_canonical_show_dir_name(
-        canonical_title=canonical_title or group.title or "",
-        first_air_year=first_air_year,
+        canonical_title=eff_canon_title,
+        first_air_year=eff_first_year,
         tmdb_id=group.tmdb_id,
         existing_name=_path_basename(all_src_paths[0]) if all_src_paths else "",
     )
 
     archive_target_show = (
-        normalize_dir_path(chosen_target_option.get("target_path"))
-        if chosen_target_option
-        else (normalize_dir_path(target_path) or normalize_dir_path(group.confirmed_target_path))
+        norm_req_target
+        or (normalize_dir_path(chosen_target_option.get("target_path")) if chosen_target_option else "")
+        or normalize_dir_path(group.confirmed_target_path)
     )
 
     source_target_will_create = False
     # 确定本次源端主目录 (source_target_path)
     final_src_target = normalize_dir_path(source_target_path)
+    if not final_src_target and norm_req_target and not auto_canonical_target:
+        # 用户在弹窗显式勾选或自定义了目标归档目录：源端主目录与规范剧名严格与之对齐
+        req_dir_name = _path_basename(norm_req_target)
+        matched_src = None
+        if chosen_target_option and chosen_target_option.get("source_show_paths"):
+            opt_srcs = [normalize_dir_path(p) for p in chosen_target_option["source_show_paths"] if p]
+            matched_src = next((p for p in opt_srcs if _path_basename(p).casefold() == req_dir_name.casefold()), None) or (opt_srcs[0] if opt_srcs else None)
+        if not matched_src and req_dir_name:
+            matched_src = next((p for p in all_src_paths if _path_basename(p).casefold() == req_dir_name.casefold()), None)
+        if matched_src:
+            final_src_target = matched_src
+        elif all_src_paths and req_dir_name:
+            parent_cat_dir = _path_dirname(all_src_paths[0]).rstrip("/\\")
+            sep = "\\" if ("\\" in parent_cat_dir and "/" not in parent_cat_dir) else "/"
+            final_src_target = normalize_dir_path(f"{parent_cat_dir}{sep}{req_dir_name}")
+            source_target_will_create = True
+
     if not final_src_target and auto_canonical_target and all_src_paths and canon_dir_name:
         # 大小写等价检查：若已有源目录与规范目录名一致则直接复用，否则新建受控规范目录 (G06)
         matched_existing = next(
@@ -457,7 +507,7 @@ async def build_directory_merge_plan(
         if chosen_target_option and chosen_target_option.get("source_show_paths"):
             final_src_target = normalize_dir_path(chosen_target_option["source_show_paths"][0])
         elif all_src_paths:
-            canonical_name = normalize_dir_basename(group.title or "")
+            canonical_name = normalize_dir_basename(eff_canon_title or "")
             best_match = None
             for p in all_src_paths:
                 bname = normalize_dir_basename(_path_basename(p))
@@ -509,9 +559,13 @@ async def build_directory_merge_plan(
     target_seasons = sorted(discovered_seasons)
     primary_season = target_seasons[0]
 
+    raw_target_show_title = _path_basename(final_src_target) or _path_basename(archive_target_show)
+    raw_target_show_title = re.sub(r"\s*\[tmdbid[=:]\d+\]\s*$", "", raw_target_show_title, flags=re.I).strip()
+    raw_target_show_title = re.sub(r"\s*\(\d{4}\)\s*$", "", raw_target_show_title).strip()
     target_clean_name = (
         sanitize_fs_name(canonical_title)
-        or posixpath.basename(final_src_target).split(" [tmdbid=")[0].split(" (")[0].strip()
+        or sanitize_fs_name(raw_target_show_title)
+        or eff_canon_title
     )
 
     active_dl_norm = {str(x).strip().rstrip("/").lower() for x in (active_download_paths or set()) if x}

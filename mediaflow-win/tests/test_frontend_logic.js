@@ -421,46 +421,55 @@ console.log("===================================================================
     vm.createContext(dgContext);
     vm.runInContext(funcs, dgContext);
 
-    // 1. 在真缺集待补 (download) 分类下，整批目录组面板必须被完全隐藏！
+    // 1. 在缺集待补 (download) 分类下，整批目录组面板必须被完全隐藏，且无在途时「核对入库」按钮隐藏！
     dgContext.currentCategory = 'download';
     vm.runInContext('renderEpisodesList()', dgContext);
     const downloadPanel = getDgNode('directoryGroupsContainer');
-    assert(downloadPanel.classList.contains('hidden'), '真缺集待补分类下目录组面板必须添加 hidden 类');
-    assert.strictEqual(downloadPanel.innerHTML, '', '真缺集待补分类下目录组面板 innerHTML 必须清空');
+    assert(downloadPanel.classList.contains('hidden'), '缺集待补分类下目录组面板必须添加 hidden 类');
+    assert.strictEqual(downloadPanel.innerHTML, '', '缺集待补分类下目录组面板 innerHTML 必须清空');
+    const dlBatchHtml = getDgNode('batchActionContainer').innerHTML;
+    assert(!dlBatchHtml.includes('reconcileCurrentTaskGapFill'), '无在途/待确认分集时「核对入库」按钮必须隐藏降噪');
+
+    // 1b. 在异常剧集 (anomaly) 分类下，目录组确认面板也必须隐藏（已归位待复核清理 review）
+    dgContext.currentCategory = 'anomaly';
+    vm.runInContext('renderEpisodesList()', dgContext);
+    assert(getDgNode('directoryGroupsContainer').classList.contains('hidden'), '异常剧集分类下目录组面板必须隐藏');
+    dgContext.currentCategory = 'download';
+    vm.runInContext('renderEpisodesList()', dgContext);
 
     // 2. 检查真缺集待补季卡中的目录组徽章：必须包含跳转定位按钮及文案
     const downloadSeasonsHtml = getDgNode('episodeItemContainer').innerHTML;
-    assert(downloadSeasonsHtml.includes("locateDirectoryGroupInAnomaly('grp-104716')"), '关联多目录的季卡必须挂载 locateDirectoryGroupInAnomaly');
+    assert(downloadSeasonsHtml.includes("locateDirectoryGroupInReview('grp-104716')"), '关联多目录的季卡必须挂载 locateDirectoryGroupInReview');
     assert(downloadSeasonsHtml.includes('归档目标待确认 · 查看目录'), '季卡目录组徽章文案必须为「归档目标待确认 · 查看目录」');
 
-    // 3. 点击季卡上的定位按钮：跨页跳转至 anomaly 异常剧集分类，自动展开对应组
-    vm.runInContext("locateDirectoryGroupInAnomaly('grp-104716')", dgContext);
-    assert.strictEqual(dgContext.currentCategory, 'anomaly', '点击季卡定位后当前分类必须自动切换到 anomaly');
+    // 3. 点击季卡上的定位按钮：跨页跳转至 review 待复核清理分类，自动展开对应组
+    vm.runInContext("locateDirectoryGroupInReview('grp-104716')", dgContext);
+    assert.strictEqual(dgContext.currentCategory, 'review', '点击季卡定位后当前分类必须自动切换到 review');
     assert.strictEqual(dgContext._dirGroupReturnCategory, 'download', '来源分类必须被记录为 download 以支持返回');
     assert.strictEqual(dgContext._directoryGroupCollapsed, false, '目录组区块必须确保处于展开状态');
     assert(dgContext._expandedGroupIds.has('grp-104716'), '目标组必须处于展开明细状态');
 
-    // 4. 验证异常剧集 (anomaly) 分类下目录组面板正常渲染且包含作品名与返回按钮
-    const anomalyPanel = getDgNode('directoryGroupsContainer');
-    assert(!anomalyPanel.classList.contains('hidden'), '异常剧集分类下目录组面板不得含有 hidden 类');
-    const anomalyPanelHtml = anomalyPanel.innerHTML;
-    assert(anomalyPanelHtml.includes('待确认归档目标（1 组待办）'), '面板标题必须显示待处理组数');
-    assert(anomalyPanelHtml.includes('乘风 · 确认归档目标'), '必须直接使用作品名作为卡片标题');
-    assert(anomalyPanelHtml.includes('TMDB: 104716'), '卡片必须显示 TMDB ID');
-    assert(anomalyPanelHtml.includes('TMDB 页面显示：「乘风」'), '卡片必须显示 TMDB 官网页面当前名称');
-    assert(anomalyPanelHtml.includes('返回「缺集待补」'), '跨页跳转后顶部必须显示返回原清单按钮');
-    assert(anomalyPanelHtml.includes("openDirectoryGroupDialog('grp-104716')"), '卡片必须挂载确认归档目标弹窗按钮');
+    // 4. 验证待复核清理 (review) 分类下目录组面板正常渲染且包含作品名与返回按钮
+    const reviewPanel = getDgNode('directoryGroupsContainer');
+    assert(!reviewPanel.classList.contains('hidden'), '待复核清理分类下目录组面板不得含有 hidden 类');
+    const reviewPanelHtml = reviewPanel.innerHTML;
+    assert(reviewPanelHtml.includes('待确认归档目标（1 组待办）'), '面板标题必须显示待处理组数');
+    assert(reviewPanelHtml.includes('乘风 · 确认归档目标'), '必须直接使用作品名作为卡片标题');
+    assert(reviewPanelHtml.includes('TMDB: 104716'), '卡片必须显示 TMDB ID');
+    assert(reviewPanelHtml.includes('TMDB 页面显示：「乘风」'), '卡片必须显示 TMDB 官网页面当前名称');
+    assert(reviewPanelHtml.includes('返回「缺集待补」'), '跨页跳转后顶部必须显示返回原清单按钮');
+    assert(reviewPanelHtml.includes("openDirectoryGroupDialog('grp-104716')"), '卡片必须挂载确认归档目标弹窗按钮');
     // 目录组面板绝对不包含 itemCheck checkbox，保证不参与“全选清理冗余”
-    assert(!anomalyPanelHtml.includes('name="itemCheck"'), '目录组面板绝不可包含 itemCheck checkbox，防止误入批量清理');
+    assert(!reviewPanelHtml.includes('name="itemCheck"'), '目录组面板绝不可包含 itemCheck checkbox，防止误入批量清理');
 
-    // 5. 点击“返回「真缺集待补」”按钮：顺利切回 download 分类，目录组面板重新隐藏
+    // 5. 点击“返回「缺集待补」”按钮：顺利切回 download 分类，目录组面板重新隐藏
     vm.runInContext('returnFromDirectoryGroupSection()', dgContext);
     assert.strictEqual(dgContext.currentCategory, 'download', '返回后当前分类必须恢复为 download');
     assert.strictEqual(dgContext._dirGroupReturnCategory, null, '返回后来源分类必须被清空');
     assert(getDgNode('directoryGroupsContainer').classList.contains('hidden'), '返回 download 后目录组面板必须重新隐藏');
 
     // 6. 验证已确认目录组展开时渲染逐路径逐季对照表格与单季清理按钮
-    dgContext.currentCategory = 'anomaly';
+    dgContext.currentCategory = 'review';
     dgContext._directoryGroupActiveTab = 'resolved';
     dgContext._expandedGroupIds.add('grp-already-done');
     vm.runInContext('renderEpisodesList()', dgContext);
@@ -472,7 +481,13 @@ console.log("===================================================================
     assert(resolvedPanelHtml.includes('删除源端（本季）'), '可清理源端行必须展示「删除源端（本季）」操作按钮');
     assert(resolvedPanelHtml.includes('✓ 选定目标'), '已确认归档目标必须标明「✓ 选定目标」');
 
-    console.log('✓ 目录组唯一收口异常剧集、缺集页隐藏、跨页定位跳转、逐季覆盖矩阵与单季删除源端契约测试全部通过');
+    // 7. 验证存在在途/待确认分集时「核对入库」按钮按需显示
+    dgContext.currentCategory = 'download';
+    dgContext.taskList[0].categories.download_pushed = [{ id: 'gp-1', show: '测试在途', season: 'S01', statusText: '0/5集', actionType: 'download', actionText: '查看进度', pathA: '/src/a', pathB: '/dst/a', note: '', isChecked: false, duplicates: [], missing: [1], recognizedEpisodes: [] }];
+    vm.runInContext('renderEpisodesList()', dgContext);
+    assert(getDgNode('batchActionContainer').innerHTML.includes('reconcileCurrentTaskGapFill'), '存在在途/待确认分集时「核对入库」按钮必须展示');
+
+    console.log('✓ 目录组唯一收口待复核清理、异常/缺集页隐藏、跨页定位跳转、核对入库按需显示与单季删除源端契约测试全部通过');
 
     // ======================================================================
     // 验证 v2.5.36 连载留源只读契约、防按钮泄露、详情入口与空态/中止区分 (L01-L12)

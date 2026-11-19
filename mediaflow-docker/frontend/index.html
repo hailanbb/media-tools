@@ -114,7 +114,7 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.46</span>
+              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.47</span>
             </div>
             <!-- 完善后的命名 -->
             <p class="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">智能媒体库整理与归档工作台</p>
@@ -2104,7 +2104,7 @@
             const isAnomaly = catKey === 'anomaly' || isHeld;
             const anomalySubtype = isAnomaly ? (s.status === 'unknown' ? 'unknown_meta' : 'file_check') : '';
             const anomalySubCategory = s.anomaly_sub_category || (isAnomaly ? (
-              (Boolean(evidence && evidence.directory_group && evidence.directory_group.requires_confirm) || Boolean(conflict && conflict.blocking) || s.status === 'identity_review' || Boolean(evidence && evidence.manual_confirmation && evidence.manual_confirmation.contradiction && evidence.manual_confirmation.contradiction.has_contradiction) || (total && maxRec > total))
+              (Boolean(conflict && conflict.blocking) || s.status === 'identity_review' || Boolean(evidence && evidence.manual_confirmation && evidence.manual_confirmation.contradiction && evidence.manual_confirmation.contradiction.has_contradiction) || (total && maxRec > total))
                 ? 'decision'
                 : (s.status === 'already_archived' && !s.airing_protected ? 'cleanable' : 'pending_evidence')
             ) : '');
@@ -2829,11 +2829,11 @@
       }
     }
 
-    function locateDirectoryGroupInAnomaly(groupId) {
+    function locateDirectoryGroupInReview(groupId) {
       if (!groupId) return;
-      if (currentCategory !== 'anomaly') {
+      if (currentCategory !== 'review') {
         _dirGroupReturnCategory = currentCategory;
-        filterResultCategory('anomaly');
+        filterResultCategory('review');
       }
       _directoryGroupCollapsed = false;
       _expandedGroupIds.add(groupId);
@@ -2854,8 +2854,8 @@
       }, 100);
     }
 
-    function locateDirectoryGroupInReview(groupId) {
-      locateDirectoryGroupInAnomaly(groupId);
+    function locateDirectoryGroupInAnomaly(groupId) {
+      locateDirectoryGroupInReview(groupId);
     }
 
     function returnFromDirectoryGroupSection() {
@@ -2885,8 +2885,8 @@
     function renderDirectoryGroupsPanel(task) {
       const panel = document.getElementById('directoryGroupsContainer');
       if (!panel) return;
-      // 核心收口：仅在「异常剧集」（anomaly）分类展示目录组确认区，其他分类彻底隐藏
-      if (currentCategory !== 'anomaly') {
+      // v2.5.45/47 清理优先收口：同 ID 多目录归并/目标确认区统一归位到「待复核清理」（review），异常剧集等其他分类彻底隐藏
+      if (currentCategory !== 'review') {
         panel.classList.add('hidden');
         panel.innerHTML = '';
         return;
@@ -3141,7 +3141,6 @@
         || (!it.anomalySubCategory && (
           Boolean(it.conflict && it.conflict.blocking)
           || it.raw?.status === 'identity_review'
-          || Boolean(it.evidence && it.evidence.directory_group && it.evidence.directory_group.requires_confirm)
           || Boolean(it.evidence && it.evidence.manual_confirmation && it.evidence.manual_confirmation.contradiction && it.evidence.manual_confirmation.contradiction.has_contradiction)
           || (it.totalEpisodes && it.maxRec > it.totalEpisodes)
           || it.anomalySubtype === 'episode_overflow'
@@ -3276,6 +3275,13 @@
           ? `提交待确认 (${downloadPushedItems.length})`
           : `等待入库／回执 (${downloadPushedItems.length})`;
 
+        const hasInFlightGapItems = downloadPushedItems.length > 0 || downloadTodoItems.some(it => {
+          const gs = it.gapFillState || {};
+          return (Array.isArray(gs.pushed_episodes) && gs.pushed_episodes.length > 0)
+            || (Array.isArray(gs.unverified_episodes) && gs.unverified_episodes.length > 0);
+        });
+        const showReconcileBtn = activeGapTab === 'pushed_pending' || hasInFlightGapItems;
+
         if (selectAll) selectAll.disabled = (activeGapTab === 'pushed_pending');
         if (selectAllLabel) {
           selectAllLabel.textContent = activeGapTab === 'pushed_pending' ? "等待入库或回执确认（防重复推送）" : "全选待补缺项";
@@ -3296,10 +3302,11 @@
                 <span>补缺站点设置</span>
                 <span id="gapFillSitesToolbarBadge" class="ml-1 px-1.5 py-0.5 rounded text-[10px] font-normal bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">...</span>
               </button>
+              ${showReconcileBtn ? `
               <button type="button" onclick="reconcileCurrentTaskGapFill()" class="px-3 py-2 rounded-lg border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 text-xs font-semibold hover:bg-indigo-100 dark:hover:bg-indigo-900/50 transition flex items-center gap-1.5" title="向 MoviePilot 队列、历史与双库核对已推送分集状态">
                 <i class="fa-solid fa-arrows-to-dot text-xs"></i>
                 <span>核对入库</span>
-              </button>
+              </button>` : ''}
               ${activeGapTab === 'todo' ? `
               <button id="batchActionButton" onclick="executeBatchDownload()" disabled class="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold shadow-md shadow-blue-600/20 transition flex items-center space-x-1.5">
                 <i class="fa-solid fa-cloud-arrow-down text-xs"></i>
@@ -3504,7 +3511,7 @@
           : '';
         const dirGrp = (ev && ev.directory_group) || null;
         const dirGroupBadgeHtml = (dirGrp && dirGrp.requires_confirm)
-          ? `<button type="button" onclick="locateDirectoryGroupInAnomaly('${escapeHtml(dirGrp.id || '')}')" class="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 font-semibold border border-amber-300 dark:border-amber-700 hover:bg-amber-200 dark:hover:bg-amber-900/50 transition flex items-center gap-1"><i class="fa-solid fa-folder-tree text-[9px]"></i><span>归档目标待确认 · 查看目录</span></button>`
+          ? `<button type="button" onclick="locateDirectoryGroupInReview('${escapeHtml(dirGrp.id || '')}')" class="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 font-semibold border border-amber-300 dark:border-amber-700 hover:bg-amber-200 dark:hover:bg-amber-900/50 transition flex items-center gap-1"><i class="fa-solid fa-folder-tree text-[9px]"></i><span>归档目标待确认 · 查看目录</span></button>`
           : (dirGrp && dirGrp.status === 'confirmed'
               ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">已确认目录组</span>`
               : '');
@@ -5017,6 +5024,14 @@
     let _activeDirectoryGroupId = '';
     let _activeMergePlan = null;
     let _activeDirGroupSeasonNumber = 1;
+    let _dirGroupCustomInputTimer = null;
+
+    function scheduleDirGroupPreviewRefresh() {
+      if (_dirGroupCustomInputTimer) clearTimeout(_dirGroupCustomInputTimer);
+      _dirGroupCustomInputTimer = setTimeout(() => {
+        if (typeof fetchDirectoryGroupMergePreview === 'function') fetchDirectoryGroupMergePreview();
+      }, 450);
+    }
 
     function onDirGroupRadioChange() {
       const radios = Array.from(document.querySelectorAll('input[name="dirGroupTargetRadio"]'));
@@ -5362,7 +5377,7 @@
               <input type="radio" name="dirGroupTargetRadio" value="__custom__" ${useCustomByDefault ? 'checked' : ''} onchange="onDirGroupRadioChange()" class="mt-1 h-4 w-4 text-amber-600 border-slate-300 focus:ring-amber-500 flex-shrink-0">
               <div class="min-w-0 flex-1 space-y-1.5">
                 <div class="font-medium text-slate-700 dark:text-slate-300">手动填写其他自定义归档目录路径</div>
-                <input id="dirGroupCustomTargetInput" type="text" value="${escapeHtml(useCustomByDefault ? defaultTarget : '')}" ${useCustomByDefault ? '' : 'disabled'} placeholder="例如: /115/.../剧名 (年份) [tmdbid=${escapeHtml(grp.tmdb_id || '')}]" class="w-full px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white font-mono text-xs ${useCustomByDefault ? '' : 'opacity-50'}">
+                <input id="dirGroupCustomTargetInput" type="text" value="${escapeHtml(useCustomByDefault ? defaultTarget : '')}" ${useCustomByDefault ? '' : 'disabled'} oninput="scheduleDirGroupPreviewRefresh()" placeholder="例如: /115/.../剧名 (年份) [tmdbid=${escapeHtml(grp.tmdb_id || '')}]" class="w-full px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white font-mono text-xs ${useCustomByDefault ? '' : 'opacity-50'}">
               </div>
             </label>
           </div>

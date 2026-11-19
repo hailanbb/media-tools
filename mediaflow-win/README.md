@@ -4,9 +4,20 @@
 
 [![Windows](https://img.shields.io/badge/Windows-Native-0078d4.svg?style=flat-square&logo=windows)](#)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776ab.svg?style=flat-square&logo=python)](#)
-[![Version](https://img.shields.io/badge/Release-v2.5.46-6366f1.svg?style=flat-square)](#)
+[![Version](https://img.shields.io/badge/Release-v2.5.47-6366f1.svg?style=flat-square)](#)
 
 当前五模块需求与交互方案（v2.5.45）：[待复核清理](MediaFlow待复核清理模块需求与交互方案-v2.5.45.md) → [异常剧集](MediaFlow异常剧集模块需求与交互方案-v2.5.45.md) → [缺集待补](MediaFlow缺集待补模块需求与交互方案-v2.5.45.md) → [连载留源](MediaFlow连载留源模块需求与交互方案-v2.5.45.md) → [齐全可归档](MediaFlow齐全可归档模块需求与交互方案-v2.5.45.md)。以下发布记录保留各版本当时的行为描述，现行设计以模块方案为准。
+
+v2.5.47：修复同 ID 规范化合并目录与前缀脱节 Bug，完成目录组面板模块归位与交互降噪：
+1. **规范化合并目标目录与前缀样本全链路同步（`app/core/directory_merge.py` + `frontend/index.html` + `tests/test_v2539_directory_merge.py`）**：
+   - 修复 `build_directory_merge_plan` 读取 `target_options.get("candidates")` 的键名错漏（改为 `"candidate_targets"`），并透传 `group.evidence_json` 中的 TMDB 元数据；
+   - 彻底打通用户上方单选/自定义目标归档目录与下方「本次实际合并到 (源端主目录)」及「目标前缀样本选择」的严格对齐，并支持自定义路径输入防抖自动刷新预览、下拉样本始终保留基于选中目录名的标准前缀；
+   - 新增 `test_05_selected_target_path_drives_source_target_and_prefix` 覆盖验证。
+2. **目录组确认面板正式收口归位至「待复核清理」（`frontend/index.html` + `tests/test_frontend_logic.js`）**：
+   - 严格对齐《待复核清理》与《异常剧集》v2.5.45 方案文档：`renderDirectoryGroupsPanel()` 改为仅在「待复核清理 (`review`)」下展示，「异常剧集 (`anomaly`)」及其他模块彻底隐藏目录组面板；
+   - 移除异常剧集前端兜底中把 `directory_group.requires_confirm` 算作异常子类的遗留逻辑；跨页定位跳转统一转至 `review`。
+3. **「缺集待补」核对入库按钮按需降噪**：
+   - 仅当当前任务存在在途/提交待确认分集或处于「提交待确认/等待入库」页签时渲染「核对入库」按钮，平时无在途项自动隐藏降噪。
 
 v2.5.46：加固统一批量「执行推荐处理」性能与长事务防死锁，全面修复前端交互缺陷：
 1. **执行推荐处理并发加速与长事务防死锁（`app/core/directory_merge.py` + `app/api/archive.py` + `frontend/index.html`）**：
