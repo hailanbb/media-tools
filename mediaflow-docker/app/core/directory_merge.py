@@ -370,12 +370,16 @@ async def build_directory_merge_plan(
     smart_collision: bool = False,
     active_download_paths: set[str] | None = None,
     cd2_client: CloudDrive2Client | None = None,
+    persist_plan: bool = True,
+    task_obj: Task | None = None,
+    group_obj: DirectoryGroup | None = None,
+    prefetched_season_records: list[SeasonRecord] | None = None,
 ) -> dict[str, Any]:
     """生成只读目录合并与前缀统一执行计划（M01–M14, G06–G09）。"""
     from app.core.episode_parser import classify_content_unit
 
-    task = await db.get(Task, task_id)
-    group = await db.get(DirectoryGroup, group_id)
+    task = task_obj if task_obj is not None else await db.get(Task, task_id)
+    group = group_obj if group_obj is not None else await db.get(DirectoryGroup, group_id)
     if not task or not group or group.task_id != task_id:
         raise ValueError("任务或多目录组不存在")
 
@@ -484,12 +488,14 @@ async def build_directory_merge_plan(
             block_reasons.append(f"源目录与目标目录存在自指或嵌套包含关系: {p} <-> {final_src_target}")
 
     # 确定本次作用季列表（G08: 支持一次组级计划覆盖多个季）
+    probe_cache: dict[str, list[dict[str, Any]]] = {}
     discovered_seasons: set[int] = set()
     if season_numbers:
         discovered_seasons.update(int(s) for s in season_numbers if int(s) > 0)
     elif all_seasons:
         for src_show in merge_from_show_paths:
             root_entries_probe = await list_files_robust(cd2_client, src_show)
+            probe_cache[src_show] = root_entries_probe
             for re_item in root_entries_probe:
                 if re_item.get("isDirectory"):
                     m_s = re.match(r"(?i)^(?:Season\s*|S)(\d{1,2})$", re_item["name"])
@@ -520,12 +526,12 @@ async def build_directory_merge_plan(
     per_season_prefixes: dict[int, dict[str, Any]] = {}
 
     # 预先读取目标根文件以处理剧根公共资产 (M09)
-    target_root_files = await list_files_robust(cd2_client, final_src_target)
+    target_root_files = [] if source_target_will_create else await list_files_robust(cd2_client, final_src_target)
     target_root_names_lower = {tf["name"].lower() for tf in target_root_files if not tf.get("isDirectory")}
 
     # 检查旧剧根公共资产与未纳入本次合并的其他季
     for old_src_show in merge_from_show_paths:
-        root_entries = await list_files_robust(cd2_client, old_src_show)
+        root_entries = probe_cache[old_src_show] if old_src_show in probe_cache else await list_files_robust(cd2_client, old_src_show)
         old_remaining_for_show: list[str] = []
         for re_item in root_entries:
             if re_item.get("isDirectory"):
@@ -569,7 +575,7 @@ async def build_directory_merge_plan(
 
             target_season_dir = f"{final_src_target}/Season {cur_sn}"
             if cur_sn not in per_season_prefixes:
-                t_files_raw = await list_files_robust(cd2_client, target_season_dir)
+                t_files_raw = [] if source_target_will_create else await list_files_robust(cd2_client, target_season_dir)
                 t_file_map = {f["name"]: f for f in t_files_raw if not f.get("isDirectory")}
                 chosen_p, p_samples, p_basis = select_prefix_with_basis(
                     list(t_file_map.keys()),
@@ -743,7 +749,7 @@ async def build_directory_merge_plan(
     # 若主季尚未填充前缀信息（例如单季目录为空）
     if primary_season not in per_season_prefixes:
         target_season_dir = f"{final_src_target}/Season {primary_season}"
-        t_files_raw = await list_files_robust(cd2_client, target_season_dir)
+        t_files_raw = [] if source_target_will_create else await list_files_robust(cd2_client, target_season_dir)
         t_names = [f["name"] for f in t_files_raw if not f.get("isDirectory")]
         chosen_p, p_samples, p_basis = select_prefix_with_basis(
             t_names, season_number=primary_season, canonical_title=target_clean_name, selected_prefix=selected_prefix
@@ -761,13 +767,19 @@ async def build_directory_merge_plan(
 
     # 检查是否连载中（用于前端提示）
     is_airing = False
-    target_recs = list((await db.scalars(
-        select(SeasonRecord).where(
-            SeasonRecord.task_id == task_id,
-            SeasonRecord.show_path == final_src_target,
-            SeasonRecord.season_number.in_(target_seasons),
-        )
-    )).all())
+    if prefetched_season_records is not None:
+        target_recs = [
+            r for r in prefetched_season_records
+            if r.task_id == task_id and r.show_path == final_src_target and r.season_number in target_seasons
+        ]
+    else:
+        target_recs = list((await db.scalars(
+            select(SeasonRecord).where(
+                SeasonRecord.task_id == task_id,
+                SeasonRecord.show_path == final_src_target,
+                SeasonRecord.season_number.in_(target_seasons),
+            )
+        )).all())
     if target_recs:
         rec0 = target_recs[0]
         ev = json.loads(rec0.evidence_json or "{}") if getattr(rec0, "evidence_json", None) else {}
@@ -813,13 +825,14 @@ async def build_directory_merge_plan(
     }
 
     # 持久化暂存至 group.evidence_json
-    try:
-        grp_ev = json.loads(group.evidence_json or "{}")
-    except Exception:
-        grp_ev = {}
-    grp_ev["latest_merge_plan"] = plan
-    group.evidence_json = json.dumps(grp_ev, ensure_ascii=False)
-    await db.flush()
+    if persist_plan:
+        try:
+            grp_ev = json.loads(group.evidence_json or "{}")
+        except Exception:
+            grp_ev = {}
+        grp_ev["latest_merge_plan"] = plan
+        group.evidence_json = json.dumps(grp_ev, ensure_ascii=False)
+        await db.flush()
 
     return plan
 

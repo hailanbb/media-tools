@@ -162,7 +162,7 @@ console.log("===================================================================
     raw: {show_path: '/src/Show'}};
   const context = {document: {getElementById: getNode}, currentCategory: 'anomaly', currentTaskId: 'task',
     taskList: [{id: 'task', categories: {anomaly: [item], download: [item]}, counts: {}}],
-    escapeHtml: String, updateSelection() {}, findItemByRecordId: () => item, updateGapFillSitesToolbarBadge() {},
+    escapeHtml: String, escapeJsAttr: String, updateSelection() {}, findItemByRecordId: () => item, updateGapFillSitesToolbarBadge() {},
     openModal: id => {context.openedModal = id;}};
   vm.createContext(context);
   vm.runInContext(source('cleanSeasonStatusNote') + ';' + source('renderEpisodesList') + ';renderEpisodesList()', context);
@@ -398,6 +398,7 @@ console.log("===================================================================
       currentTaskId: 'task-variety',
       taskList: [sampleTask],
       escapeHtml: String,
+      escapeJsAttr: String,
       cleanSeasonStatusNote: str => str,
       updateSelection() {},
       updateGapFillSitesToolbarBadge() {},
@@ -736,4 +737,80 @@ console.log("===================================================================
   assert.strictEqual(button.innerHTML, '重新核查');
   assert.strictEqual(button.disabled, false);
   console.log('✓ 重新核查覆盖关联目录、失败回执及按钮恢复通过');
+
+  // 回归测试：批量/单季补缺弹窗(taskList)、verify_basis 人工确认分流、转移修复设置(Boolean)与单引号转义(escapeJsAttr)
+  assert(!htmlContent.includes('tasksData.find('), 'prepareDownloadModal 不得引用未声明变量 tasksData');
+  assert(!/\bbool\s*\(/.test(htmlContent), '前端 JS 不得调用 Python 的 bool()');
+  {
+    const btnCtx = {
+      taskList: [{
+        id: 't-dl',
+        categories: {
+          download: [
+            { id: 'rec-1', show: "The Boulet Brothers' Dragula", season: 'S01', missing: [2, 3], raw: { status: 'download_needed', gap_category: 'non_anime' }, gapFillState: { actionable_missing_episodes: [2, 3], pushed_episodes: [] } },
+            { id: 'rec-2', show: '哈哈哈哈哈', season: 'S04', missing: [5], raw: { status: 'period_missing', gap_category: 'non_anime' }, gapFillState: { actionable_missing_episodes: [5], pushed_episodes: [] } }
+          ]
+        }
+      }],
+      currentTaskId: 't-dl',
+      currentActionRecordId: null,
+      configRoots: { gap_fill_min_seeders: 2 },
+      gapFillRulesCache: {},
+      gapFillSitesCatalogCache: [],
+      openedModals: [],
+      manualConfirmOpened: [],
+      openModal(id) { btnCtx.openedModals.push(id); },
+      openManualConfirmModal(id) { btnCtx.manualConfirmOpened.push(id); },
+      findItemByRecordId(id) { return btnCtx.taskList[0].categories.download.find(x => x.id === id) || null; },
+      document: {
+        _els: {
+          downloadModalTitle: { textContent: '' },
+          downloadModalTargetSummary: { innerHTML: '' },
+          repairSettingEnabled: { checked: false },
+          repairSettingAutoRepair: { checked: false },
+          repairSettingMaxConcurrency: { value: '' },
+          repairSettingBatchQuota: { value: '' },
+          repairSettingRetryBudget: { value: '' },
+          repairSettingInterval: { value: '' }
+        },
+        getElementById(id) { return this._els[id] || null; },
+        querySelectorAll(sel) {
+          if (sel.includes('itemCheck')) return [{ value: 'rec-1' }, { value: 'rec-2' }];
+          return [];
+        }
+      },
+      api: async () => ({ is_enabled: 1, auto_repair_enabled: 0, max_concurrency: 2, batch_quota: 10, retry_budget: 3, scan_interval_minutes: 15 }),
+      alert(m) { throw new Error('Unexpected alert: ' + m); }
+    };
+    const extractFn = name => {
+      const m = htmlContent.match(new RegExp(`(?:async\\s+)?function\\s+${name}\\b[^]*?\\n    \\}`));
+      assert(m, `找不到函数 ${name}`);
+      return m[0];
+    };
+    vm.createContext(btnCtx);
+    vm.runInContext([
+      extractFn('escapeHtml'),
+      extractFn('escapeJsAttr'),
+      extractFn('prepareDownloadModal'),
+      extractFn('executeBatchDownload'),
+      extractFn('handleSingleAction'),
+      extractFn('openTransferRepairSettingsModal')
+    ].join(';\n'), btnCtx);
+
+    btnCtx.executeBatchDownload();
+    assert(btnCtx.openedModals.includes('downloadModal'), 'executeBatchDownload 必须正常打开 downloadModal');
+    assert(btnCtx.document._els.downloadModalTitle.textContent.includes('共 2 季'), '批量补缺弹窗标题必须显示选中季数');
+
+    btnCtx.handleSingleAction('verify_basis', 'rec-1');
+    assert.deepStrictEqual(btnCtx.manualConfirmOpened, ['rec-1'], 'verify_basis 按钮必须正常触发 openManualConfirmModal');
+
+    await btnCtx.openTransferRepairSettingsModal();
+    assert.strictEqual(btnCtx.document._els.repairSettingEnabled.checked, true);
+    assert.strictEqual(btnCtx.document._els.repairSettingAutoRepair.checked, false);
+    assert(btnCtx.openedModals.includes('repairSettingsModal'), 'openTransferRepairSettingsModal 必须正常打开弹窗');
+
+    const escaped = btnCtx.escapeJsAttr("The Boulet Brothers' Dragula");
+    assert.strictEqual(escaped, "The Boulet Brothers\\' Dragula");
+    console.log('✓ 批量补缺弹窗、verify_basis 分流、转移修复设置与单引号转义回归测试通过');
+  }
 })().catch(error => {console.error(error); process.exitCode = 1;});

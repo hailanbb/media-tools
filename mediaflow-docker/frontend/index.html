@@ -114,7 +114,7 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.45</span>
+              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.46</span>
             </div>
             <!-- 完善后的命名 -->
             <p class="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">智能媒体库整理与归档工作台</p>
@@ -1640,6 +1640,19 @@
         .replace(/'/g, '&#39;');
     }
 
+    function escapeJsAttr(str) {
+      if (str === null || str === undefined) return '';
+      return String(str)
+        .replace(/\\/g, '\\\\')
+        .replace(/&/g, '&amp;')
+        .replace(/'/g, "\\'")
+        .replace(/"/g, '\\&quot;')
+        .replace(/\r/g, '\\r')
+        .replace(/\n/g, '\\n')
+        .replace(/</g, '\\u003c')
+        .replace(/>/g, '\\u003e');
+    }
+
     function cleanSeasonStatusNote(str) {
       if (!str || typeof str !== 'string') return '';
       return str
@@ -2130,7 +2143,7 @@
               (s.status === 'review_needed' && total && maxRec > total)
             );
             if (checkOnly) { actionType = 'inspect_info'; actionText = '查看依据'; }
-            if (catKey !== 'airing' && s.status === 'period_review') { actionType = 'verify_basis'; actionText = '人工确认'; }
+            if (catKey !== 'airing' && catKey !== 'review' && s.status === 'period_review') { actionType = 'verify_basis'; actionText = '人工确认'; }
             if (catKey !== 'airing' && s.status === 'period_ready') actionText = '保留全部版本归档';
             if (catKey !== 'airing' && s.status === 'already_archived') { actionType = 'clean_redundant'; actionText = '删除源端（本季）'; }
             const posRecEps = recEps.filter(e => typeof e === 'number' ? e > 0 : Number(e) > 0);
@@ -2953,7 +2966,7 @@
               if (isSource) {
                 if (row.can_delete) {
                   opCellHtml = `
-                    <button type="button" onclick="confirmCleanDirectoryGroupSourceSeason('${escapeHtml(g.id)}', '${escapeHtml(row.season_record_id || '')}', '${escapeHtml(row.path || '')}', '${escapeHtml(row.season_label || '')}', '${escapeHtml(g.confirmed_target_path || '')}')" class="px-2.5 py-1 rounded-lg bg-purple-600 hover:bg-purple-700 text-white font-semibold text-xs shadow-xs transition flex items-center gap-1 ml-auto">
+                    <button type="button" onclick="confirmCleanDirectoryGroupSourceSeason('${escapeJsAttr(g.id)}', '${escapeJsAttr(row.season_record_id || '')}', '${escapeJsAttr(row.path || '')}', '${escapeJsAttr(row.season_label || '')}', '${escapeJsAttr(g.confirmed_target_path || '')}')" class="px-2.5 py-1 rounded-lg bg-purple-600 hover:bg-purple-700 text-white font-semibold text-xs shadow-xs transition flex items-center gap-1 ml-auto">
                       <i class="fa-solid fa-trash-can text-[10px]"></i>
                       <span>删除源端（本季）</span>
                     </button>`;
@@ -3558,9 +3571,9 @@
           const rsn = item.raw?.gap_category_reason || '系统自动按路径与元数据识别';
           const tmdbIdClean = item.raw?.tmdb_id || item.tmdbId || '';
           if (cat === 'anime') {
-            gapCatBadgeHtml = `<button type="button" onclick="toggleWorkCategory('${item.id}', '${tmdbIdClean}', '${escapeHtml(item.show)}', 'non_anime')" class="text-xs px-2 py-0.5 rounded-full bg-pink-50 dark:bg-pink-950/70 text-pink-700 dark:text-pink-300 font-semibold border border-pink-200 dark:border-pink-800 hover:opacity-80 transition cursor-pointer" title="${escapeHtml(rsn)} (点击切换为非动漫)">🎨 动漫 (${src === 'manual' ? '手动' : '自动'}) <i class="fa-solid fa-arrows-rotate text-[10px] ml-0.5 opacity-60"></i></button>`;
+            gapCatBadgeHtml = `<button type="button" onclick="toggleWorkCategory('${escapeJsAttr(item.id)}', '${escapeJsAttr(tmdbIdClean)}', '${escapeJsAttr(item.show)}', 'non_anime')" class="text-xs px-2 py-0.5 rounded-full bg-pink-50 dark:bg-pink-950/70 text-pink-700 dark:text-pink-300 font-semibold border border-pink-200 dark:border-pink-800 hover:opacity-80 transition cursor-pointer" title="${escapeHtml(rsn)} (点击切换为非动漫)">🎨 动漫 (${src === 'manual' ? '手动' : '自动'}) <i class="fa-solid fa-arrows-rotate text-[10px] ml-0.5 opacity-60"></i></button>`;
           } else {
-            gapCatBadgeHtml = `<button type="button" onclick="toggleWorkCategory('${item.id}', '${tmdbIdClean}', '${escapeHtml(item.show)}', 'anime')" class="text-xs px-2 py-0.5 rounded-full bg-cyan-50 dark:bg-cyan-950/70 text-cyan-700 dark:text-cyan-300 font-semibold border border-cyan-200 dark:border-cyan-800 hover:opacity-80 transition cursor-pointer" title="${escapeHtml(rsn)} (点击切换为动漫)">🎬 非动漫 (${src === 'manual' ? '手动' : '自动'}) <i class="fa-solid fa-arrows-rotate text-[10px] ml-0.5 opacity-60"></i></button>`;
+            gapCatBadgeHtml = `<button type="button" onclick="toggleWorkCategory('${escapeJsAttr(item.id)}', '${escapeJsAttr(tmdbIdClean)}', '${escapeJsAttr(item.show)}', 'anime')" class="text-xs px-2 py-0.5 rounded-full bg-cyan-50 dark:bg-cyan-950/70 text-cyan-700 dark:text-cyan-300 font-semibold border border-cyan-200 dark:border-cyan-800 hover:opacity-80 transition cursor-pointer" title="${escapeHtml(rsn)} (点击切换为动漫)">🎬 非动漫 (${src === 'manual' ? '手动' : '自动'}) <i class="fa-solid fa-arrows-rotate text-[10px] ml-0.5 opacity-60"></i></button>`;
           }
         }
         const reviewNextBadgeHtml = (currentCategory === 'review' && item.predictedNextCategoryLabel)
@@ -3668,7 +3681,7 @@
                     <span>清理已归档源端</span>
                   </button>
                 ` : ''}
-                ${(item.duplicates && item.duplicates.length > 0 && item.actionType !== 'clean_redundant') ? `
+                ${(((item.duplicates && item.duplicates.length > 0) || Boolean(ev?.review_plan_preview?.can_clean)) && item.actionType !== 'clean_redundant') ? `
                   <button onclick="openCleanPreview('${item.id}')" class="px-2.5 py-1.5 rounded-lg border border-amber-200 dark:border-amber-700 bg-white dark:bg-slate-800 text-amber-600 dark:text-amber-400 text-xs font-semibold hover:bg-amber-50 dark:hover:bg-amber-950/30 transition flex items-center gap-1.5 shadow-sm" title="查看保留版本与拟删除冗余文件">
                     <i class="fa-solid fa-file-magnifying-glass text-xs"></i>
                     <span>清理预览</span>
@@ -4240,6 +4253,8 @@
         } else {
           alert('请点击顶部同作品目录归并卡片进行操作');
         }
+      } else if (type === 'verify_basis') {
+        openManualConfirmModal(recordId);
       } else if (type.startsWith('download')) {
         prepareDownloadModal([recordId], name);
         openModal('downloadModal');
@@ -4249,7 +4264,7 @@
     function prepareDownloadModal(recordIds, singleName) {
       const titleEl = document.getElementById('downloadModalTitle');
       const summaryEl = document.getElementById('downloadModalTargetSummary');
-      const task = tasksData.find(t => t.id === currentTaskId);
+      const task = (Array.isArray(taskList) ? taskList : []).find(t => t.id === currentTaskId);
       const minSeeders = (typeof configRoots !== 'undefined' && configRoots && configRoots.gap_fill_min_seeders != null) ? configRoots.gap_fill_min_seeders : 2;
       const findRec = (rid) => {
         if (!task || !task.categories) return null;
@@ -4373,7 +4388,13 @@
     }
 
     function openModal(id) { document.getElementById(id).classList.remove('hidden'); }
-    function closeModal(id) { document.getElementById(id).classList.add('hidden'); }
+    function closeModal(id) {
+      document.getElementById(id).classList.add('hidden');
+      if (id === 'recommendedBatchModal' && typeof _recBatchAbortCtrl !== 'undefined' && _recBatchAbortCtrl) {
+        try { _recBatchAbortCtrl.abort('modal_closed'); } catch (_) {}
+        _recBatchAbortCtrl = null;
+      }
+    }
 
     let activeAnomalyTab = 'all';
     function switchAnomalyTab(tab) {
@@ -4633,10 +4654,20 @@
 
     // ── 统一批量「执行推荐处理」预览与执行 (v2.5.45) ─────────────
     let _currentRecommendedPlan = null;
+    let _recBatchAbortCtrl = null;
 
     async function openRecommendedBatchModal() {
       if (!currentTaskId) return;
       _currentRecommendedPlan = null;
+      if (_recBatchAbortCtrl) {
+        try { _recBatchAbortCtrl.abort('superseded'); } catch (_) {}
+      }
+      const ctrl = new AbortController();
+      _recBatchAbortCtrl = ctrl;
+      const timerId = setTimeout(() => {
+        try { ctrl.abort('timeout'); } catch (_) {}
+      }, 90000);
+
       const summaryEl = document.getElementById('recBatchSummaryBar');
       const bodyEl = document.getElementById('recBatchBody');
       const execBtn = document.getElementById('recBatchExecBtn');
@@ -4651,7 +4682,8 @@
       try {
         const res = await api('/api/archive/recommended-plan', {
           method: 'POST',
-          body: JSON.stringify({ task_id: currentTaskId })
+          body: JSON.stringify({ task_id: currentTaskId }),
+          signal: ctrl.signal,
         });
         if (!res || !res.ok) {
           throw new Error(res?.message || '生成推荐处理计划失败');
@@ -4734,7 +4766,14 @@
         if (footEl) footEl.textContent = `计划编号 ${res.plan_id || '-'} · 预计释放 ${c.reclaimable_display || '0 B'} · 自动校验文件指纹`;
         if (execBtn) execBtn.disabled = totalExec === 0;
       } catch (e) {
-        if (bodyEl) bodyEl.innerHTML = `<div class="p-4 rounded-xl bg-rose-50 text-rose-700">加载推荐处理计划失败：${escapeHtml(e.message)}</div>`;
+        if (ctrl.signal.aborted && ctrl.signal.reason === 'modal_closed') return;
+        const msg = (ctrl.signal.aborted && ctrl.signal.reason === 'timeout')
+          ? '生成推荐处理计划超时 (90s)，可能因远程网盘目录较多或网络繁忙，请稍后重试。'
+          : (e?.message || '未知错误');
+        if (bodyEl) bodyEl.innerHTML = `<div class="p-4 rounded-xl bg-rose-50 text-rose-700">加载推荐处理计划失败：${escapeHtml(msg)}</div>`;
+      } finally {
+        clearTimeout(timerId);
+        if (_recBatchAbortCtrl === ctrl) _recBatchAbortCtrl = null;
       }
     }
 
@@ -6081,8 +6120,8 @@
             <div class="flex items-center justify-between flex-wrap gap-2">
               <div class="font-bold text-xs text-blue-900 dark:text-blue-200">补缺适用站点规则与路由</div>
               <div class="flex items-center gap-1.5">
-                <button type="button" onclick="toggleWorkCategory('${item.id}', '${tmdbIdClean}', '${escapeHtml(item.show)}', 'anime')" class="px-2.5 py-1 rounded-lg text-[11px] font-semibold border ${cat === 'anime' ? 'bg-pink-600 text-white border-pink-600' : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-300 dark:border-slate-700 hover:bg-slate-100'} transition cursor-pointer">设为动漫</button>
-                <button type="button" onclick="toggleWorkCategory('${item.id}', '${tmdbIdClean}', '${escapeHtml(item.show)}', 'non_anime')" class="px-2.5 py-1 rounded-lg text-[11px] font-semibold border ${cat === 'non_anime' ? 'bg-cyan-600 text-white border-cyan-600' : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-300 dark:border-slate-700 hover:bg-slate-100'} transition cursor-pointer">设为非动漫</button>
+                <button type="button" onclick="toggleWorkCategory('${escapeJsAttr(item.id)}', '${escapeJsAttr(tmdbIdClean)}', '${escapeJsAttr(item.show)}', 'anime')" class="px-2.5 py-1 rounded-lg text-[11px] font-semibold border ${cat === 'anime' ? 'bg-pink-600 text-white border-pink-600' : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-300 dark:border-slate-700 hover:bg-slate-100'} transition cursor-pointer">设为动漫</button>
+                <button type="button" onclick="toggleWorkCategory('${escapeJsAttr(item.id)}', '${escapeJsAttr(tmdbIdClean)}', '${escapeJsAttr(item.show)}', 'non_anime')" class="px-2.5 py-1 rounded-lg text-[11px] font-semibold border ${cat === 'non_anime' ? 'bg-cyan-600 text-white border-cyan-600' : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-300 dark:border-slate-700 hover:bg-slate-100'} transition cursor-pointer">设为非动漫</button>
               </div>
             </div>
             <div class="text-[11px] text-slate-700 dark:text-slate-300 space-y-1">
@@ -8287,8 +8326,8 @@
     async function openTransferRepairSettingsModal() {
       try {
         const settings = await api('/api/moviepilot/transfer-repair/settings');
-        document.getElementById('repairSettingEnabled').checked = bool(settings.is_enabled);
-        document.getElementById('repairSettingAutoRepair').checked = bool(settings.auto_repair_enabled);
+        document.getElementById('repairSettingEnabled').checked = Boolean(settings.is_enabled);
+        document.getElementById('repairSettingAutoRepair').checked = Boolean(settings.auto_repair_enabled);
         document.getElementById('repairSettingMaxConcurrency').value = settings.max_concurrency || 1;
         document.getElementById('repairSettingBatchQuota').value = settings.batch_quota || 20;
         document.getElementById('repairSettingRetryBudget').value = settings.retry_budget || 3;

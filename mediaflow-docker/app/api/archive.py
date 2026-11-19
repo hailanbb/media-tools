@@ -3616,57 +3616,77 @@ async def build_recommended_batch_plan(
     skipped_items: list[dict[str, Any]] = []
 
     cd2 = CloudDrive2Client()
+    sem = asyncio.Semaphore(6)
+    plans_to_persist: list[tuple[DirectoryGroup, dict[str, Any]]] = []
     try:
-        # 1. 同 ID 多目录规范化归并组级计划 (G06-G08)
+        # 1. 同 ID 多目录规范化归并组级计划 (G06-G08) — 并发只读盘点，避免持锁阻塞 SQLite
         target_groups = pending_groups
         if body.group_ids:
             g_sel = set(body.group_ids)
             target_groups = [g for g in pending_groups if g.id in g_sel]
 
-        for grp in target_groups:
-            try:
-                m_plan = await build_directory_merge_plan(
-                    db,
-                    body.task_id,
-                    grp.id,
-                    all_seasons=True,
-                    auto_canonical_target=True,
-                    smart_collision=True,
-                    cd2_client=cd2,
-                )
-                if m_plan.get("can_execute") and (m_plan.get("files_to_move") or m_plan.get("collision_dedup_items")):
-                    merge_items.append({
-                        "group_id": grp.id,
-                        "title": grp.title,
-                        "tmdb_id": grp.tmdb_id,
-                        "plan_id": m_plan["plan_id"],
-                        "canonical_dir_name": m_plan.get("canonical_dir_name") or "",
-                        "naming_basis": m_plan.get("naming_basis") or "",
-                        "source_target_show_path": m_plan["source_target_show_path"],
-                        "source_target_will_create": bool(m_plan.get("source_target_will_create")),
-                        "merge_from_show_paths": m_plan.get("merge_from_show_paths") or [],
-                        "affected_seasons": m_plan.get("affected_seasons") or [1],
-                        "file_count": len(m_plan.get("files_to_move") or []),
-                        "dedup_count": len(m_plan.get("collision_dedup_items") or []),
-                        "isolated_conflicts": m_plan.get("isolated_conflicts") or [],
-                        "prefix_selection_basis": m_plan.get("prefix_selection_basis") or "",
-                    })
-                else:
-                    skipped_items.append({
-                        "kind": "merge_directory",
-                        "group_id": grp.id,
-                        "title": grp.title,
-                        "reason": "; ".join(m_plan.get("block_reasons") or ["无待移动文件"]),
-                    })
-            except Exception as mg_err:
+        async def _plan_one_group(grp: DirectoryGroup) -> tuple[DirectoryGroup, dict[str, Any] | None, str | None]:
+            async with sem:
+                try:
+                    m_plan = await asyncio.wait_for(
+                        build_directory_merge_plan(
+                            db,
+                            body.task_id,
+                            grp.id,
+                            all_seasons=True,
+                            auto_canonical_target=True,
+                            smart_collision=True,
+                            cd2_client=cd2,
+                            persist_plan=False,
+                            task_obj=task,
+                            group_obj=grp,
+                            prefetched_season_records=rows,
+                        ),
+                        timeout=20.0,
+                    )
+                    return grp, m_plan, None
+                except asyncio.TimeoutError:
+                    return grp, None, "读取目录超时 (20s)，请稍后重试或单独处理"
+                except Exception as mg_err:
+                    return grp, None, str(mg_err)
+
+        group_results = await asyncio.gather(*(_plan_one_group(g) for g in target_groups))
+        for grp, m_plan, err_msg in group_results:
+            if err_msg or m_plan is None:
                 skipped_items.append({
                     "kind": "merge_directory",
                     "group_id": grp.id,
                     "title": grp.title,
-                    "reason": str(mg_err),
+                    "reason": err_msg or "未知错误",
+                })
+            elif m_plan.get("can_execute") and (m_plan.get("files_to_move") or m_plan.get("collision_dedup_items")):
+                plans_to_persist.append((grp, m_plan))
+                merge_items.append({
+                    "group_id": grp.id,
+                    "title": grp.title,
+                    "tmdb_id": grp.tmdb_id,
+                    "plan_id": m_plan["plan_id"],
+                    "canonical_dir_name": m_plan.get("canonical_dir_name") or "",
+                    "naming_basis": m_plan.get("naming_basis") or "",
+                    "source_target_show_path": m_plan["source_target_show_path"],
+                    "source_target_will_create": bool(m_plan.get("source_target_will_create")),
+                    "merge_from_show_paths": m_plan.get("merge_from_show_paths") or [],
+                    "affected_seasons": m_plan.get("affected_seasons") or [1],
+                    "file_count": len(m_plan.get("files_to_move") or []),
+                    "dedup_count": len(m_plan.get("collision_dedup_items") or []),
+                    "isolated_conflicts": m_plan.get("isolated_conflicts") or [],
+                    "prefix_selection_basis": m_plan.get("prefix_selection_basis") or "",
+                })
+            else:
+                skipped_items.append({
+                    "kind": "merge_directory",
+                    "group_id": grp.id,
+                    "title": grp.title,
+                    "reason": "; ".join(m_plan.get("block_reasons") or ["无待移动文件"]),
                 })
 
-        # 2. 同内容副本清理 & 归档已齐清源
+        # 2. 同内容副本清理 & 归档已齐清源 — 并发盘点文件指纹
+        clean_candidates: list[dict[str, Any]] = []
         for w in review_works:
             rec_id = w.get("id")
             if not rec_id:
@@ -3684,42 +3704,71 @@ async def build_recommended_batch_plan(
                 continue
 
             if "clean_duplicates" in (w.get("review_actions") or []) or r_kind == "clean_duplicates":
+                clean_candidates.append(w)
+
+        async def _plan_one_clean(w: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None, str | None]:
+            async with sem:
                 try:
-                    live_files = await cd2.list_files(w.get("season_path") or "", force_refresh=True)
+                    live_files = await asyncio.wait_for(
+                        cd2.list_files(w.get("season_path") or "", force_refresh=True),
+                        timeout=15.0,
+                    )
                     c_plan = generate_review_clean_plan(
                         files=live_files,
                         season_number=int(w.get("season_number") or 1),
                         total_episodes=int(w.get("total_episodes") or len(live_files)),
                     )
-                    if c_plan.get("can_clean") or c_plan.get("all_distinct_retained"):
-                        clean_items.append({
-                            "season_record_id": rec_id,
-                            "show_name": w.get("show_name") or "",
-                            "season_number": int(w.get("season_number") or 1),
-                            "season_path": w.get("season_path") or "",
-                            "plan_id": c_plan.get("plan_id") or "",
-                            "rules_version": c_plan.get("rules_version") or "v2.5.45",
-                            "can_clean": bool(c_plan.get("can_clean")),
-                            "all_distinct_retained": bool(c_plan.get("all_distinct_retained")),
-                            "distinct_retention_note": str(c_plan.get("distinct_retention_note") or ""),
-                            "version_note": str(c_plan.get("version_note") or ""),
-                            "to_delete": c_plan.get("to_delete") or [],
-                            "to_keep": c_plan.get("to_keep") or [],
-                            "delete_count": len(c_plan.get("to_delete") or []),
-                            "reclaimable_bytes": int(c_plan.get("reclaimable_bytes") or 0),
-                            "file_fingerprints": c_plan.get("file_fingerprints") or {},
-                            "predicted_next_category": w.get("predicted_next_category") or "",
-                            "predicted_next_label": w.get("predicted_next_category_label") or "",
-                        })
+                    return w, c_plan, None
+                except asyncio.TimeoutError:
+                    return w, None, "读取目录超时 (15s)"
                 except Exception as cl_err:
-                    skipped_items.append({
-                        "kind": "clean_duplicates",
-                        "season_record_id": rec_id,
-                        "title": f"{w.get('show_name')} S{int(w.get('season_number') or 1):02d}",
-                        "reason": str(cl_err),
-                    })
+                    return w, None, str(cl_err)
+
+        clean_results = await asyncio.gather(*(_plan_one_clean(w) for w in clean_candidates))
+        for w, c_plan, err_msg in clean_results:
+            rec_id = w.get("id")
+            if err_msg or c_plan is None:
+                skipped_items.append({
+                    "kind": "clean_duplicates",
+                    "season_record_id": rec_id,
+                    "title": f"{w.get('show_name')} S{int(w.get('season_number') or 1):02d}",
+                    "reason": err_msg or "未知错误",
+                })
+                continue
+            if c_plan.get("can_clean") or c_plan.get("all_distinct_retained"):
+                to_del = c_plan.get("to_delete") or []
+                to_keep = c_plan.get("to_keep") or []
+                clean_items.append({
+                    "season_record_id": rec_id,
+                    "show_name": w.get("show_name") or "",
+                    "season_number": int(w.get("season_number") or 1),
+                    "season_path": w.get("season_path") or "",
+                    "plan_id": c_plan.get("plan_id") or "",
+                    "rules_version": c_plan.get("rules_version") or "v2.5.45",
+                    "can_clean": bool(c_plan.get("can_clean")),
+                    "all_distinct_retained": bool(c_plan.get("all_distinct_retained")),
+                    "distinct_retention_note": str(c_plan.get("distinct_retention_note") or ""),
+                    "version_note": str(c_plan.get("version_note") or ""),
+                    "to_delete": to_del,
+                    "to_keep": to_keep,
+                    "delete_count": len(to_del),
+                    "keep_count": len(to_keep),
+                    "reclaimable_bytes": int(c_plan.get("reclaimable_bytes") or 0),
+                    "file_fingerprints": c_plan.get("file_fingerprints") or {},
+                    "predicted_next_category": w.get("predicted_next_category") or "",
+                    "predicted_next_label": w.get("predicted_next_category_label") or "",
+                })
     finally:
         await cd2.close()
+
+    # 3. 并发盘点全部完成后再一次性写入 group.evidence_json 并立刻提交（持锁 <50ms）
+    for grp, m_plan in plans_to_persist:
+        try:
+            grp_ev = json.loads(grp.evidence_json or "{}")
+        except Exception:
+            grp_ev = {}
+        grp_ev["latest_merge_plan"] = m_plan
+        grp.evidence_json = json.dumps(grp_ev, ensure_ascii=False)
 
     work_season_ids = {c["season_record_id"] for c in clean_items} | {r["season_record_id"] for r in redundant_source_items}
     total_files_affected = (
@@ -3753,7 +3802,48 @@ async def build_recommended_batch_plan(
     }
     _RECOMMENDED_BATCH_PLANS[plan_id] = plan_payload
     await db.commit()
-    return plan_payload
+
+    # 返回精简摘要给前端弹窗渲染，避免超大文件指纹载荷导致浏览器解析/渲染卡顿
+    return {
+        "ok": True,
+        "plan_id": plan_id,
+        "rules_version": "v2.5.45",
+        "task_id": body.task_id,
+        "created_at": plan_payload["created_at"],
+        "counts": plan_payload["counts"],
+        "merge_items": [
+            {
+                "group_id": m["group_id"],
+                "title": m["title"],
+                "canonical_dir_name": m["canonical_dir_name"],
+                "file_count": m["file_count"],
+                "dedup_count": m["dedup_count"],
+            }
+            for m in merge_items
+        ],
+        "clean_items": [
+            {
+                "season_record_id": c["season_record_id"],
+                "show_name": c["show_name"],
+                "season_number": c["season_number"],
+                "delete_count": c["delete_count"],
+                "keep_count": c["keep_count"],
+                "reclaimable_bytes": c["reclaimable_bytes"],
+                "predicted_next_label": c["predicted_next_label"],
+            }
+            for c in clean_items
+        ],
+        "redundant_source_items": [
+            {
+                "season_record_id": r["season_record_id"],
+                "show_name": r["show_name"],
+                "season_number": r["season_number"],
+                "predicted_next_label": r["predicted_next_label"],
+            }
+            for r in redundant_source_items
+        ],
+        "skipped_items": skipped_items,
+    }
 
 
 @router.post("/recommended-execute")
