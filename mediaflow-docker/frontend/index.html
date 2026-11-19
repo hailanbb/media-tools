@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>MediaFlow - 智能媒体库整理与归档工作台</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎬</text></svg>">
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   <script>
@@ -114,7 +115,7 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.47</span>
+              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.48</span>
             </div>
             <!-- 完善后的命名 -->
             <p class="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">智能媒体库整理与归档工作台</p>
@@ -1603,6 +1604,9 @@
         }
         return resp.json();
       } catch (e) {
+        if (opts.signal && opts.signal.aborted && (opts.signal.reason === 'modal_closed' || opts.signal.reason === 'superseded')) {
+          throw e;
+        }
         console.error(`API ${path}:`, e);
         throw e;
       }
@@ -4673,7 +4677,7 @@
       _recBatchAbortCtrl = ctrl;
       const timerId = setTimeout(() => {
         try { ctrl.abort('timeout'); } catch (_) {}
-      }, 90000);
+      }, 120000);
 
       const summaryEl = document.getElementById('recBatchSummaryBar');
       const bodyEl = document.getElementById('recBatchBody');

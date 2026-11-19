@@ -4,9 +4,19 @@
 
 [![Windows](https://img.shields.io/badge/Windows-Native-0078d4.svg?style=flat-square&logo=windows)](#)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776ab.svg?style=flat-square&logo=python)](#)
-[![Version](https://img.shields.io/badge/Release-v2.5.47-6366f1.svg?style=flat-square)](#)
+[![Version](https://img.shields.io/badge/Release-v2.5.48-6366f1.svg?style=flat-square)](#)
 
 当前五模块需求与交互方案（v2.5.45）：[待复核清理](MediaFlow待复核清理模块需求与交互方案-v2.5.45.md) → [异常剧集](MediaFlow异常剧集模块需求与交互方案-v2.5.45.md) → [缺集待补](MediaFlow缺集待补模块需求与交互方案-v2.5.45.md) → [连载留源](MediaFlow连载留源模块需求与交互方案-v2.5.45.md) → [齐全可归档](MediaFlow齐全可归档模块需求与交互方案-v2.5.45.md)。以下发布记录保留各版本当时的行为描述，现行设计以模块方案为准。
+
+v2.5.48：落地四层零盲区真实验收护栏并完成「执行推荐处理」预览二次提速：
+1. **生产库安全隔离护栏（`app/database.py` + `tests/run_all_tests.py` + `tests/test_v2545_five_module_refactor.py`）**：
+   - 在 `app/database.py` 增加测试上下文检测，拦截任何未配置独立临时 `MF_DATA_DIR` 的测试脚本误连/覆盖生产库 `data/mediaflow.db`；`run_all_tests.py` 为每个测试子进程强制分配独立临时目录。
+2. **真实无头浏览器 E2E 冒烟巡检与真实服务并发探针（`tests/e2e_browser_smoke.py` + `tests/smoke_real_server.py`）**：
+   - 接入原生 Edge Playwright 无头浏览器零 Mock 巡检，捕获 `pageerror`、`console.error` 及 `HTTP 5xx/4xx`，验证 5 大模块隐藏/展示契约、弹窗联动同步与无死锁响应；
+   - 新增真实服务只读契约与并发无锁压测探针，核验大批量任务预览期间 SQLite 零阻塞及响应载荷契约。
+3. **「执行推荐处理」预览二次提速与细节修复（`app/api/archive.py` + `app/core/directory_merge.py` + `frontend/index.html`）**：
+   - 批量预览阶段默认读取 CD2 缓存（`force_refresh=False`）并将信号量提至 `Semaphore(10)`（实际执行删除前仍保留 G24 `force_refresh=True` 指纹复核），大幅消除 115 网盘限流穿透耗时；
+   - 修复取消 `recommended-plan` 弹窗请求时输出 `console.error` 噪音及缺失 `/favicon.ico` 引发 404 的问题。
 
 v2.5.47：修复同 ID 规范化合并目录与前缀脱节 Bug，完成目录组面板模块归位与交互降噪：
 1. **规范化合并目标目录与前缀样本全链路同步（`app/core/directory_merge.py` + `frontend/index.html` + `tests/test_v2539_directory_merge.py`）**：

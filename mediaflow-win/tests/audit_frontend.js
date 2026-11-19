@@ -11,11 +11,9 @@ while ((m = idRegex.exec(html)) !== null) {
 }
 console.log('Total HTML IDs found:', idSet.size);
 
-// 2. 提取主 script 代码
-const p3 = html.indexOf('<script', 500);
-const sMain = html.substring(p3);
-const endScript = sMain.indexOf('</script>');
-const code = sMain.substring(sMain.indexOf('>') + 1, endScript);
+// 2. 提取主 script 代码（取体积最大的一段 <script>...</script>，避免受 <head> 长度偏移影响）
+const scriptMatches = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/gi)];
+const code = scriptMatches.reduce((best, cur) => (cur[1].length > best.length ? cur[1] : best), '');
 
 // 提取 JS 中所有的 document.getElementById('...')
 const getElRegex = /document\.getElementById\(\s*['"]([^'"]+)['"]\s*\)/g;

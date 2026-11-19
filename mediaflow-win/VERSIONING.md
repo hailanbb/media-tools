@@ -1,6 +1,16 @@
 # MediaFlow 版本管理
 
-当前源码版本为 v2.5.47，修订日期为 2026-11-19。
+当前源码版本为 v2.5.48，修订日期为 2026-11-19。
+
+v2.5.48 落地四层零盲区真实验收护栏并完成「执行推荐处理」预览二次提速：
+1. **生产库安全隔离护栏（`app/database.py` + `tests/run_all_tests.py` + `tests/test_v2545_five_module_refactor.py`）**：
+   - 在 `app/database.py` 注入测试运行器拦截保护，禁止未隔离 `MF_DATA_DIR` 的测试连接生产库 `data/mediaflow.db`；`run_all_tests.py` 统一为每个子套件分配独立临时库目录。
+2. **真实无头浏览器 E2E 与真实服务并发锁探针（`tests/e2e_browser_smoke.py` + `tests/smoke_real_server.py`）**：
+   - 新增原生 Edge Playwright 无头浏览器 E2E 冒烟巡检，覆盖五大模块切换、目录组归位校验、规范化合并单选联动预览及全局零 `pageerror`/`console.error`/`5xx` 核验；
+   - 新增真实服务只读契约与并发无锁压测脚本，校验预览期间并发读零死锁与返回体精简契约。
+3. **预览缓存优先二次提速与控制台零噪音（`app/api/archive.py` + `app/core/directory_merge.py` + `frontend/index.html`）**：
+   - `build_recommended_batch_plan` 预览盘点改为 `force_refresh=False` + `Semaphore(10)`（执行前 G24 指纹复核仍保持 `force_refresh=True` 实时盘点），彻底压缩 115 穿透耗时；
+   - 新增内联 SVG `favicon` 消除首页 404，并静默弹窗主动 `AbortController` 取消引发的控制台误报。
 
 v2.5.47 修复同 ID 规范化合并目标与前缀脱节 Bug，完成目录组面板归位至「待复核清理」及缺集模块按钮降噪：
 1. **规范化合并目标目录与前缀样本联动修复（`app/core/directory_merge.py` + `frontend/index.html` + `tests/test_v2539_directory_merge.py`）**：

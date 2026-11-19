@@ -3616,7 +3616,7 @@ async def build_recommended_batch_plan(
     skipped_items: list[dict[str, Any]] = []
 
     cd2 = CloudDrive2Client()
-    sem = asyncio.Semaphore(6)
+    sem = asyncio.Semaphore(10)
     plans_to_persist: list[tuple[DirectoryGroup, dict[str, Any]]] = []
     try:
         # 1. 同 ID 多目录规范化归并组级计划 (G06-G08) — 并发只读盘点，避免持锁阻塞 SQLite
@@ -3638,6 +3638,7 @@ async def build_recommended_batch_plan(
                             smart_collision=True,
                             cd2_client=cd2,
                             persist_plan=False,
+                            force_refresh=False,
                             task_obj=task,
                             group_obj=grp,
                             prefetched_season_records=rows,
@@ -3710,7 +3711,7 @@ async def build_recommended_batch_plan(
             async with sem:
                 try:
                     live_files = await asyncio.wait_for(
-                        cd2.list_files(w.get("season_path") or "", force_refresh=True),
+                        cd2.list_files(w.get("season_path") or "", force_refresh=False),
                         timeout=15.0,
                     )
                     c_plan = generate_review_clean_plan(

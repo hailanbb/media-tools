@@ -267,7 +267,12 @@ def select_prefix_with_basis(
     return default_fmt, [default_fmt, *[s for s in samples if s != default_fmt]], f"目标多模板同票，采用项目标准格式「{default_fmt}」"
 
 
-async def list_files_robust(cd2: CloudDrive2Client | None, dir_path: str) -> list[dict[str, Any]]:
+async def list_files_robust(
+    cd2: CloudDrive2Client | None,
+    dir_path: str,
+    *,
+    force_refresh: bool = True,
+) -> list[dict[str, Any]]:
     """读取目录文件清单（兼容本地文件系统与 CloudDrive2）。"""
     norm_dir = normalize_dir_path(dir_path)
     # 优先检查本地文件系统（测试/本地环境）
@@ -290,7 +295,7 @@ async def list_files_robust(cd2: CloudDrive2Client | None, dir_path: str) -> lis
     # 尝试 CloudDrive2
     if cd2 is not None:
         try:
-            files = await cd2.list_files(norm_dir, force_refresh=True)
+            files = await cd2.list_files(norm_dir, force_refresh=force_refresh)
             return files or []
         except Exception as e:
             log.warning("CD2 读取目录 %s 失败: %s", norm_dir, e)
@@ -383,6 +388,7 @@ async def build_directory_merge_plan(
     active_download_paths: set[str] | None = None,
     cd2_client: CloudDrive2Client | None = None,
     persist_plan: bool = True,
+    force_refresh: bool = True,
     task_obj: Task | None = None,
     group_obj: DirectoryGroup | None = None,
     prefetched_season_records: list[SeasonRecord] | None = None,
@@ -544,7 +550,7 @@ async def build_directory_merge_plan(
         discovered_seasons.update(int(s) for s in season_numbers if int(s) > 0)
     elif all_seasons:
         for src_show in merge_from_show_paths:
-            root_entries_probe = await list_files_robust(cd2_client, src_show)
+            root_entries_probe = await list_files_robust(cd2_client, src_show, force_refresh=force_refresh)
             probe_cache[src_show] = root_entries_probe
             for re_item in root_entries_probe:
                 if re_item.get("isDirectory"):
@@ -580,12 +586,12 @@ async def build_directory_merge_plan(
     per_season_prefixes: dict[int, dict[str, Any]] = {}
 
     # 预先读取目标根文件以处理剧根公共资产 (M09)
-    target_root_files = [] if source_target_will_create else await list_files_robust(cd2_client, final_src_target)
+    target_root_files = [] if source_target_will_create else await list_files_robust(cd2_client, final_src_target, force_refresh=force_refresh)
     target_root_names_lower = {tf["name"].lower() for tf in target_root_files if not tf.get("isDirectory")}
 
     # 检查旧剧根公共资产与未纳入本次合并的其他季
     for old_src_show in merge_from_show_paths:
-        root_entries = probe_cache[old_src_show] if old_src_show in probe_cache else await list_files_robust(cd2_client, old_src_show)
+        root_entries = probe_cache[old_src_show] if old_src_show in probe_cache else await list_files_robust(cd2_client, old_src_show, force_refresh=force_refresh)
         old_remaining_for_show: list[str] = []
         for re_item in root_entries:
             if re_item.get("isDirectory"):
@@ -623,13 +629,13 @@ async def build_directory_merge_plan(
         show_has_isolated_or_deferred = False
         for cur_sn in target_seasons:
             old_season_dir = f"{old_src_show}/Season {cur_sn}"
-            old_season_files = await list_files_robust(cd2_client, old_season_dir)
+            old_season_files = await list_files_robust(cd2_client, old_season_dir, force_refresh=force_refresh)
             if not old_season_files:
                 continue
 
             target_season_dir = f"{final_src_target}/Season {cur_sn}"
             if cur_sn not in per_season_prefixes:
-                t_files_raw = [] if source_target_will_create else await list_files_robust(cd2_client, target_season_dir)
+                t_files_raw = [] if source_target_will_create else await list_files_robust(cd2_client, target_season_dir, force_refresh=force_refresh)
                 t_file_map = {f["name"]: f for f in t_files_raw if not f.get("isDirectory")}
                 chosen_p, p_samples, p_basis = select_prefix_with_basis(
                     list(t_file_map.keys()),
@@ -803,7 +809,7 @@ async def build_directory_merge_plan(
     # 若主季尚未填充前缀信息（例如单季目录为空）
     if primary_season not in per_season_prefixes:
         target_season_dir = f"{final_src_target}/Season {primary_season}"
-        t_files_raw = [] if source_target_will_create else await list_files_robust(cd2_client, target_season_dir)
+        t_files_raw = [] if source_target_will_create else await list_files_robust(cd2_client, target_season_dir, force_refresh=force_refresh)
         t_names = [f["name"] for f in t_files_raw if not f.get("isDirectory")]
         chosen_p, p_samples, p_basis = select_prefix_with_basis(
             t_names, season_number=primary_season, canonical_title=target_clean_name, selected_prefix=selected_prefix

@@ -1,8 +1,10 @@
 """MediaFlow v2.5.45 五模块处理流程重构与智能清理方案 — G01–G28 验收测试套件"""
 from __future__ import annotations
 
+import atexit
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -13,6 +15,10 @@ from unittest.mock import AsyncMock, patch
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
+
+_TEMP_DATA_DIR = tempfile.mkdtemp(prefix="v2545-data-")
+os.environ["MF_DATA_DIR"] = _TEMP_DATA_DIR
+atexit.register(shutil.rmtree, _TEMP_DATA_DIR, True)
 
 from fastapi import HTTPException
 from sqlalchemy import select

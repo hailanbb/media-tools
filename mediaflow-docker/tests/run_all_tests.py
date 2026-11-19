@@ -10,8 +10,10 @@
 """
 
 import os
-import sys
+import shutil
 import subprocess
+import sys
+import tempfile
 import time
 
 sys.stdout.reconfigure(encoding='utf-8')
@@ -47,18 +49,38 @@ SUITES = [
     {"name": "21. 五模块流程重构与智能清理验收 (v2.5.45 G01-G28)", "cmd": [sys.executable, "tests/test_v2545_five_module_refactor.py"], "type": "python"},
 ]
 
-def run_suite():
+LIVE_SUITES = [
+    {"name": "22. 真实服务只读契约与并发无锁探针 (8080)", "cmd": [sys.executable, "tests/smoke_real_server.py"], "type": "python"},
+    {"name": "23. 原生 Edge Playwright 无头浏览器 E2E 冒烟巡检", "cmd": [sys.executable, "tests/e2e_browser_smoke.py"], "type": "python"},
+]
+
+def run_suite(include_live: bool = False):
     print("=" * 70)
     print("🚀 启动 MediaFlow 全矩阵自动化回归测试流水线")
     print("=" * 70)
 
     start_total = time.time()
     results = []
+    target_suites = SUITES + (LIVE_SUITES if include_live else [])
 
-    for s in SUITES:
+    for s in target_suites:
         print(f"\n▶ 正在执行套件: 【{s['name']}】...")
         t0 = time.time()
-        res = subprocess.run(s["cmd"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
+        suite_tmp_dir = tempfile.mkdtemp(prefix="mf-suite-")
+        sub_env = os.environ.copy()
+        sub_env["MF_DATA_DIR"] = suite_tmp_dir
+        try:
+            res = subprocess.run(
+                s["cmd"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=sub_env,
+            )
+        finally:
+            shutil.rmtree(suite_tmp_dir, ignore_errors=True)
         cost = time.time() - t0
         passed = (res.returncode == 0)
 
@@ -95,4 +117,4 @@ def run_suite():
         sys.exit(1)
 
 if __name__ == "__main__":
-    run_suite()
+    run_suite(include_live="--live" in sys.argv[1:])
