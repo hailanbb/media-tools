@@ -828,4 +828,232 @@ console.log("===================================================================
     assert.strictEqual(escaped, "The Boulet Brothers\\' Dragula");
     console.log('✓ 批量补缺弹窗、verify_basis 分流、转移修复设置与单引号转义回归测试通过');
   }
+
+  // 回归测试：执行推荐处理异步轮询、needs_repreview 拦截展示与按钮状态复位
+  {
+    const mkBtn = () => {
+      const cls = new Set();
+      return {
+        disabled: false,
+        innerHTML: '',
+        onclick: null,
+        isConnected: true,
+        classList: {
+          add(c) { cls.add(c); },
+          remove(c) { cls.delete(c); },
+          contains(c) { return cls.has(c); }
+        }
+      };
+    };
+    const recEls = {
+      recBatchExecBtn: mkBtn(),
+      recBatchBody: { innerHTML: '' },
+      recBatchFootNote: { textContent: '' },
+      recBatchSummaryBar: { innerHTML: '' }
+    };
+    let pollStep = 0;
+    let mode = 'needs_repreview';
+    let refreshCount = 0;
+    const recCtx = {
+      currentTaskId: 'task-rec',
+      _currentRecommendedPlan: { plan_id: 'plan-1' },
+      _recBatchAbortCtrl: null,
+      _recExecPollToken: 0,
+      taskList: [{ id: 'task-rec', _seasonsLoaded: true }],
+      document: {
+        getElementById(id) { return recEls[id] || null; }
+      },
+      setTimeout,
+      openModal() {},
+      openRecommendedBatchModal() {},
+      loadTasks: async () => { refreshCount++; },
+      selectTask: async () => { refreshCount++; },
+      alert(m) { throw new Error('Unexpected alert: ' + m); },
+      api: async (path) => {
+        if (path === '/api/archive/recommended-execute-start') {
+          pollStep = 0;
+          return { ok: true, job_id: 'job-1', status: 'running', phase: 'fingerprint_check', done_steps: 0, total_steps: 2, message: '校验指纹中' };
+        }
+        if (path.startsWith('/api/archive/recommended-execute-status/')) {
+          pollStep++;
+          if (mode === 'needs_repreview') {
+            return {
+              ok: true,
+              job_id: 'job-1',
+              status: 'needs_repreview',
+              result: {
+                ok: false,
+                needs_repreview: true,
+                changed_seasons: [{ show_name: '测试剧', season_number: 1, added_videos: ['/src/new.mp4'], modified_videos: [] }],
+                message: '检测到 1 个季新增视频'
+              }
+            };
+          }
+          if (pollStep === 1) {
+            return { ok: true, job_id: 'job-1', status: 'running', phase: 'clean', done_steps: 1, total_steps: 2, message: '清理中' };
+          }
+          return {
+            ok: true,
+            job_id: 'job-1',
+            status: 'completed',
+            result: {
+              ok: true,
+              message: '批量推荐处理完成：目录归并 1 组、副本清理 1 季',
+              outcomes: { to_download: [{ show_name: '剧A', season_number: 1 }], to_airing: [], to_archive: [], source_cleaned: [], remaining_anomalies: [], skipped_items: [] },
+              failed_steps: []
+            }
+          };
+        }
+        throw new Error('Unexpected API path: ' + path);
+      }
+    };
+    const extractFn = name => {
+      const m = htmlContent.match(new RegExp(`(?:async\\s+)?function\\s+${name}\\b[^]*?\\n    \\}`));
+      assert(m, `找不到函数 ${name}`);
+      return m[0];
+    };
+    vm.createContext(recCtx);
+    vm.runInContext([
+      extractFn('escapeHtml'),
+      'let _currentRecommendedPlan = recCtx_initPlan;',
+    ].join(';\n'), Object.assign(recCtx, { recCtx_initPlan: { plan_id: 'plan-1' } }));
+    vm.runInContext([
+      'var _recExecPollToken = 0;',
+      extractFn('_resetRecBatchExecBtn'),
+      extractFn('_renderRecBatchProgress'),
+      extractFn('executeRecommendedBatchPlan')
+    ].join(';\n'), recCtx);
+
+    // Case 1: needs_repreview 不得伪装为完成，且按钮必须变为重新生成预览
+    await recCtx.executeRecommendedBatchPlan();
+    assert(recEls.recBatchBody.innerHTML.includes('目录文件变化安全拦截'), 'needs_repreview 必须明确展示拦截提示');
+    assert(!recEls.recBatchBody.innerHTML.includes('推荐处理执行完成'), 'needs_repreview 不得渲染执行完成卡片');
+    assert(recEls.recBatchExecBtn.innerHTML.includes('重新生成预览并核对'), 'needs_repreview 后按钮必须提示重新生成预览');
+    assert.strictEqual(recEls.recBatchExecBtn.disabled, false);
+
+    // Case 2: 正常后台轮询完成，必须刷新列表且按钮不得停留在转圈状态
+    mode = 'completed';
+    await recCtx.executeRecommendedBatchPlan();
+    assert(recEls.recBatchBody.innerHTML.includes('批量推荐处理完成'), '完成后必须展示汇总结果');
+    assert(!recEls.recBatchExecBtn.innerHTML.includes('fa-spin'), '完成后按钮不得继续旋转');
+    assert(!recEls.recBatchExecBtn.innerHTML.includes('正在分步执行'), '完成后按钮不得残留正在执行文案');
+    assert(recEls.recBatchExecBtn.innerHTML.includes('本轮已执行完成'), '完成后按钮必须清晰标记已完成');
+    assert.strictEqual(refreshCount, 2, '完成后必须调用 loadTasks 和 selectTask 刷新列表');
+    console.log('✓ 执行推荐处理异步轮询、指纹拦截分支与按钮状态复位测试通过');
+  }
+
+  // 回归测试：补缺站点规则刷新回显不丢失（修复 gapFillDraftRules 预置真值屏蔽加载与双页签协同保存）
+  {
+    const alerts = [];
+    const savedPayloads = [];
+    const gfEls = {
+      gapFillSitesModal: { showModal() {} },
+      gfSitesInstanceBadge: { textContent: '' },
+      gfSitesFetchTime: { textContent: '' },
+      gfTabBtnAnime: { textContent: '', className: '' },
+      gfTabBtnNonAnime: { textContent: '', className: '' },
+      gfCategoryStatusSelect: { value: 'active' },
+      gfRuleVersionBadge: { textContent: '', className: '' },
+      gfSelectedSitesList: { innerHTML: '' },
+      gfSelectedCountText: { textContent: '' },
+      gfUnselectedSitesList: { innerHTML: '' },
+      gfUnselectedSearchInput: { value: '' },
+      gfSaveRuleBtn: { disabled: false, innerHTML: '' },
+      gfSitesConflictAlert: { classList: { add() {}, remove() {} } },
+      gfSitesConflictMsg: { textContent: '' },
+      gapFillSitesToolbarBadge: { textContent: '' }
+    };
+    const gfCtx = {
+      document: { getElementById(id) { return gfEls[id] || null; } },
+      alert(m) { alerts.push(m); },
+      confirm() { return true; },
+      console: { warn() {}, log() {}, error() {} },
+      api: async (path, opts) => {
+        if (path === '/api/moviepilot/gap-fill/sites/rules' && (!opts || opts.method !== 'POST')) {
+          return {
+            ok: true,
+            instance_key: 'https___mp.test_8920',
+            anime: { category: 'anime', selected_site_ids: [16, 17], status: 'uninitialized', version: 1, is_draft: true },
+            non_anime: { category: 'non_anime', selected_site_ids: [15, 14, 5, 1, 4], status: 'active', version: 3, is_draft: false }
+          };
+        }
+        if (path === '/api/moviepilot/gap-fill/sites/catalog') {
+          return {
+            ok: true,
+            instance_key: 'https___mp.test_8920',
+            sites: [
+              { id: 15, name: 'Site15', domain: 's15.test', is_active: true },
+              { id: 14, name: 'Site14', domain: 's14.test', is_active: true },
+              { id: 16, name: 'Site16', domain: 's16.test', is_active: true },
+              { id: 17, name: 'Site17', domain: 's17.test', is_active: true },
+              { id: 99, name: 'Site99', domain: 's99.test', is_active: true }
+            ]
+          };
+        }
+        if (path === '/api/moviepilot/gap-fill/sites/rules' && opts && opts.method === 'POST') {
+          const body = JSON.parse(opts.body);
+          savedPayloads.push(body);
+          return {
+            ok: true,
+            rule: {
+              category: body.category,
+              selected_site_ids: body.selected_site_ids,
+              status: body.status,
+              version: (body.expected_version || 1) + 1,
+              is_draft: false
+            }
+          };
+        }
+        throw new Error('Unexpected API path: ' + path);
+      }
+    };
+    const extractFn = name => {
+      const m = htmlContent.match(new RegExp(`(?:async\\s+)?function\\s+${name}\\b[^]*?\\n    \\}`));
+      assert(m, `找不到函数 ${name}`);
+      return m[0];
+    };
+    vm.createContext(gfCtx);
+    vm.runInContext([
+      extractFn('escapeHtml'),
+      'let gapFillRulesCache = null;',
+      'let gapFillSitesCatalogCache = null;',
+      'let activeGapFillSitesTab = "anime";',
+      'let gapFillDraftRules = null;',
+      'let _gapFillDraftDirty = { anime: false, non_anime: false };',
+      extractFn('_ensureGapFillDraftRules'),
+      extractFn('loadGapFillSitesRules'),
+      extractFn('refreshGapFillSitesCatalog'),
+      extractFn('openGapFillSitesModal'),
+      extractFn('switchGapFillSitesTab'),
+      extractFn('onGapCategoryStatusChange'),
+      extractFn('renderGapFillSitesModal'),
+      extractFn('renderGapFillSelectedSites'),
+      extractFn('renderGapFillUnselectedSites'),
+      extractFn('addGapFillSite'),
+      extractFn('saveCurrentGapFillSiteRule'),
+      extractFn('updateGapFillSitesToolbarBadge')
+    ].join(';\n'), gfCtx);
+
+    // 断言源码本身初始值必须是 null 而非真值空对象
+    assert(/let\s+gapFillDraftRules\s*=\s*null\s*;/.test(htmlContent), 'gapFillDraftRules 必须初始化为 null');
+
+    // 模拟刷新页面后冷启动并打开弹窗：必须直接加载数据库持久化规则，绝不空置
+    await gfCtx.openGapFillSitesModal();
+    gfCtx.switchGapFillSitesTab('non_anime');
+    assert.strictEqual(gfEls.gfSelectedCountText.textContent, '已选 5 站', '刷新后非动漫已保存规则必须完整回显 5 站');
+    assert(gfEls.gfSelectedSitesList.innerHTML.includes('Site15'), '已选列表必须渲染 Site15');
+    assert(gfEls.gfRuleVersionBadge.textContent.includes('已保存 v3'), '状态角标必须显示已保存 v3');
+    assert(gfEls.gapFillSitesToolbarBadge.textContent.includes('动漫未保存 · 非动漫 5 站'), '工具栏角标必须清晰区分草稿与已保存');
+
+    // 在动漫页加一个站点、切到非动漫页加一个站点，一键保存必须同时持久化两个页签
+    gfCtx.switchGapFillSitesTab('anime');
+    gfCtx.addGapFillSite(99);
+    gfCtx.switchGapFillSitesTab('non_anime');
+    gfCtx.addGapFillSite(99);
+    await gfCtx.saveCurrentGapFillSiteRule();
+    assert.strictEqual(savedPayloads.length, 2, '同时修改两页签后点击保存必须两套规则一起落库');
+    assert.deepStrictEqual(savedPayloads.map(x => x.category).sort(), ['anime', 'non_anime']);
+    assert(alerts[0].includes('【动漫】') && alerts[0].includes('【非动漫】'), '保存提示必须告知两套规则均已保存');
+    console.log('✓ 补缺站点规则刷新回显持久化与双页签协同保存回归测试通过');
+  }
 })().catch(error => {console.error(error); process.exitCode = 1;});

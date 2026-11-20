@@ -115,7 +115,7 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.48</span>
+              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.50</span>
             </div>
             <!-- 完善后的命名 -->
             <p class="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">智能媒体库整理与归档工作台</p>
@@ -1458,7 +1458,7 @@
         <div class="flex gap-2">
           <button type="button" onclick="document.getElementById('gapFillSitesModal').close()" class="px-4 py-1.5 rounded-lg bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-semibold transition">关闭</button>
           <button type="button" id="gfSaveRuleBtn" onclick="saveCurrentGapFillSiteRule()" class="px-4 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold shadow-md shadow-blue-500/20 transition flex items-center gap-1.5">
-            <i class="fa-solid fa-floppy-disk"></i> 保存当前规则
+            <i class="fa-solid fa-floppy-disk"></i> 保存生效规则
           </button>
         </div>
       </div>
@@ -4401,9 +4401,14 @@
     function openModal(id) { document.getElementById(id).classList.remove('hidden'); }
     function closeModal(id) {
       document.getElementById(id).classList.add('hidden');
-      if (id === 'recommendedBatchModal' && typeof _recBatchAbortCtrl !== 'undefined' && _recBatchAbortCtrl) {
-        try { _recBatchAbortCtrl.abort('modal_closed'); } catch (_) {}
-        _recBatchAbortCtrl = null;
+      if (id === 'recommendedBatchModal') {
+        if (typeof _recBatchAbortCtrl !== 'undefined' && _recBatchAbortCtrl) {
+          try { _recBatchAbortCtrl.abort('modal_closed'); } catch (_) {}
+          _recBatchAbortCtrl = null;
+        }
+        if (typeof _recExecPollToken !== 'undefined') {
+          _recExecPollToken += 1;
+        }
       }
     }
 
@@ -4666,10 +4671,22 @@
     // ── 统一批量「执行推荐处理」预览与执行 (v2.5.45) ─────────────
     let _currentRecommendedPlan = null;
     let _recBatchAbortCtrl = null;
+    let _recExecPollToken = 0;
+
+    function _resetRecBatchExecBtn(label = '确认执行推荐处理', disabled = true, onClickFn = executeRecommendedBatchPlan) {
+      const execBtn = document.getElementById('recBatchExecBtn');
+      if (!execBtn) return null;
+      execBtn.classList.remove('hidden');
+      execBtn.disabled = disabled;
+      execBtn.onclick = onClickFn;
+      execBtn.innerHTML = `<i class="fa-solid fa-play text-xs"></i><span>${escapeHtml(label)}</span>`;
+      return execBtn;
+    }
 
     async function openRecommendedBatchModal() {
       if (!currentTaskId) return;
       _currentRecommendedPlan = null;
+      _recExecPollToken += 1;
       if (_recBatchAbortCtrl) {
         try { _recBatchAbortCtrl.abort('superseded'); } catch (_) {}
       }
@@ -4681,9 +4698,8 @@
 
       const summaryEl = document.getElementById('recBatchSummaryBar');
       const bodyEl = document.getElementById('recBatchBody');
-      const execBtn = document.getElementById('recBatchExecBtn');
+      const execBtn = _resetRecBatchExecBtn('确认执行推荐处理', true, executeRecommendedBatchPlan);
       const footEl = document.getElementById('recBatchFootNote');
-      if (execBtn) execBtn.disabled = true;
       if (summaryEl) summaryEl.innerHTML = '';
       if (bodyEl) {
         bodyEl.innerHTML = `<div class="p-8 text-center text-slate-400"><i class="fa-solid fa-spinner fa-spin text-2xl mb-2 text-amber-500"></i><p>正在生成推荐处理批次计划与文件指纹...</p></div>`;
@@ -4788,23 +4804,100 @@
       }
     }
 
+    function _renderRecBatchProgress(bodyEl, snap) {
+      if (!bodyEl) return;
+      const done = Number(snap?.done_steps || 0);
+      const total = Math.max(1, Number(snap?.total_steps || 1));
+      const pct = Math.min(100, Math.round((done / total) * 100));
+      const phaseLabels = {
+        fingerprint_check: '步骤 0 · 并发校验文件指纹',
+        merge: '步骤 1/3 · 同作品目录规范化归并',
+        clean: '步骤 2/3 · 同季重复版本清理',
+        redundant: '步骤 3/3 · 已归档源端清理',
+        recalc: '收尾 · 重算任务汇总与五模块状态',
+      };
+      const phaseTitle = phaseLabels[snap?.phase] || '正在执行推荐处理';
+      const msg = snap?.message || '正在处理中...';
+      bodyEl.innerHTML = `
+        <div class="p-4 rounded-xl bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 space-y-3">
+          <div class="flex items-center justify-between gap-2">
+            <div class="font-bold text-amber-800 dark:text-amber-300 flex items-center gap-2">
+              <i class="fa-solid fa-spinner fa-spin"></i>
+              <span>${escapeHtml(phaseTitle)}</span>
+            </div>
+            <span class="font-mono text-[11px] font-bold text-amber-700 dark:text-amber-300">${done} / ${total} (${pct}%)</span>
+          </div>
+          <div class="w-full h-2 rounded-full bg-amber-100 dark:bg-slate-800 overflow-hidden">
+            <div class="h-full bg-amber-500 transition-all duration-300" style="width:${pct}%"></div>
+          </div>
+          <div class="text-[11px] text-slate-600 dark:text-slate-300">${escapeHtml(msg)}</div>
+        </div>
+      `;
+    }
+
     async function executeRecommendedBatchPlan() {
       if (!currentTaskId || !_currentRecommendedPlan) return;
       const execBtn = document.getElementById('recBatchExecBtn');
       const bodyEl = document.getElementById('recBatchBody');
-      const origHtml = execBtn ? execBtn.innerHTML : '';
+      const footEl = document.getElementById('recBatchFootNote');
+      const pollToken = ++_recExecPollToken;
       if (execBtn) {
         execBtn.disabled = true;
-        execBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin text-xs"></i><span>正在分步执行与重算...</span>';
+        execBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin text-xs"></i><span>后台执行中...</span>';
       }
       try {
-        const res = await api('/api/archive/recommended-execute', {
+        let snap = await api('/api/archive/recommended-execute-start', {
           method: 'POST',
           body: JSON.stringify({
             task_id: currentTaskId,
             plan_id: _currentRecommendedPlan.plan_id
           })
         });
+        _renderRecBatchProgress(bodyEl, snap);
+
+        while (snap && snap.status === 'running') {
+          await new Promise(r => setTimeout(r, 1000));
+          if (pollToken !== _recExecPollToken) return;
+          snap = await api(`/api/archive/recommended-execute-status/${encodeURIComponent(snap.job_id)}`);
+          if (pollToken !== _recExecPollToken) return;
+          if (snap && snap.status === 'running') {
+            _renderRecBatchProgress(bodyEl, snap);
+          }
+        }
+
+        if (snap?.status === 'failed') {
+          throw new Error(snap?.error || snap?.message || '后台执行推荐处理失败');
+        }
+
+        const res = snap?.result || {};
+        if (res.needs_repreview || snap?.status === 'needs_repreview') {
+          const changed = Array.isArray(res.changed_seasons) ? res.changed_seasons : [];
+          if (bodyEl) {
+            bodyEl.innerHTML = `
+              <div class="p-4 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-300 dark:border-amber-700 space-y-2.5">
+                <div class="font-bold text-amber-800 dark:text-amber-300 flex items-center gap-1.5">
+                  <i class="fa-solid fa-triangle-exclamation"></i>
+                  <span>目录文件变化安全拦截 · 尚未执行任何删除</span>
+                </div>
+                <div class="text-[11px] text-amber-700 dark:text-amber-200">${escapeHtml(res.message || snap?.message || '检测到目录文件与预览快照不一致，请重新生成预览后再确认执行。')}</div>
+                ${changed.length > 0 ? `<div class="space-y-1.5 pt-1">${changed.map(ch => `
+                  <div class="p-2 rounded-lg bg-white/80 dark:bg-slate-900/60 border border-amber-200 dark:border-amber-800 text-[11px]">
+                    <div class="font-bold text-slate-800 dark:text-slate-200">${escapeHtml(ch.show_name || '')} S${String(ch.season_number || 1).padStart(2, '0')}</div>
+                    ${(ch.added_videos || []).length > 0 ? `<div class="text-slate-600 dark:text-slate-300 font-mono text-[10px]">新增: ${escapeHtml((ch.added_videos || []).join(', '))}</div>` : ''}
+                    ${(ch.modified_videos || []).length > 0 ? `<div class="text-slate-600 dark:text-slate-300 font-mono text-[10px]">变化: ${escapeHtml((ch.modified_videos || []).join(', '))}</div>` : ''}
+                  </div>`).join('')}</div>` : ''}
+              </div>
+            `;
+          }
+          if (footEl) footEl.textContent = '为保障网盘数据安全，已暂停本轮执行；请点击右侧按钮重新获取最新文件指纹。';
+          _resetRecBatchExecBtn('重新生成预览并核对', false, openRecommendedBatchModal);
+          return;
+        }
+
+        if (!res.ok && !res.partial_success) {
+          throw new Error(res.message || '执行推荐处理未完成');
+        }
+
         const out = res.outcomes || {};
         const fmtList = (arr) => (Array.isArray(arr) && arr.length > 0)
           ? arr.map(x => {
@@ -4820,7 +4913,7 @@
             <div class="p-3.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 space-y-2">
               <div class="font-bold text-emerald-800 dark:text-emerald-300 flex items-center gap-1.5">
                 <i class="fa-solid fa-circle-check"></i>
-                <span>推荐处理执行完成（含局部重算与四类去向汇总）</span>
+                <span>${escapeHtml(res.message || '推荐处理执行完成（含局部重算与四类去向汇总）')}</span>
               </div>
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
                 <div class="p-2 rounded-lg bg-white/80 dark:bg-slate-900/60 border border-blue-200 dark:border-blue-800">
@@ -4844,16 +4937,20 @@
             </div>
           `;
         }
+        if (footEl) footEl.textContent = '本轮推荐处理已完成并已自动刷新列表，可点击关闭返回主界面。';
+        if (execBtn && execBtn.isConnected) {
+          execBtn.disabled = true;
+          execBtn.innerHTML = '<i class="fa-solid fa-check text-xs"></i><span>本轮已执行完成</span>';
+        }
         const task = taskList.find(t => t.id === currentTaskId);
         if (task) task._seasonsLoaded = false;
         await loadTasks();
         await selectTask(currentTaskId);
       } catch (e) {
-        alert(`执行推荐处理失败: ${e.message}`);
-        if (execBtn && execBtn.isConnected) {
-          execBtn.disabled = false;
-          execBtn.innerHTML = origHtml;
+        if (bodyEl) {
+          bodyEl.innerHTML = `<div class="p-4 rounded-xl bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300 text-xs">执行推荐处理失败：${escapeHtml(e.message || '未知错误')}</div>`;
         }
+        _resetRecBatchExecBtn('重新确认执行', false, executeRecommendedBatchPlan);
       }
     }
 
@@ -5514,10 +5611,18 @@
     let gapFillRulesCache = null;
     let gapFillSitesCatalogCache = null;
     let activeGapFillSitesTab = 'anime';
-    let gapFillDraftRules = {
-      anime: { selected_site_ids: [], status: 'active', version: 1 },
-      non_anime: { selected_site_ids: [], status: 'active', version: 1 }
-    };
+    let gapFillDraftRules = null;
+    let _gapFillDraftDirty = { anime: false, non_anime: false };
+
+    function _ensureGapFillDraftRules() {
+      if (!gapFillDraftRules) {
+        gapFillDraftRules = {
+          anime: { selected_site_ids: [], status: 'uninitialized', version: 1, is_draft: true },
+          non_anime: { selected_site_ids: [], status: 'uninitialized', version: 1, is_draft: true }
+        };
+      }
+      return gapFillDraftRules;
+    }
 
     async function loadGapFillSitesRules(forceReload = false) {
       try {
@@ -5525,11 +5630,21 @@
         if (res.ok) {
           gapFillRulesCache = {
             instance_key: res.instance_key || 'default',
-            anime: res.anime || { selected_site_ids: [], status: 'uninitialized', version: 1 },
-            non_anime: res.non_anime || { selected_site_ids: [], status: 'uninitialized', version: 1 }
+            anime: res.anime || { selected_site_ids: [], status: 'uninitialized', version: 1, is_draft: true },
+            non_anime: res.non_anime || { selected_site_ids: [], status: 'uninitialized', version: 1, is_draft: true }
           };
+          const instEl = document.getElementById('gfSitesInstanceBadge');
+          if (instEl) instEl.textContent = gapFillRulesCache.instance_key || 'default';
+
           if (!gapFillDraftRules || forceReload) {
             gapFillDraftRules = JSON.parse(JSON.stringify(gapFillRulesCache));
+            _gapFillDraftDirty = { anime: false, non_anime: false };
+          } else {
+            for (const cat of ['anime', 'non_anime']) {
+              if (!_gapFillDraftDirty[cat]) {
+                gapFillDraftRules[cat] = JSON.parse(JSON.stringify(gapFillRulesCache[cat]));
+              }
+            }
           }
           updateGapFillSitesToolbarBadge();
           renderGapFillSitesModal();
@@ -5571,10 +5686,35 @@
 
     function switchGapFillSitesTab(tab) {
       activeGapFillSitesTab = tab;
+      renderGapFillSitesModal();
+    }
+
+    function onGapCategoryStatusChange() {
+      const drafts = _ensureGapFillDraftRules();
+      const sel = document.getElementById('gfCategoryStatusSelect');
+      if (sel && drafts[activeGapFillSitesTab]) {
+        drafts[activeGapFillSitesTab].status = sel.value;
+        _gapFillDraftDirty[activeGapFillSitesTab] = true;
+        renderGapFillSitesModal();
+      }
+    }
+
+    function renderGapFillSitesModal() {
+      const drafts = _ensureGapFillDraftRules();
       const btnAnime = document.getElementById('gfTabBtnAnime');
       const btnNonAnime = document.getElementById('gfTabBtnNonAnime');
       if (btnAnime && btnNonAnime) {
-        if (tab === 'anime') {
+        const fmtTabTag = (cat) => {
+          const r = drafts[cat];
+          if (!r || r.status === 'uninitialized' || r.is_draft) return '未保存草稿';
+          if (r.status === 'paused') return '已暂停';
+          return `${(r.selected_site_ids || []).length} 站`;
+        };
+        const aDirty = _gapFillDraftDirty.anime ? ' •' : '';
+        const naDirty = _gapFillDraftDirty.non_anime ? ' •' : '';
+        btnAnime.textContent = `🎨 动漫补缺规则 (${fmtTabTag('anime')})${aDirty}`;
+        btnNonAnime.textContent = `🎬 非动漫补缺规则 (${fmtTabTag('non_anime')})${naDirty}`;
+        if (activeGapFillSitesTab === 'anime') {
           btnAnime.className = 'px-4 py-1.5 rounded-lg font-bold transition bg-white dark:bg-slate-900 text-blue-600 dark:text-blue-400 shadow-xs';
           btnNonAnime.className = 'px-4 py-1.5 rounded-lg font-bold transition text-slate-600 dark:text-slate-400 hover:text-slate-900';
         } else {
@@ -5582,22 +5722,25 @@
           btnAnime.className = 'px-4 py-1.5 rounded-lg font-bold transition text-slate-600 dark:text-slate-400 hover:text-slate-900';
         }
       }
-      renderGapFillSitesModal();
-    }
 
-    function onGapCategoryStatusChange() {
-      const sel = document.getElementById('gfCategoryStatusSelect');
-      if (sel && gapFillDraftRules[activeGapFillSitesTab]) {
-        gapFillDraftRules[activeGapFillSitesTab].status = sel.value;
-      }
-    }
-
-    function renderGapFillSitesModal() {
-      const draft = gapFillDraftRules[activeGapFillSitesTab] || { selected_site_ids: [], status: 'active', version: 1 };
+      const draft = drafts[activeGapFillSitesTab] || { selected_site_ids: [], status: 'active', version: 1 };
       const sel = document.getElementById('gfCategoryStatusSelect');
       if (sel) sel.value = draft.status === 'paused' ? 'paused' : 'active';
       const verBadge = document.getElementById('gfRuleVersionBadge');
-      if (verBadge) verBadge.textContent = `v${draft.version || 1}${draft.is_draft ? ' (草稿)' : ''}`;
+      if (verBadge) {
+        const isDirty = Boolean(_gapFillDraftDirty[activeGapFillSitesTab]);
+        const isDraft = Boolean(draft.is_draft || draft.status === 'uninitialized');
+        if (isDirty) {
+          verBadge.textContent = `v${draft.version || 1} (有未保存修改)`;
+          verBadge.className = 'text-[11px] font-mono px-2 py-0.5 rounded bg-amber-100 dark:bg-amber-900/60 text-amber-700 dark:text-amber-300';
+        } else if (isDraft) {
+          verBadge.textContent = `v${draft.version || 1} (默认草稿·待保存)`;
+          verBadge.className = 'text-[11px] font-mono px-2 py-0.5 rounded bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300';
+        } else {
+          verBadge.textContent = `已保存 v${draft.version || 1}`;
+          verBadge.className = 'text-[11px] font-mono px-2 py-0.5 rounded bg-emerald-100 dark:bg-emerald-900/60 text-emerald-700 dark:text-emerald-300';
+        }
+      }
 
       renderGapFillSelectedSites();
       renderGapFillUnselectedSites();
@@ -5608,7 +5751,7 @@
       const countEl = document.getElementById('gfSelectedCountText');
       if (!container) return;
 
-      const draft = gapFillDraftRules[activeGapFillSitesTab] || { selected_site_ids: [] };
+      const draft = _ensureGapFillDraftRules()[activeGapFillSitesTab] || { selected_site_ids: [] };
       const selectedIds = draft.selected_site_ids || [];
       if (countEl) countEl.textContent = `已选 ${selectedIds.length} 站`;
 
@@ -5663,7 +5806,7 @@
       const container = document.getElementById('gfUnselectedSitesList');
       if (!container) return;
 
-      const draft = gapFillDraftRules[activeGapFillSitesTab] || { selected_site_ids: [] };
+      const draft = _ensureGapFillDraftRules()[activeGapFillSitesTab] || { selected_site_ids: [] };
       const selectedSet = new Set((draft.selected_site_ids || []).map(String));
       const search = (document.getElementById('gfUnselectedSearchInput')?.value || '').trim().toLowerCase();
 
@@ -5691,44 +5834,47 @@
     }
 
     function moveGapFillSite(index, delta) {
-      const draft = gapFillDraftRules[activeGapFillSitesTab];
+      const draft = _ensureGapFillDraftRules()[activeGapFillSitesTab];
       if (!draft || !draft.selected_site_ids) return;
       const target = index + delta;
       if (target < 0 || target >= draft.selected_site_ids.length) return;
       const temp = draft.selected_site_ids[index];
       draft.selected_site_ids[index] = draft.selected_site_ids[target];
       draft.selected_site_ids[target] = temp;
-      renderGapFillSelectedSites();
+      _gapFillDraftDirty[activeGapFillSitesTab] = true;
+      renderGapFillSitesModal();
     }
 
     function removeGapFillSite(index) {
-      const draft = gapFillDraftRules[activeGapFillSitesTab];
+      const draft = _ensureGapFillDraftRules()[activeGapFillSitesTab];
       if (!draft || !draft.selected_site_ids) return;
       draft.selected_site_ids.splice(index, 1);
-      renderGapFillSelectedSites();
-      renderGapFillUnselectedSites();
+      _gapFillDraftDirty[activeGapFillSitesTab] = true;
+      renderGapFillSitesModal();
     }
 
     function addGapFillSite(siteId) {
-      const draft = gapFillDraftRules[activeGapFillSitesTab];
+      const draft = _ensureGapFillDraftRules()[activeGapFillSitesTab];
       if (!draft) return;
       if (!draft.selected_site_ids) draft.selected_site_ids = [];
       if (!draft.selected_site_ids.includes(siteId)) {
         draft.selected_site_ids.push(siteId);
+        _gapFillDraftDirty[activeGapFillSitesTab] = true;
       }
-      renderGapFillSelectedSites();
-      renderGapFillUnselectedSites();
+      renderGapFillSitesModal();
     }
 
     function copyOppositeGapFillRule() {
+      const drafts = _ensureGapFillDraftRules();
       const opp = activeGapFillSitesTab === 'anime' ? 'non_anime' : 'anime';
       const oppLabel = opp === 'anime' ? '动漫' : '非动漫';
       const curLabel = activeGapFillSitesTab === 'anime' ? '动漫' : '非动漫';
       if (!confirm(`是否将【${oppLabel}】已选站点复制为当前【${curLabel}】的草稿？（点击保存后正式生效）`)) return;
 
-      const oppDraft = gapFillDraftRules[opp];
+      const oppDraft = drafts[opp];
       if (oppDraft && Array.isArray(oppDraft.selected_site_ids)) {
-        gapFillDraftRules[activeGapFillSitesTab].selected_site_ids = [...oppDraft.selected_site_ids];
+        drafts[activeGapFillSitesTab].selected_site_ids = [...oppDraft.selected_site_ids];
+        _gapFillDraftDirty[activeGapFillSitesTab] = true;
         renderGapFillSitesModal();
       }
     }
@@ -5739,8 +5885,14 @@
       const conflictMsg = document.getElementById('gfSitesConflictMsg');
       if (conflictAlert) conflictAlert.classList.add('hidden');
 
-      const draft = gapFillDraftRules[activeGapFillSitesTab];
-      if (!draft) return;
+      const drafts = _ensureGapFillDraftRules();
+      const catsToSave = [];
+      for (const cat of ['anime', 'non_anime']) {
+        if (cat === activeGapFillSitesTab || _gapFillDraftDirty[cat]) {
+          catsToSave.push(cat);
+        }
+      }
+      if (!catsToSave.length) return;
 
       if (saveBtn) {
         saveBtn.disabled = true;
@@ -5748,24 +5900,33 @@
       }
 
       try {
-        const payload = {
-          category: activeGapFillSitesTab,
-          selected_site_ids: draft.selected_site_ids || [],
-          status: draft.status || 'active',
-          expected_version: draft.version
-        };
-        const res = await api('/api/moviepilot/gap-fill/sites/rules', {
-          method: 'POST',
-          body: JSON.stringify(payload)
-        });
-
-        if (res.ok && res.rule) {
-          if (!gapFillRulesCache) gapFillRulesCache = {};
-          gapFillRulesCache[activeGapFillSitesTab] = res.rule;
-          gapFillDraftRules[activeGapFillSitesTab] = JSON.parse(JSON.stringify(res.rule));
-          updateGapFillSitesToolbarBadge();
-          renderGapFillSitesModal();
-          alert(`【${activeGapFillSitesTab === 'anime' ? '动漫' : '非动漫'}】补缺站点规则保存成功（新版本 v${res.rule.version}）`);
+        const savedNotes = [];
+        for (const cat of catsToSave) {
+          const draft = drafts[cat];
+          if (!draft) continue;
+          const targetStatus = (!draft.status || draft.status === 'uninitialized') ? 'active' : draft.status;
+          const payload = {
+            category: cat,
+            selected_site_ids: draft.selected_site_ids || [],
+            status: targetStatus,
+            expected_version: draft.version
+          };
+          const res = await api('/api/moviepilot/gap-fill/sites/rules', {
+            method: 'POST',
+            body: JSON.stringify(payload)
+          });
+          if (res.ok && res.rule) {
+            if (!gapFillRulesCache) gapFillRulesCache = {};
+            gapFillRulesCache[cat] = res.rule;
+            drafts[cat] = JSON.parse(JSON.stringify(res.rule));
+            _gapFillDraftDirty[cat] = false;
+            savedNotes.push(`【${cat === 'anime' ? '动漫' : '非动漫'}】(${(res.rule.selected_site_ids || []).length}站·v${res.rule.version})`);
+          }
+        }
+        updateGapFillSitesToolbarBadge();
+        renderGapFillSitesModal();
+        if (savedNotes.length > 0) {
+          alert(`补缺站点规则保存成功：${savedNotes.join('、')}`);
         }
       } catch (e) {
         if (conflictAlert && (e.status === 409 || String(e.message).includes('修改'))) {
@@ -5777,7 +5938,7 @@
       } finally {
         if (saveBtn) {
           saveBtn.disabled = false;
-          saveBtn.innerHTML = '<i class="fa-solid fa-floppy-disk"></i> 保存当前规则';
+          saveBtn.innerHTML = '<i class="fa-solid fa-floppy-disk"></i> 保存生效规则';
         }
       }
     }
@@ -5785,14 +5946,13 @@
     function updateGapFillSitesToolbarBadge() {
       const badge = document.getElementById('gapFillSitesToolbarBadge');
       if (!badge || !gapFillRulesCache) return;
-      const a = gapFillRulesCache.anime;
-      const na = gapFillRulesCache.non_anime;
-      const aCount = (a && a.selected_site_ids) ? a.selected_site_ids.length : 0;
-      const naCount = (na && na.selected_site_ids) ? na.selected_site_ids.length : 0;
-
-      let aText = a?.status === 'paused' ? '动漫(暂停)' : `动漫 ${aCount} 站`;
-      let naText = na?.status === 'paused' ? '非动漫(暂停)' : `非动漫 ${naCount} 站`;
-      badge.textContent = `${aText} · ${naText}`;
+      const fmtCat = (label, r) => {
+        if (!r || r.status === 'uninitialized' || r.is_draft) return `${label}未保存`;
+        if (r.status === 'paused') return `${label}(暂停)`;
+        const cnt = Array.isArray(r.selected_site_ids) ? r.selected_site_ids.length : 0;
+        return `${label} ${cnt} 站`;
+      };
+      badge.textContent = `${fmtCat('动漫', gapFillRulesCache.anime)} · ${fmtCat('非动漫', gapFillRulesCache.non_anime)}`;
     }
 
     async function toggleWorkCategory(recordId, tmdbId, showName, targetCategory) {

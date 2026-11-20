@@ -88,8 +88,15 @@ def rank_copy(f: Dict[str, Any]) -> Tuple[int, int, int, int, str]:
     return (res_score, clean_score, size, codec_score, mod_str)
 
 
+def _strip_cd2_dup_suffix(path: str) -> str:
+    """剥离 CloudDrive2/网盘同名冲突自动附加的 (N) 后缀，用于识别纯展示序号交换。"""
+    parent, name = posixpath.split(str(path or ""))
+    clean_name = re.sub(r"\(\d+\)(?=\.[^./\\]+$|$)", "", name)
+    return posixpath.join(parent, clean_name) if parent else clean_name
+
+
 def build_file_fingerprints(files: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    """构建文件稳定指纹映射（路径 -> 大小/修改时间），用于执行前局部复核防扩大删除范围 (G24)。"""
+    """构建文件稳定指纹映射（路径 -> 大小/修改时间/文件ID），用于执行前局部复核防扩大删除范围 (G24)。"""
     fps: Dict[str, Dict[str, Any]] = {}
     for f in files or []:
         if f.get("isDirectory"):
@@ -98,6 +105,7 @@ def build_file_fingerprints(files: List[Dict[str, Any]]) -> Dict[str, Dict[str, 
         if not p:
             continue
         fps[p] = {
+            "id": str(f.get("id") or ""),
             "name": str(f.get("name") or ""),
             "size": int(f.get("size") or 0),
             "modified": str(f.get("modified") or ""),
@@ -110,14 +118,54 @@ def compare_plan_fingerprints(
     current_files: List[Dict[str, Any]],
     planned_delete_paths: Set[str],
 ) -> Dict[str, Any]:
-    """执行前局部复核文件变化（G24）：检测新增/变化文件是否会导致删除范围扩大或预览失效。"""
+    """执行前局部复核文件变化（G24）：检测新增/变化文件是否会导致删除范围扩大或预览失效。
+
+    兼容 CloudDrive2 对 115 同名文件动态分配 `(1)` 后缀时发生的顺序交换：
+    若同一基础文件名簇内文件数量不变且 `(id, size, modified)`（或无 id 时的 `(size, modified)` 多重集）完全一致，
+    说明物理文件未发生任何增删改，不触发误报重预览。
+    """
+    from collections import Counter
+
     curr_fps = build_file_fingerprints(current_files)
-    added = sorted(set(curr_fps) - set(plan_fingerprints))
-    removed = sorted(set(plan_fingerprints) - set(curr_fps))
+
+    plan_groups: Dict[str, List[Tuple[str, Dict[str, Any]]]] = {}
+    for p, meta in (plan_fingerprints or {}).items():
+        plan_groups.setdefault(_strip_cd2_dup_suffix(p), []).append((p, meta))
+
+    curr_groups: Dict[str, List[Tuple[str, Dict[str, Any]]]] = {}
+    for p, meta in curr_fps.items():
+        curr_groups.setdefault(_strip_cd2_dup_suffix(p), []).append((p, meta))
+
+    stable_swapped_paths: Set[str] = set()
+    for base_key in set(plan_groups) & set(curr_groups):
+        pg = plan_groups[base_key]
+        cg = curr_groups[base_key]
+        if len(pg) <= 1 or len(pg) != len(cg):
+            continue
+        p_ids = [str(m.get("id") or "") for _, m in pg]
+        c_ids = [str(m.get("id") or "") for _, m in cg]
+        matched = False
+        if all(p_ids) and all(c_ids):
+            p_by_id = {str(m.get("id")): (int(m.get("size") or 0), str(m.get("modified") or "")) for _, m in pg}
+            c_by_id = {str(m.get("id")): (int(m.get("size") or 0), str(m.get("modified") or "")) for _, m in cg}
+            matched = p_by_id == c_by_id
+        else:
+            p_multi = Counter((int(m.get("size") or 0), str(m.get("modified") or "")) for _, m in pg)
+            c_multi = Counter((int(m.get("size") or 0), str(m.get("modified") or "")) for _, m in cg)
+            matched = p_multi == c_multi
+        if matched:
+            stable_swapped_paths.update(p for p, _ in pg)
+            stable_swapped_paths.update(p for p, _ in cg)
+
+    added = sorted(p for p in (set(curr_fps) - set(plan_fingerprints)) if p not in stable_swapped_paths)
+    removed = sorted(p for p in (set(plan_fingerprints) - set(curr_fps)) if p not in stable_swapped_paths)
     modified = sorted(
         p for p in (set(curr_fps) & set(plan_fingerprints))
-        if curr_fps[p]["size"] != plan_fingerprints[p]["size"]
-        or (curr_fps[p]["modified"] and plan_fingerprints[p]["modified"] and curr_fps[p]["modified"] != plan_fingerprints[p]["modified"])
+        if p not in stable_swapped_paths
+        and (
+            curr_fps[p]["size"] != plan_fingerprints[p]["size"]
+            or (curr_fps[p]["modified"] and plan_fingerprints[p]["modified"] and curr_fps[p]["modified"] != plan_fingerprints[p]["modified"])
+        )
     )
     # 仅新增视频或修改了关键视频/待删文件才触发重新预览
     added_videos = [p for p in added if MEDIA_REGEX.search(curr_fps[p]["name"])]

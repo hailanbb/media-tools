@@ -532,6 +532,23 @@ class TestV2540GapFillSitesModule(unittest.IsolatedAsyncioTestCase):
                 )
             self.assertIn("规则已被", str(ctx.exception))
 
+    async def test_06_work_preference_endpoint_returns_ok(self) -> None:
+        """验证 save_work_preference_endpoint 成功保存后正常返回，不得在 finally 块误抛 HTTPException。"""
+        from unittest.mock import AsyncMock, patch
+        from app.api.moviepilot import _GapFillWorkPreferenceRequest, save_work_preference_endpoint
+
+        async with self.Session() as db:
+            with patch("app.api.moviepilot.MoviePilotClient") as mock_mp_cls:
+                mock_mp = mock_mp_cls.return_value
+                mock_mp.origin = "http://mp.local:3000"
+                mock_mp.close = AsyncMock(return_value=None)
+                res = await save_work_preference_endpoint(
+                    _GapFillWorkPreferenceRequest(tmdb_id="123456", show_name="测试剧集", category="anime"),
+                    db=db,
+                )
+            self.assertTrue(res["ok"])
+            self.assertEqual(res["preference"]["category"], "anime")
+
 
 if __name__ == "__main__":
     unittest.main()

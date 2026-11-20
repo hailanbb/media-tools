@@ -1,6 +1,7 @@
 """MediaFlow v2.5.45 五模块处理流程重构与智能清理方案 — G01–G28 验收测试套件"""
 from __future__ import annotations
 
+import asyncio
 import atexit
 import json
 import os
@@ -810,6 +811,192 @@ class TestV2545FiveModuleRefactor(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(rec_dup_db.status, "download_needed")
 
         await engine.dispose()
+
+    def test_cd2_dup_suffix_swap_immunity_and_async_batch_job(self) -> None:
+        """G24/CD2 同名文件 (1) 后缀交换不误报、删重后 (1) 收缩后验通过，以及异步推荐执行轮询与合并清理协同。"""
+        # 1. CD2 (1) 交换免疫（含 id 与无 id 均成立）
+        fp_with_id = build_file_fingerprints([
+            {"id": "101", "name": "有歌 - S01E05.mp4", "path": "/src/有歌 - S01E05.mp4", "size": 492674601, "modified": "2026-10-27T10:52:26"},
+            {"id": "102", "name": "有歌 - S01E05(1).mp4", "path": "/src/有歌 - S01E05(1).mp4", "size": 492674601, "modified": "2026-10-27T10:52:31"},
+        ])
+        swap_live = [
+            {"id": "102", "name": "有歌 - S01E05.mp4", "path": "/src/有歌 - S01E05.mp4", "size": 492674601, "modified": "2026-10-27T10:52:31"},
+            {"id": "101", "name": "有歌 - S01E05(1).mp4", "path": "/src/有歌 - S01E05(1).mp4", "size": 492674601, "modified": "2026-10-27T10:52:26"},
+        ]
+        res_swap_id = compare_plan_fingerprints(fp_with_id, swap_live, {"/src/有歌 - S01E05(1).mp4"})
+        self.assertFalse(res_swap_id["changed"])
+        self.assertFalse(res_swap_id["needs_repreview"])
+
+        # 无 id 回退按 (size, modified) 多重集判定
+        fp_no_id = build_file_fingerprints([
+            {"name": "show - S01E01.mkv", "path": "/src/show - S01E01.mkv", "size": 500, "modified": "T1"},
+            {"name": "show - S01E01(1).mkv", "path": "/src/show - S01E01(1).mkv", "size": 500, "modified": "T2"},
+        ])
+        swap_no_id = [
+            {"name": "show - S01E01.mkv", "path": "/src/show - S01E01.mkv", "size": 500, "modified": "T2"},
+            {"name": "show - S01E01(1).mkv", "path": "/src/show - S01E01(1).mkv", "size": 500, "modified": "T1"},
+        ]
+        res_swap_noid = compare_plan_fingerprints(fp_no_id, swap_no_id, {"/src/show - S01E01(1).mkv"})
+        self.assertFalse(res_swap_noid["needs_repreview"])
+
+        # 新增第三份或大小变化仍必须触发 needs_repreview
+        added_3rd = swap_live + [
+            {"id": "103", "name": "有歌 - S01E05(2).mp4", "path": "/src/有歌 - S01E05(2).mp4", "size": 492674601, "modified": "2026-10-27T10:53:00"},
+        ]
+        res_added = compare_plan_fingerprints(fp_with_id, added_3rd, {"/src/有歌 - S01E05(1).mp4"})
+        self.assertTrue(res_added["needs_repreview"])
+
+        # 2. 异步推荐执行作业与合并+清理联动、以及删除后 CD2 (1) 收缩后验
+        import asyncio
+        asyncio.run(self._run_async_batch_and_collapse_verify())
+
+    async def _run_async_batch_and_collapse_verify(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, patch
+        from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+        from app.database import Base
+        from app.models.task import Task
+        from app.models.season import SeasonRecord
+        from app.api.archive import (
+            RecommendedExecuteRequest,
+            RecommendedPlanRequest,
+            _ArchiveRequest,
+            build_recommended_batch_plan,
+            clean_duplicates,
+            get_recommended_batch_plan_status,
+            start_recommended_batch_plan_job,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "batch_job.db"
+            engine = create_async_engine(f"sqlite+aiosqlite:///{db_path.as_posix()}", future=True)
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            sm = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+            # A. 测试删除后 CD2 仅剩 1 份时自动去掉 (1) 后缀的场景：id-del 被删，id-keep 路径由 foo(1).mp4 变为 foo.mp4
+            class _CollapseCD2:
+                def __init__(self):
+                    self.deleted = False
+
+                async def list_files(self, path: str, force_refresh: bool = False):
+                    if not self.deleted:
+                        return [
+                            {"id": "id-del", "name": "show - S01E01.mp4", "path": "/src/show/Season 1/show - S01E01.mp4", "isDirectory": False, "size": 1000, "modified": "2026-01-01T00:00:00"},
+                            {"id": "id-keep", "name": "show - S01E01(1).mp4", "path": "/src/show/Season 1/show - S01E01(1).mp4", "isDirectory": False, "size": 3000, "modified": "2026-01-02T00:00:00"},
+                        ]
+                    return [
+                        {"id": "id-keep", "name": "show - S01E01.mp4", "path": "/src/show/Season 1/show - S01E01.mp4", "isDirectory": False, "size": 3000, "modified": "2026-01-02T00:00:00"},
+                    ]
+
+                async def delete_file(self, path: str):
+                    self.deleted = True
+                    return {"success": True}
+
+                async def close(self):
+                    return None
+
+            async with sm() as db:
+                t1 = Task(id="t-collapse", name="collapse", source_path="/src", media_type="tv", status="completed")
+                r1 = SeasonRecord(
+                    id="rec-collapse",
+                    task_id="t-collapse",
+                    show_name="show",
+                    show_path="/src/show",
+                    tmdb_id="999",
+                    season_number=1,
+                    season_path="/src/show/Season 1",
+                    total_episodes=1,
+                    local_episode_count=2,
+                    recognized_episodes_json="[1]",
+                    missing_episodes_json="[]",
+                    duplicate_episodes_json="[1]",
+                    status="review_needed",
+                    season_finished=True,
+                )
+                db.add_all([t1, r1])
+                await db.commit()
+
+                fake_s = SimpleNamespace(source_root="/src", archive_root="/dst", mp_url="", mp_token="")
+                cd2_inst = _CollapseCD2()
+                with patch("app.api.archive.CloudDrive2Client", return_value=cd2_inst), \
+                     patch("app.api.archive.get_settings", return_value=fake_s), \
+                     patch("app.api.archive.MoviePilotClient") as mock_mp:
+                    mock_mp.return_value.get_active_downloads = AsyncMock(return_value=[])
+                    mock_mp.return_value.close = AsyncMock(return_value=None)
+                    res = await clean_duplicates(_ArchiveRequest(season_record_ids=["rec-collapse"]), db=db)
+                self.assertTrue(res.ok, f"删除同名后(1)自动收缩不应导致核验失败: {res.message}")
+                rec_after = await db.get(SeasonRecord, "rec-collapse")
+                self.assertEqual(rec_after.status, "archive_ready")
+
+                # B. 测试 /recommended-execute-start + /recommended-execute-status 异步执行轮询
+                r2 = SeasonRecord(
+                    id="rec-async-dup",
+                    task_id="t-collapse",
+                    show_name="show2",
+                    show_path="/src/show2",
+                    tmdb_id="1000",
+                    season_number=1,
+                    season_path="/src/show2/Season 1",
+                    total_episodes=1,
+                    local_episode_count=2,
+                    recognized_episodes_json="[1]",
+                    missing_episodes_json="[]",
+                    duplicate_episodes_json="[1]",
+                    status="review_needed",
+                    season_finished=True,
+                )
+                db.add(r2)
+                await db.commit()
+
+                class _MultiShowCD2:
+                    def __init__(self):
+                        self.deleted_s2 = False
+
+                    async def list_files(self, path: str, force_refresh: bool = False):
+                        if path == "/src/show/Season 1":
+                            return [{"id": "id-keep", "name": "show - S01E01.mp4", "path": "/src/show/Season 1/show - S01E01.mp4", "isDirectory": False, "size": 3000, "modified": "2026-01-02T00:00:00"}]
+                        if path == "/src/show2/Season 1":
+                            if not self.deleted_s2:
+                                return [
+                                    {"id": "201", "name": "show2 - S01E01.720p.mp4", "path": "/src/show2/Season 1/show2 - S01E01.720p.mp4", "isDirectory": False, "size": 500, "modified": "2026-01-01T00:00:00"},
+                                    {"id": "202", "name": "show2 - S01E01.1080p.mp4", "path": "/src/show2/Season 1/show2 - S01E01.1080p.mp4", "isDirectory": False, "size": 1500, "modified": "2026-01-01T00:00:00"},
+                                ]
+                            return [
+                                {"id": "202", "name": "show2 - S01E01.1080p.mp4", "path": "/src/show2/Season 1/show2 - S01E01.1080p.mp4", "isDirectory": False, "size": 1500, "modified": "2026-01-01T00:00:00"},
+                            ]
+                        return []
+
+                    async def delete_file(self, path: str):
+                        if "show2" in path:
+                            self.deleted_s2 = True
+                        return {"success": True}
+
+                    async def close(self):
+                        return None
+
+                multi_cd2 = _MultiShowCD2()
+                with patch("app.api.archive.CloudDrive2Client", return_value=multi_cd2), \
+                     patch("app.api.archive.get_settings", return_value=fake_s), \
+                     patch("app.api.archive.MoviePilotClient") as mock_mp2, \
+                     patch("app.database.async_session", sm):
+                    mock_mp2.return_value.get_active_downloads = AsyncMock(return_value=[])
+                    mock_mp2.return_value.close = AsyncMock(return_value=None)
+                    plan_r = await build_recommended_batch_plan(RecommendedPlanRequest(task_id="t-collapse"), db=db)
+                    self.assertEqual(plan_r["counts"]["clean_count"], 1)
+                    job_snap = await start_recommended_batch_plan_job(
+                        RecommendedExecuteRequest(task_id="t-collapse", plan_id=plan_r["plan_id"])
+                    )
+                    self.assertTrue(job_snap["ok"])
+                    for _ in range(50):
+                        await asyncio.sleep(0.05)
+                        job_snap = await get_recommended_batch_plan_status(job_snap["job_id"])
+                        if job_snap["status"] != "running":
+                            break
+                    self.assertEqual(job_snap["status"], "completed")
+                    self.assertTrue(job_snap["result"]["ok"])
+
+            await engine.dispose()
 
 
 if __name__ == "__main__":

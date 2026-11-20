@@ -523,11 +523,11 @@ async def _expand_complementary_records(
     return expanded, complementary_map
 
 
-async def _refresh_task_summary(task_id: str, db: AsyncSession) -> None:
+async def _refresh_task_summary(task_id: str, db: AsyncSession) -> dict[str, Any]:
     """级联刷新关联 Task 的汇总统计 summary_json（含真缺集待补与已推送待入库）。"""
     from app.services.gap_fill_tracker import refresh_task_summary
 
-    await refresh_task_summary(task_id, db)
+    return await refresh_task_summary(task_id, db)
 
 
 @router.post("/preview")
@@ -2226,6 +2226,17 @@ async def clean_duplicates(
     4. 清理完毕自动重新识别集号，若无重复且集全，自动流转至 archive_ready（齐全可归档）；
     5. 级联刷新任务统计 summary_json。
     """
+    return await _clean_duplicates_impl(body, db)
+
+
+async def _clean_duplicates_impl(
+    body: _ArchiveRequest,
+    db: AsyncSession,
+    *,
+    cd2_client: CloudDrive2Client | None = None,
+    active_dl_paths_override: set[str] | None = None,
+    skip_summary_refresh: bool = False,
+) -> StatusResponse:
     if not body.season_record_ids:
         return StatusResponse(ok=False, message="未选择任何项目")
 
@@ -2236,7 +2247,8 @@ async def clean_duplicates(
     if not records:
         return StatusResponse(ok=False, message="未找到匹配的季度记录")
 
-    cd2 = CloudDrive2Client()
+    owns_cd2 = cd2_client is None
+    cd2 = cd2_client or CloudDrive2Client()
     total_deleted_videos = 0
     total_deleted_orphans = 0
     errors: list[str] = []
@@ -2244,22 +2256,23 @@ async def clean_duplicates(
 
     try:
         # 可选查询 MoviePilot 活跃下载路径以防止清理连载季正在写入/做种的文件 (G02)
-        active_dl_paths: set[str] = set()
-        try:
-            settings = get_settings()
-            if settings.mp_url and settings.mp_token:
-                mp_probe = MoviePilotClient()
-                try:
-                    dls = await mp_probe.get_active_downloads()
-                    for dl in (dls if isinstance(dls, list) else []):
-                        for k in ("path", "save_path", "content_path", "target_path", "title", "name"):
-                            val = str(dl.get(k) or "").strip()
-                            if val:
-                                active_dl_paths.add(val)
-                finally:
-                    await mp_probe.close()
-        except Exception:
-            pass
+        active_dl_paths: set[str] = set(active_dl_paths_override or ())
+        if active_dl_paths_override is None:
+            try:
+                settings = get_settings()
+                if settings.mp_url and settings.mp_token:
+                    mp_probe = MoviePilotClient()
+                    try:
+                        dls = await mp_probe.get_active_downloads()
+                        for dl in (dls if isinstance(dls, list) else []):
+                            for k in ("path", "save_path", "content_path", "target_path", "title", "name"):
+                                val = str(dl.get(k) or "").strip()
+                                if val:
+                                    active_dl_paths.add(val)
+                    finally:
+                        await mp_probe.close()
+            except Exception:
+                pass
 
         for rec in records:
             season_path = rec.season_path
@@ -2401,7 +2414,9 @@ async def clean_duplicates(
                 fpath = item["path"]
                 fname = item["name"]
                 base_stem = posixpath.splitext(fname)[0]
-                if deleted_video_stems and not any(base_stem == s or base_stem.startswith(s) for s in deleted_video_stems):
+                if deleted_video_stems and not any(
+                    base_stem == s or base_stem.startswith(s + ".") for s in deleted_video_stems
+                ):
                     log.info("伴生文件 %s 对应的主视频未确认删除或不匹配，严格保留", fname)
                     continue
                 try:
@@ -2419,10 +2434,35 @@ async def clean_duplicates(
                 try:
                     fresh_files = await cd2.list_files(season_path, force_refresh=True)
                     fresh_paths = {f.get("path") for f in fresh_files}
+                    orig_id_by_path = {
+                        str(f.get("path") or ""): str(f.get("id") or "")
+                        for f in all_files
+                        if not f.get("isDirectory") and f.get("id")
+                    }
+                    fresh_ids = {
+                        str(f.get("id") or "")
+                        for f in fresh_files
+                        if not f.get("isDirectory") and f.get("id")
+                    }
+                    use_id_verify = bool(orig_id_by_path) and (bool(fresh_ids) or not fresh_files)
 
-                    # 双向核验：待删文件确已不在网盘，计划保留文件依然完整
-                    phantom_files = [p for p in deleted_files_this_season if p in fresh_paths]
-                    missing_keep = [k["path"] for k in plan.get("to_keep", []) if k.get("path") not in fresh_paths]
+                    # 双向核验：待删文件确已不在网盘，计划保留文件依然完整（支持 CD2 删除同名文件后 (1) 后缀自动收缩场景）
+                    phantom_files = [
+                        p for p in deleted_files_this_season
+                        if (
+                            (orig_id_by_path[p] in fresh_ids)
+                            if (use_id_verify and p in orig_id_by_path)
+                            else (p in fresh_paths)
+                        )
+                    ]
+                    missing_keep = [
+                        k["path"] for k in plan.get("to_keep", [])
+                        if (
+                            (orig_id_by_path[k["path"]] not in fresh_ids)
+                            if (use_id_verify and k.get("path") in orig_id_by_path)
+                            else (k.get("path") not in fresh_paths)
+                        )
+                    ]
 
                     verification_passed = (len(phantom_files) == 0 and len(missing_keep) == 0 and len(failed_items) == 0)
 
@@ -2538,13 +2578,15 @@ async def clean_duplicates(
                     errors.append(f"{rec.show_name} S{rec.season_number:02d}: 清理后实物核验失败: {fe}")
 
         # 5. 级联刷新受影响的任务统计
-        for tid in affected_tasks:
-            await _refresh_task_summary(tid, db)
+        if not skip_summary_refresh:
+            for tid in affected_tasks:
+                await _refresh_task_summary(tid, db)
 
         await db.commit()
 
     finally:
-        await cd2.close()
+        if owns_cd2:
+            await cd2.close()
 
     has_deleted = (total_deleted_videos > 0 or total_deleted_orphans > 0)
     if not has_deleted and errors:
@@ -2684,6 +2726,16 @@ async def clean_source_redundant(
     4. 更新数据库状态为 cleaned_redundant，写入操作日志；
     5. 级联刷新任务统计。
     """
+    return await _clean_source_redundant_impl(body, db)
+
+
+async def _clean_source_redundant_impl(
+    body: _ArchiveRequest,
+    db: AsyncSession,
+    *,
+    cd2_client: CloudDrive2Client | None = None,
+    skip_summary_refresh: bool = False,
+) -> StatusResponse:
     if not body.season_record_ids:
         return StatusResponse(ok=False, message="未选择任何项目")
 
@@ -2694,7 +2746,8 @@ async def clean_source_redundant(
     if not records:
         return StatusResponse(ok=False, message="未找到匹配的季度记录")
 
-    cd2 = CloudDrive2Client()
+    owns_cd2 = cd2_client is None
+    cd2 = cd2_client or CloudDrive2Client()
     success_count = 0
     errors: list[str] = []
     affected_tasks: set[str] = set()
@@ -2966,13 +3019,15 @@ async def clean_source_redundant(
                 log.error(err_msg)
                 errors.append(err_msg)
 
-        for tid in affected_tasks:
-            await _refresh_task_summary(tid, db)
+        if not skip_summary_refresh:
+            for tid in affected_tasks:
+                await _refresh_task_summary(tid, db)
 
         await db.commit()
 
     finally:
-        await cd2.close()
+        if owns_cd2:
+            await cd2.close()
 
     msg = f"源端已清理，归档已保留：{success_count}/{len(records)} 季清源完成"
     if errors:
@@ -3847,47 +3902,98 @@ async def build_recommended_batch_plan(
     }
 
 
-@router.post("/recommended-execute")
-async def execute_recommended_batch_plan(
+_RECOMMENDED_EXECUTE_JOBS: dict[str, dict[str, Any]] = {}
+
+
+def _build_recommended_job_snapshot(job: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "ok": job.get("status") != "failed",
+        "job_id": job["job_id"],
+        "plan_id": job["plan_id"],
+        "task_id": job["task_id"],
+        "status": job["status"],
+        "phase": job.get("phase", ""),
+        "message": job.get("message", ""),
+        "done_steps": int(job.get("done_steps") or 0),
+        "total_steps": int(job.get("total_steps") or 0),
+        "current_item": job.get("current_item", ""),
+        "result": job.get("result"),
+        "error": job.get("error"),
+    }
+
+
+async def _run_recommended_batch_plan(
     body: RecommendedExecuteRequest,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession,
+    *,
+    progress_cb: Any | None = None,
 ) -> dict[str, Any]:
-    """执行已确认预览的「执行推荐处理」批次计划，支持局部指纹复核 (G24)、幂等恢复 (G23) 与四类去向汇总 (G28)。"""
+    """执行已确认预览的「执行推荐处理」批次计划，支持并发指纹复核 (G24)、合并与清理联动、幂等恢复 (G23) 与四类去向汇总 (G28)。"""
     from app.core.directory_merge import execute_directory_merge
     from app.core.season_classifier import TERMINAL_STATUSES, consolidate_seasons_to_work_records
     from app.models.directory_group import DirectoryGroup
+
+    def _emit(phase: str, message: str, done_steps: int, total_steps: int, current_item: str = "") -> None:
+        if progress_cb is not None:
+            try:
+                progress_cb({
+                    "phase": phase,
+                    "message": message,
+                    "done_steps": done_steps,
+                    "total_steps": total_steps,
+                    "current_item": current_item,
+                })
+            except Exception:
+                pass
 
     plan = _RECOMMENDED_BATCH_PLANS.get(body.plan_id)
     if not plan or plan.get("task_id") != body.task_id:
         raise HTTPException(status_code=404, detail="未找到匹配且有效的批量推荐处理计划，请重新生成预览")
 
     step_receipts: dict[str, dict[str, Any]] = plan.setdefault("step_receipts", {})
+    merge_items = plan.get("merge_items") or []
+    clean_items = plan.get("clean_items") or []
+    redundant_items = plan.get("redundant_source_items") or []
+    total_steps = len(merge_items) + len(clean_items) + len(redundant_items)
 
-    # G24: 执行前对所有待删清理项做局部文件指纹复核，发现新增或变化视频则先阻断并返回更新提示
+    # G24: 并发对所有待删清理项做局部文件指纹复核（Semaphore=10），发现真正新增或变化视频则阻断并提示重新预览
+    pending_clean_checks = [
+        c_item for c_item in clean_items
+        if step_receipts.get(f"clean:{c_item['season_record_id']}", {}).get("status") != "completed"
+        and (c_item.get("file_fingerprints") or {})
+    ]
+    _emit("fingerprint_check", f"正在并发校验 {len(pending_clean_checks)} 个待清理目录文件指纹...", 0, total_steps)
+
     cd2_check = CloudDrive2Client()
     changed_seasons: list[dict[str, Any]] = []
-    try:
-        for c_item in plan.get("clean_items") or []:
-            step_key = f"clean:{c_item['season_record_id']}"
-            if step_receipts.get(step_key, {}).get("status") == "completed":
-                continue
-            saved_fps = c_item.get("file_fingerprints") or {}
-            if not saved_fps:
-                continue
+    sem = asyncio.Semaphore(10)
+
+    async def _check_one_fp(c_item: dict[str, Any]) -> dict[str, Any] | None:
+        saved_fps = c_item.get("file_fingerprints") or {}
+        async with sem:
             try:
-                curr_files = await cd2_check.list_files(c_item["season_path"], force_refresh=True)
+                curr_files = await asyncio.wait_for(
+                    cd2_check.list_files(c_item["season_path"], force_refresh=True),
+                    timeout=15.0,
+                )
                 del_paths = {d.get("path", "") for d in (c_item.get("to_delete") or []) if d.get("path")}
                 diff = compare_plan_fingerprints(saved_fps, curr_files, del_paths)
                 if diff.get("needs_repreview"):
-                    changed_seasons.append({
+                    return {
                         "season_record_id": c_item["season_record_id"],
                         "show_name": c_item["show_name"],
                         "season_number": c_item["season_number"],
                         "added_videos": diff["added_videos"],
                         "modified_videos": diff["modified_videos"],
-                    })
+                    }
             except Exception:
-                pass
+                return None
+        return None
+
+    try:
+        if pending_clean_checks:
+            fp_results = await asyncio.gather(*(_check_one_fp(c) for c in pending_clean_checks))
+            changed_seasons = [r for r in fp_results if r is not None]
     finally:
         await cd2_check.close()
 
@@ -3904,69 +4010,188 @@ async def execute_recommended_batch_plan(
     executed_redundant: list[dict[str, Any]] = []
     failed_steps: list[dict[str, Any]] = []
     touched_record_ids: set[str] = set()
+    merged_show_paths_norm: set[str] = set()
+    merged_target_by_from_norm: dict[str, str] = {}
+    done_steps = 0
 
-    # 1. 执行同 ID 目录规范化归并（幂等跳过已完成步骤）
-    for m_item in plan.get("merge_items") or []:
-        step_key = f"merge:{m_item['group_id']}"
-        if step_receipts.get(step_key, {}).get("status") == "completed":
-            executed_merges.append(step_receipts[step_key])
-            continue
-        try:
-            res = await execute_directory_merge(
-                db, body.task_id, m_item["group_id"], plan_id=m_item["plan_id"]
-            )
-            rec_obj = {"status": "completed", "group_id": m_item["group_id"], "title": m_item["title"], "result": res}
-            step_receipts[step_key] = rec_obj
-            executed_merges.append(rec_obj)
-        except Exception as e:
-            failed_steps.append({"step": step_key, "kind": "merge_directory", "title": m_item["title"], "error": str(e)})
+    cd2_exec = CloudDrive2Client()
+    # 批量开始前统一读取一次 MoviePilot 活跃下载清单，避免循环内重复请求 90+ 次
+    active_dl_paths: set[str] = set()
+    try:
+        settings = get_settings()
+        if settings.mp_url and settings.mp_token:
+            mp_probe = MoviePilotClient()
+            try:
+                dls = await mp_probe.get_active_downloads()
+                for dl in (dls if isinstance(dls, list) else []):
+                    for k in ("path", "save_path", "content_path", "target_path", "title", "name"):
+                        val = str(dl.get(k) or "").strip()
+                        if val:
+                            active_dl_paths.add(val)
+            finally:
+                await mp_probe.close()
+    except Exception:
+        pass
 
-    # 2. 执行同内容副本清理
-    for c_item in plan.get("clean_items") or []:
-        rec_id = c_item["season_record_id"]
-        touched_record_ids.add(rec_id)
-        step_key = f"clean:{rec_id}"
-        if step_receipts.get(step_key, {}).get("status") == "completed":
-            executed_cleans.append(step_receipts[step_key])
-            continue
-        try:
-            res = await clean_duplicates(
-                _ArchiveRequest(
-                    season_record_ids=[rec_id],
-                    plan_id=c_item.get("plan_id"),
-                    expected_fingerprints=c_item.get("file_fingerprints"),
-                ),
-                db,
-            )
-            if res.ok or c_item.get("all_distinct_retained"):
-                rec_obj = {"status": "completed", "season_record_id": rec_id, "show_name": c_item["show_name"], "season_number": c_item["season_number"], "message": res.message}
+    try:
+        # 1. 执行同 ID 目录规范化归并（幂等跳过已完成步骤）
+        for idx, m_item in enumerate(merge_items, start=1):
+            label = m_item.get("canonical_dir_name") or m_item.get("title") or m_item["group_id"]
+            _emit("merge", f"正在归并同作品目录 ({idx}/{len(merge_items)})：{label}", done_steps, total_steps, label)
+            step_key = f"merge:{m_item['group_id']}"
+            src_target_norm = normalize_dir_path(m_item.get("source_target_show_path") or "")
+            from_norms = [normalize_dir_path(p) for p in (m_item.get("merge_from_show_paths") or []) if p]
+            if step_receipts.get(step_key, {}).get("status") == "completed":
+                executed_merges.append(step_receipts[step_key])
+                if src_target_norm:
+                    merged_show_paths_norm.add(src_target_norm)
+                for fn in from_norms:
+                    merged_show_paths_norm.add(fn)
+                    if m_item.get("source_target_show_path"):
+                        merged_target_by_from_norm[fn] = m_item["source_target_show_path"]
+                done_steps += 1
+                continue
+            try:
+                res = await execute_directory_merge(
+                    db, body.task_id, m_item["group_id"], plan_id=m_item["plan_id"], cd2_client=cd2_exec
+                )
+                rec_obj = {"status": "completed", "group_id": m_item["group_id"], "title": m_item["title"], "result": res}
                 step_receipts[step_key] = rec_obj
-                executed_cleans.append(rec_obj)
-            else:
-                failed_steps.append({"step": step_key, "kind": "clean_duplicates", "title": f"{c_item['show_name']} S{c_item['season_number']:02d}", "error": res.message})
-        except Exception as e:
-            failed_steps.append({"step": step_key, "kind": "clean_duplicates", "title": f"{c_item['show_name']} S{c_item['season_number']:02d}", "error": str(e)})
+                executed_merges.append(rec_obj)
+                if src_target_norm:
+                    merged_show_paths_norm.add(src_target_norm)
+                for fn in from_norms:
+                    merged_show_paths_norm.add(fn)
+                    if m_item.get("source_target_show_path"):
+                        merged_target_by_from_norm[fn] = m_item["source_target_show_path"]
+            except Exception as e:
+                failed_steps.append({"step": step_key, "kind": "merge_directory", "title": label, "error": str(e)})
+            done_steps += 1
 
-    # 3. 执行归档已齐源端清理
-    for r_item in plan.get("redundant_source_items") or []:
-        rec_id = r_item["season_record_id"]
-        touched_record_ids.add(rec_id)
-        step_key = f"redundant:{rec_id}"
-        if step_receipts.get(step_key, {}).get("status") == "completed":
-            executed_redundant.append(step_receipts[step_key])
-            continue
-        try:
-            res = await clean_source_redundant(_ArchiveRequest(season_record_ids=[rec_id]), db)
-            if res.ok:
-                rec_obj = {"status": "completed", "season_record_id": rec_id, "show_name": r_item["show_name"], "season_number": r_item["season_number"], "message": "源端已清理，归档已保留"}
-                step_receipts[step_key] = rec_obj
-                executed_redundant.append(rec_obj)
-            else:
-                failed_steps.append({"step": step_key, "kind": "clean_redundant_source", "title": f"{r_item['show_name']} S{r_item['season_number']:02d}", "error": res.message})
-        except Exception as e:
-            failed_steps.append({"step": step_key, "kind": "clean_redundant_source", "title": f"{r_item['show_name']} S{r_item['season_number']:02d}", "error": str(e)})
+        # 2. 执行同内容副本清理
+        for idx, c_item in enumerate(clean_items, start=1):
+            rec_id = c_item["season_record_id"]
+            label = f"{c_item['show_name']} S{int(c_item.get('season_number') or 1):02d}"
+            _emit("clean", f"正在清理重复版本 ({idx}/{len(clean_items)})：{label}", done_steps, total_steps, label)
+            touched_record_ids.add(rec_id)
+            step_key = f"clean:{rec_id}"
+            if step_receipts.get(step_key, {}).get("status") == "completed":
+                executed_cleans.append(step_receipts[step_key])
+                done_steps += 1
+                continue
+            try:
+                target_rec_id = rec_id
+                exp_fps = c_item.get("file_fingerprints")
+                rec_row = await db.get(SeasonRecord, rec_id)
+                c_show_norm = normalize_dir_path(posixpath.dirname(c_item.get("season_path") or ""))
+                c_rec_show_norm = normalize_dir_path(rec_row.show_path) if rec_row and rec_row.show_path else c_show_norm
+
+                # 若前序目录归并已将本季并入主目录并退场，则转而核验归并后的主目录同季记录
+                if rec_row is not None and rec_row.status in TERMINAL_STATUSES:
+                    merged_dst_show = merged_target_by_from_norm.get(c_show_norm) or merged_target_by_from_norm.get(c_rec_show_norm)
+                    if merged_dst_show:
+                        dst_norm = normalize_dir_path(merged_dst_show)
+                        cand_rows = list((await db.scalars(
+                            select(SeasonRecord).where(
+                                SeasonRecord.task_id == body.task_id,
+                                SeasonRecord.season_number == int(c_item.get("season_number") or 1),
+                                SeasonRecord.status.not_in(tuple(TERMINAL_STATUSES)),
+                            )
+                        )).all())
+                        surviving = next(
+                            (r for r in cand_rows if normalize_dir_path(r.show_path) == dst_norm),
+                            None,
+                        )
+                        if surviving is None:
+                            rec_obj = {
+                                "status": "completed",
+                                "season_record_id": rec_id,
+                                "show_name": c_item["show_name"],
+                                "season_number": c_item["season_number"],
+                                "message": "已随目录规范化归并完成",
+                            }
+                            step_receipts[step_key] = rec_obj
+                            executed_cleans.append(rec_obj)
+                            done_steps += 1
+                            continue
+                        target_rec_id = surviving.id
+                        touched_record_ids.add(target_rec_id)
+                        exp_fps = None
+                    else:
+                        rec_obj = {
+                            "status": "completed",
+                            "season_record_id": rec_id,
+                            "show_name": c_item["show_name"],
+                            "season_number": c_item["season_number"],
+                            "message": f"状态已更新为 {rec_row.status}",
+                        }
+                        step_receipts[step_key] = rec_obj
+                        executed_cleans.append(rec_obj)
+                        done_steps += 1
+                        continue
+                elif c_show_norm in merged_show_paths_norm or c_rec_show_norm in merged_show_paths_norm:
+                    # 目录刚在步骤 1 接收合并文件，清空合并前旧指纹并按合并后实目录重算计划
+                    exp_fps = None
+
+                res = await _clean_duplicates_impl(
+                    _ArchiveRequest(
+                        season_record_ids=[target_rec_id],
+                        plan_id=c_item.get("plan_id") if exp_fps else None,
+                        expected_fingerprints=exp_fps,
+                    ),
+                    db,
+                    cd2_client=cd2_exec,
+                    active_dl_paths_override=active_dl_paths,
+                    skip_summary_refresh=True,
+                )
+                if res.ok or c_item.get("all_distinct_retained"):
+                    rec_obj = {
+                        "status": "completed",
+                        "season_record_id": target_rec_id,
+                        "show_name": c_item["show_name"],
+                        "season_number": c_item["season_number"],
+                        "message": res.message,
+                    }
+                    step_receipts[step_key] = rec_obj
+                    executed_cleans.append(rec_obj)
+                else:
+                    failed_steps.append({"step": step_key, "kind": "clean_duplicates", "title": label, "error": res.message})
+            except Exception as e:
+                failed_steps.append({"step": step_key, "kind": "clean_duplicates", "title": label, "error": str(e)})
+            done_steps += 1
+
+        # 3. 执行归档已齐源端清理
+        for idx, r_item in enumerate(redundant_items, start=1):
+            rec_id = r_item["season_record_id"]
+            label = f"{r_item['show_name']} S{int(r_item.get('season_number') or 1):02d}"
+            _emit("redundant", f"正在清理已归档源端 ({idx}/{len(redundant_items)})：{label}", done_steps, total_steps, label)
+            touched_record_ids.add(rec_id)
+            step_key = f"redundant:{rec_id}"
+            if step_receipts.get(step_key, {}).get("status") == "completed":
+                executed_redundant.append(step_receipts[step_key])
+                done_steps += 1
+                continue
+            try:
+                res = await _clean_source_redundant_impl(
+                    _ArchiveRequest(season_record_ids=[rec_id]),
+                    db,
+                    cd2_client=cd2_exec,
+                    skip_summary_refresh=True,
+                )
+                if res.ok:
+                    rec_obj = {"status": "completed", "season_record_id": rec_id, "show_name": r_item["show_name"], "season_number": r_item["season_number"], "message": "源端已清理，归档已保留"}
+                    step_receipts[step_key] = rec_obj
+                    executed_redundant.append(rec_obj)
+                else:
+                    failed_steps.append({"step": step_key, "kind": "clean_redundant_source", "title": label, "error": res.message})
+            except Exception as e:
+                failed_steps.append({"step": step_key, "kind": "clean_redundant_source", "title": label, "error": str(e)})
+            done_steps += 1
+    finally:
+        await cd2_exec.close()
 
     # 4. 刷新任务汇总并按四类去向分类汇报 (G28)
+    _emit("recalc", "正在全局重算任务汇总与五模块分类状态...", done_steps, total_steps)
     summary = await _refresh_task_summary(body.task_id, db)
     await db.commit()
 
@@ -4030,3 +4255,93 @@ async def execute_recommended_batch_plan(
             + (f"（{len(failed_steps)} 项待重试）" if failed_steps else "")
         ),
     }
+
+
+@router.post("/recommended-execute")
+async def execute_recommended_batch_plan(
+    body: RecommendedExecuteRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """同步执行已确认预览的「执行推荐处理」批次计划。"""
+    return await _run_recommended_batch_plan(body, db)
+
+
+@router.post("/recommended-execute-start")
+async def start_recommended_batch_plan_job(
+    body: RecommendedExecuteRequest,
+) -> dict[str, Any]:
+    """异步启动「执行推荐处理」后台作业并立即返回 job_id，供前端轮询实时进度与防超时断连。"""
+    from uuid import uuid4
+    from app.database import async_session
+
+    plan = _RECOMMENDED_BATCH_PLANS.get(body.plan_id)
+    if not plan or plan.get("task_id") != body.task_id:
+        raise HTTPException(status_code=404, detail="未找到匹配且有效的批量推荐处理计划，请重新生成预览")
+
+    # 幂等防重：同 plan_id 若已有进行中作业直接复用
+    for existing in _RECOMMENDED_EXECUTE_JOBS.values():
+        if existing.get("plan_id") == body.plan_id and existing.get("status") == "running":
+            return _build_recommended_job_snapshot(existing)
+
+    total_steps = (
+        len(plan.get("merge_items") or [])
+        + len(plan.get("clean_items") or [])
+        + len(plan.get("redundant_source_items") or [])
+    )
+    job_id = f"job_rec_{uuid4().hex[:12]}"
+    job: dict[str, Any] = {
+        "job_id": job_id,
+        "plan_id": body.plan_id,
+        "task_id": body.task_id,
+        "status": "running",
+        "phase": "fingerprint_check",
+        "message": "正在启动推荐处理后台执行...",
+        "done_steps": 0,
+        "total_steps": total_steps,
+        "current_item": "",
+        "result": None,
+        "error": None,
+    }
+    _RECOMMENDED_EXECUTE_JOBS[job_id] = job
+
+    def _on_progress(ev: dict[str, Any]) -> None:
+        job.update({
+            "phase": ev.get("phase", job["phase"]),
+            "message": ev.get("message", job["message"]),
+            "done_steps": ev.get("done_steps", job["done_steps"]),
+            "total_steps": ev.get("total_steps", job["total_steps"]),
+            "current_item": ev.get("current_item", ""),
+        })
+
+    async def _worker() -> None:
+        try:
+            async with async_session() as bg_db:
+                res = await _run_recommended_batch_plan(body, bg_db, progress_cb=_on_progress)
+            job["result"] = res
+            if res.get("needs_repreview"):
+                job["status"] = "needs_repreview"
+                job["phase"] = "needs_repreview"
+                job["message"] = res.get("message") or "检测到目录文件变化，需重新预览"
+            else:
+                job["status"] = "completed"
+                job["phase"] = "done"
+                job["done_steps"] = job["total_steps"]
+                job["message"] = res.get("message") or "推荐处理执行完成"
+        except Exception as exc:
+            log.exception("后台执行推荐处理失败: %s", exc)
+            job["status"] = "failed"
+            job["phase"] = "failed"
+            job["error"] = str(exc)
+            job["message"] = f"执行失败: {exc}"
+
+    asyncio.create_task(_worker())
+    return _build_recommended_job_snapshot(job)
+
+
+@router.get("/recommended-execute-status/{job_id}")
+async def get_recommended_batch_plan_status(job_id: str) -> dict[str, Any]:
+    """查询「执行推荐处理」后台作业实时进度与结果。"""
+    job = _RECOMMENDED_EXECUTE_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="未找到对应的推荐处理执行任务")
+    return _build_recommended_job_snapshot(job)

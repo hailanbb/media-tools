@@ -1,6 +1,22 @@
 # MediaFlow 版本管理
 
-当前源码版本为 v2.5.48，修订日期为 2026-11-19。
+当前源码版本为 v2.5.50，修订日期为 2026-11-20。
+
+v2.5.50 修复「补缺站点管理与动漫/非动漫独立规则」刷新后回显丢失并优化双页签持久化体验：
+1. **补缺站点规则冷启动/版本更新后回显修复与双页签协同保存（`frontend/index.html` + `tests/test_frontend_logic.js`）**：
+   - 将 `gapFillDraftRules` 初始值由非空占位对象改为 `null` 并引入按类别粒度的 `_gapFillDraftDirty` 追踪，彻底消除 `!gapFillDraftRules` 恒为 `false` 导致的刷新后永远展示空白草稿缺陷；
+   - 点击「保存生效规则」自动同时持久化当前页签及另一存在未保存编辑的页签，并在顶部选项卡及主工具栏角标明确区分「已保存 N 站 / 已暂停 / 未保存草稿」。
+2. **作品补缺类别偏好接口修复（`app/api/moviepilot.py` + `tests/test_v2540_gap_fill_sites.py`）**：
+   - 修复 `save_work_preference_endpoint` `finally` 块遗留 `raise HTTPException` 导致的保存后必定报错 400 缺陷。
+
+v2.5.49 彻底打通「执行推荐处理」真实执行链路、CloudDrive2 同名 `(1)` 指纹防误报及异步实时进度轮询：
+1. **CloudDrive2 `(1)` 同名后缀交换防误报与删后收缩后验（`app/core/review_engine.py` + `app/api/archive.py` + `tests/test_v2545_five_module_refactor.py`）**：
+   - `build_file_fingerprints` 新增文件 `id` 记录，`compare_plan_fingerprints` 兼容剥离 `(N)` 后缀并校验同簇 `(id, size, modified)` 或多重集一致性，消除 115 同名文件 `(1)` 序号交换导致的 G24 假阳全批拦截；
+   - `clean_duplicates` 删后双向核验改用文件 `id` 优先匹配，消除删除同名文件之一后 CD2 去掉 `(1)` 后缀引起的 `phantom_files` / `missing_keep` 误报，同时收紧伴生孤儿前缀匹配防误伤 `(1).nfo`。
+2. **「执行推荐处理」异步作业轮询、合并清理协同与前端状态修复（`app/api/archive.py` + `frontend/index.html` + `tests/test_frontend_logic.js`）**：
+   - 新增 `/api/archive/recommended-execute-start` 与 `/recommended-execute-status/{job_id}` 异步后台作业接口，G24 指纹校验改为 `Semaphore(10)` 并发，共享 CD2 / MoviePilot 客户端并在批末统一汇总重算；
+   - 自动处理同时命中「同 ID 目录归并」和「副本清理」的作品，避免归并退场或文件迁入后步骤 2 报目录缺失或旧指纹冲突；
+   - 前端改为异步轮询展示实时进度条，正确渲染 `needs_repreview` 拦截提示与失败报错，并在完成后复位按钮状态、立刻刷新任务计数与列表。
 
 v2.5.48 落地四层零盲区真实验收护栏并完成「执行推荐处理」预览二次提速：
 1. **生产库安全隔离护栏（`app/database.py` + `tests/run_all_tests.py` + `tests/test_v2545_five_module_refactor.py`）**：

@@ -4,9 +4,24 @@
 
 [![Windows](https://img.shields.io/badge/Windows-Native-0078d4.svg?style=flat-square&logo=windows)](#)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776ab.svg?style=flat-square&logo=python)](#)
-[![Version](https://img.shields.io/badge/Release-v2.5.48-6366f1.svg?style=flat-square)](#)
+[![Version](https://img.shields.io/badge/Release-v2.5.50-6366f1.svg?style=flat-square)](#)
 
 当前五模块需求与交互方案（v2.5.45）：[待复核清理](MediaFlow待复核清理模块需求与交互方案-v2.5.45.md) → [异常剧集](MediaFlow异常剧集模块需求与交互方案-v2.5.45.md) → [缺集待补](MediaFlow缺集待补模块需求与交互方案-v2.5.45.md) → [连载留源](MediaFlow连载留源模块需求与交互方案-v2.5.45.md) → [齐全可归档](MediaFlow齐全可归档模块需求与交互方案-v2.5.45.md)。以下发布记录保留各版本当时的行为描述，现行设计以模块方案为准。
+
+v2.5.50：修复「补缺站点管理与动漫/非动漫独立规则」刷新后回显丢失问题并优化双页签持久化体验：
+1. **补缺站点规则刷新回显修复与双页签协同保存（`frontend/index.html` + `tests/test_frontend_logic.js`）**：
+   - 修复 `gapFillDraftRules` 预置非空对象导致 `loadGapFillSitesRules(false)` 永远跳过服务端数据库回填的缺陷（刷新页面或更新版本后弹窗错显 0 站，数据库规则实际仍存）；
+   - 改为精细脏状态追踪，打开弹窗与冷启动自动从数据库回填未修改页签；支持同时编辑「动漫 / 非动漫」双页签后一键保存全部改动，并在选项卡及工具栏角标清晰区分「已保存 N 站 / 已暂停 / 未保存草稿」。
+2. **作品补缺偏好保存接口异常修复（`app/api/moviepilot.py` + `tests/test_v2540_gap_fill_sites.py`）**：
+   - 移除 `save_work_preference_endpoint` 的 `finally` 块中残留的必抛 `HTTPException` 语句，确保手工切换作品动漫/非动漫类别正常返回成功。
+
+v2.5.49：彻底打通「执行推荐处理」真实执行链路、CloudDrive2 同名 `(1)` 指纹防误报及异步实时进度轮询：
+1. **CloudDrive2 `(1)` 同名后缀交换防误报与删后收缩后验（`app/core/review_engine.py` + `app/api/archive.py`）**：
+   - 修复 CloudDrive2 对 115 同名文件动态分配 `(1)` 后缀时因列表顺序交换导致的 `compare_plan_fingerprints` 假阳拦截（一次拦截即导致整批 128 项全部暂停零执行）；
+   - 修复 `clean_duplicates` 删除同名文件之一后，CD2 收缩去掉 `(1)` 后缀引发的删后双向核验误报及伴生文件前缀误匹配。
+2. **「执行推荐处理」异步作业与合并清理协同（`app/api/archive.py` + `frontend/index.html`）**：
+   - 新增 `/api/archive/recommended-execute-start` 与 `/recommended-execute-status/{job_id}`，并发执行 G24 指纹校验（`Semaphore(10)`）、共享 `CloudDrive2Client` / `MoviePilotClient` 连接并在批末统一刷新汇总，前端展示实时分步进度条，彻底解决大批量长耗时超时与按钮永远卡在「正在分步执行与重算...」的问题；
+   - 修复前端吞掉 `needs_repreview` 拦截响应伪装成已完成且未复位确认按钮的缺陷，以及同一作品同时存在目录归并和副本清理时的交叠冲突。
 
 v2.5.48：落地四层零盲区真实验收护栏并完成「执行推荐处理」预览二次提速：
 1. **生产库安全隔离护栏（`app/database.py` + `tests/run_all_tests.py` + `tests/test_v2545_five_module_refactor.py`）**：

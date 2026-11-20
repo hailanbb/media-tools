@@ -1286,5 +1286,4 @@ async def save_work_preference_endpoint(
         raise HTTPException(status_code=400, detail=f"保存作品分类偏好失败: {exc}")
     finally:
         await client.close()
-        raise HTTPException(status_code=400, detail=f"保存作品偏好失败: {exc}")
 
