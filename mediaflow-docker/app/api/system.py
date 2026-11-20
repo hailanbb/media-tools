@@ -15,6 +15,13 @@ _HEALTH_CACHE: dict[str, tuple[str, float]] = {}
 _CACHE_TTL = 30.0  # 30 秒缓存
 
 
+@router.get("/version")
+async def app_version():
+    """不依赖外部健康探测的运行版本；首页与本接口共用唯一版本源。"""
+    from fastapi.responses import JSONResponse
+    return JSONResponse({"version": VERSION}, headers={"Cache-Control": "no-store"})
+
+
 @router.get("/health")
 async def health_check() -> dict:
     """健康检查，含各外部服务连通性状态（含 MP 代理的 TMDB 与豆瓣状态）。"""

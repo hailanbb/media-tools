@@ -2,6 +2,7 @@
 <html lang="zh-CN" class="light">
 <head>
   <meta charset="UTF-8">
+  <meta name="mediaflow-version" content="__MEDIAFLOW_VERSION__">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>MediaFlow - 智能媒体库整理与归档工作台</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎬</text></svg>">
@@ -115,7 +116,7 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.51</span>
+              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60"><!--MEDIAFLOW_VERSION-->版本读取中</span>
             </div>
             <!-- 完善后的命名 -->
             <p class="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">智能媒体库整理与归档工作台</p>
@@ -1284,6 +1285,15 @@
     </div>
   </div>
 
+  <div id="batchDiscardModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60">
+    <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-2xl w-full p-5 space-y-4 border border-rose-200 max-h-[90vh] flex flex-col">
+      <div class="flex justify-between gap-3"><h3 class="font-bold text-rose-600">主动放弃补缺并批量删除源端（本季）</h3><button type="button" onclick="closeModal('batchDiscardModal')" aria-label="关闭">×</button></div>
+      <div id="batchDiscardBody" class="text-xs space-y-3 overflow-auto flex-1"></div>
+      <label id="batchDiscardConsentLabel" class="text-xs flex gap-2"><input id="batchDiscardConsent" type="checkbox" onchange="updateBatchDiscardConsent()">我确认放弃本次预览列出的季，并删除其中全部源文件（可能是唯一副本）。</label>
+      <button id="confirmBatchDiscardBtn" type="button" onclick="executeBatchDiscard()" disabled class="px-4 py-2 rounded-lg bg-rose-600 text-white text-xs font-bold disabled:opacity-40">确认删除预览所列源季目录</button>
+    </div>
+  </div>
+
   <!-- 弹窗：补缺/修复确认框 -->
   <div id="downloadModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
     <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-xl w-full p-4 sm:p-6 space-y-4 border border-slate-200 dark:border-slate-800 shadow-2xl">
@@ -1675,12 +1685,29 @@
     let configRoots = { source_root: '/115/Library_incs/nas', archive_root: '/115/Library_incs/nas.finish' };
 
     // ── 3. 顶部健康状态指示器 ────────────────────────────────
+    async function checkAppVersion() {
+      const badge = document.getElementById('appVersionBadge');
+      const pageVersion = document.querySelector('meta[name="mediaflow-version"]')?.content || '';
+      try {
+        const data = await api('/api/system/version', {cache: 'no-store'});
+        if (badge && data.version) {
+          const mismatch = pageVersion && !pageVersion.startsWith('__') && pageVersion !== data.version;
+          badge.textContent = mismatch ? `页面 v${pageVersion} / 服务 v${data.version} · 请刷新` : `v${data.version}`;
+          badge.title = mismatch ? '页面与服务版本不同；请在操作结束后刷新' : '当前运行服务版本';
+        }
+      } catch (_) {
+        if (badge) badge.title = '版本接口暂不可用，显示当前页面版本';
+      }
+    }
+
     async function checkHealth() {
       try {
         const data = await api('/api/system/health');
-        if (data && data.version) {
+        // 兼容尚未重启的旧服务：它只返回原始 HTML，不能把新页面误标为新版后端。
+        const pageVersion = document.querySelector('meta[name="mediaflow-version"]')?.content || '';
+        if (data.version && pageVersion.startsWith('__')) {
           const badge = document.getElementById('appVersionBadge');
-          if (badge) badge.textContent = `v${data.version}`;
+          if (badge) { badge.textContent = `v${data.version} · 更新待加载`; badge.title = '前端文件已更新，后端尚未加载配套接口；请在批次结束后重启服务'; }
         }
         const container = document.getElementById('topStatusBar') || document.querySelector('[title*="CloudDrive2"]')?.parentElement?.parentElement;
         if (!container) return;
@@ -1810,6 +1837,7 @@
               review: t.summary.review_needed || 0,
               download: t.summary.download_needed || 0,
               download_pushed: t.summary.download_pushed || 0,
+              download_no_resource: t.summary.download_no_resource ?? null,
               airing: t.summary.airing || 0,
               archive_check: t.summary.archive_check || 0,
               already_archived: t.summary.already_archived || 0,
@@ -2068,9 +2096,7 @@
           + `</div>`;
       }
       const dlInitPushed = task.counts.download_pushed || 0;
-      document.getElementById('catCountDownload').innerHTML = dlInitPushed > 0
-        ? `${task.counts.download} <span class="text-xs font-normal">季待补 · ${dlInitPushed} 季等待入库/回执</span>`
-        : `${task.counts.download} <span class="text-xs font-normal">季待补</span>`;
+      document.getElementById('catCountDownload').innerHTML = gapFillCountLabel(task.counts.download, dlInitPushed, task.counts.download_no_resource);
       document.getElementById('catCountAiring').innerHTML = `${task.counts.airing} <span class="text-xs font-normal">季连载</span>`;
 
       // 从后端加载季度明细数据：只要存在已发布的结果或已手动停止，均可按已发布明细加载
@@ -2274,9 +2300,11 @@
           }
           const dlLoadedTodo = (task.categories.download || []).length;
           const dlLoadedPushed = (task.categories.download_pushed || []).length;
-          document.getElementById('catCountDownload').innerHTML = dlLoadedPushed > 0
-            ? `${dlLoadedTodo} <span class="text-xs font-normal">季待补 · ${dlLoadedPushed} 季等待入库/回执</span>`
-            : `${dlLoadedTodo} <span class="text-xs font-normal">季待补</span>`;
+          const dlNoResource = getGapFillLists(task).no_resource.length;
+          task.counts.download = dlLoadedTodo;
+          task.counts.download_pushed = dlLoadedPushed;
+          task.counts.download_no_resource = dlNoResource;
+          document.getElementById('catCountDownload').innerHTML = gapFillCountLabel(dlLoadedTodo, dlLoadedPushed, dlNoResource);
           if (alreadyEl) {
             const loadedAnom = task.categories.anomaly || [];
             const loadedHeld = (task.categories.held || []).length;
@@ -2320,7 +2348,7 @@
             extraHtml += ` · <span class="text-xs font-normal text-amber-700 dark:text-amber-300">需决定${decisionCount}</span> · <span class="text-xs font-normal text-slate-500 dark:text-slate-400">待决${pendingEvCount}</span> · <span class="text-xs font-normal text-emerald-700 dark:text-emerald-300">清源${cleanableCount}</span>`;
           }
           if (pendingDgCount > 0) {
-            extraHtml += ` · <span class="text-xs font-semibold text-purple-700 dark:text-purple-300">${pendingDgCount}组待确认</span>`;
+            extraHtml += ``;
           }
           anomEl.innerHTML = `${anomCount} <span class="text-xs font-normal">季异常</span>${extraHtml}`;
         }
@@ -2904,6 +2932,9 @@
       }
 
       const pendingGroups = allGroups.filter(g => g.status === 'pending_confirm');
+      const reviewCountEl = document.getElementById('catCountReview');
+      if (reviewCountEl) reviewCountEl.innerHTML = `${task.categories?.review?.length || 0} <span class="text-xs font-normal">季</span><div class="text-[11px] font-normal mt-1">另列 ${pendingGroups.length} 个目录组（可能涉及上述季）</div>`;
+
       const resolvedGroups = allGroups.filter(g => g.status !== 'pending_confirm');
 
       // 若处于已处理视图但已处理为空且有待处理，回退到待处理
@@ -3123,6 +3154,23 @@
       }
     }
 
+    function getGapFillLists(task) {
+      const all = task?.categories?.download || [];
+      const no_resource = all.filter(it => it.gapFillState?.view_bucket === 'no_resource');
+      const todo = all.filter(it => it.gapFillState?.view_bucket !== 'no_resource');
+      return {
+        todo, no_resource, pushed_pending: task?.categories?.download_pushed || [],
+        unsearched: todo.filter(it => !it.gapFillState?.last_run?.outcome_status || it.gapFillState.last_run.outcome_status === 'aborted_unstarted'),
+        partial: todo.filter(it => (it.gapFillState?.pushed_episodes || []).length && (it.gapFillState?.actionable_missing_episodes || []).length),
+        error: todo.filter(it => ['search_error', 'submit_error', 'rejected'].includes(it.gapFillState?.last_run?.outcome_status))
+      };
+    }
+
+    function gapFillCountLabel(total, pushed, noResource) {
+      if (noResource == null) return `${total} 季待补（分类明细待加载） · ${pushed} 季等待入库／回执`;
+      return `${Math.max(0, total - noResource)} 季待搜索 · ${noResource} 季无合格资源 · ${pushed} 季等待入库／回执`;
+    }
+
     function renderEpisodesList() {
       const task = taskList.find(t => t.id === currentTaskId);
       const container = document.getElementById('episodeItemContainer');
@@ -3136,8 +3184,13 @@
       if (selectAll) selectAll.disabled = false;
 
       const activeGapTab = (typeof currentGapView !== 'undefined') ? currentGapView : 'todo';
-      const downloadTodoItems = (task && task.categories && Array.isArray(task.categories.download)) ? task.categories.download : [];
-      const downloadPushedItems = (task && task.categories && Array.isArray(task.categories.download_pushed)) ? task.categories.download_pushed : [];
+      const gapLists = getGapFillLists(task);
+      const downloadTodoItems = gapLists.todo;
+      const downloadPushedItems = gapLists.pushed_pending;
+      const noResourceGapItems = gapLists.no_resource;
+      const unsearchedGapItems = gapLists.unsearched;
+      const partialGapItems = gapLists.partial;
+      const errorGapItems = gapLists.error;
 
       const anomalyItems = (task && task.categories && Array.isArray(task.categories.anomaly)) ? task.categories.anomaly : [];
       const heldItems = (task && task.categories && Array.isArray(task.categories.held)) ? task.categories.held : [];
@@ -3256,22 +3309,6 @@
           </div>`;
       } else if (currentCategory === 'download') {
         const curGapSub = (typeof currentGapSubFilter !== 'undefined') ? currentGapSubFilter : 'all';
-        const unsearchedGapItems = downloadTodoItems.filter(it => {
-          const lr = it.gapFillState?.last_run;
-          return !lr || !lr.outcome_status;
-        });
-        const noResourceGapItems = downloadTodoItems.filter(it => {
-          const lr = it.gapFillState?.last_run;
-          return lr && ['zero_hits', 'low_seeders', 'no_qualified_candidate', 'wrong_identity', 'deferred_overlap', 'rejected'].includes(lr.outcome_status);
-        });
-        const partialGapItems = downloadTodoItems.filter(it => {
-          const g = it.gapFillState;
-          return g && Array.isArray(g.pushed_episodes) && g.pushed_episodes.length > 0 && Array.isArray(g.actionable_missing_episodes) && g.actionable_missing_episodes.length > 0;
-        });
-        const errorGapItems = downloadTodoItems.filter(it => {
-          const lr = it.gapFillState?.last_run;
-          return lr && ['search_error', 'submit_error'].includes(lr.outcome_status);
-        });
         const minSeeders = (typeof configRoots !== 'undefined' && configRoots && configRoots.gap_fill_min_seeders != null) ? configRoots.gap_fill_min_seeders : 2;
         const allPushedUnverified = downloadPushedItems.length > 0 && downloadPushedItems.every(it => {
           const g = it.gapFillState;
@@ -3292,7 +3329,7 @@
 
         if (selectAll) selectAll.disabled = (activeGapTab === 'pushed_pending');
         if (selectAllLabel) {
-          selectAllLabel.textContent = activeGapTab === 'pushed_pending' ? "等待入库或回执确认（防重复推送）" : "全选待补缺项";
+          selectAllLabel.textContent = activeGapTab === 'pushed_pending' ? "等待入库或回执确认（防重复推送）" : (activeGapTab === 'no_resource' ? "全选本页无合格资源项" : "全选待补缺项");
         }
         batchContainer.innerHTML = `
           <div class="space-y-1.5 w-full">
@@ -3301,6 +3338,7 @@
                 <button type="button" role="tab" data-gap-tab="todo" aria-selected="${activeGapTab === 'todo' ? 'true' : 'false'}" tabindex="${activeGapTab === 'todo' ? '0' : '-1'}" onclick="switchGapFillTab('todo')" class="px-3 py-1 rounded-lg text-xs font-semibold transition ${activeGapTab === 'todo' ? 'bg-white dark:bg-slate-900 text-blue-600 dark:text-blue-400 shadow-sm' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'}">
                   缺集待补 (${downloadTodoItems.length})
                 </button>
+                <button type="button" role="tab" data-gap-tab="no_resource" aria-selected="${activeGapTab === 'no_resource'}" tabindex="${activeGapTab === 'no_resource' ? '0' : '-1'}" onclick="switchGapFillTab('no_resource')" class="px-3 py-1 rounded-lg text-xs font-semibold ${activeGapTab === 'no_resource' ? 'bg-white dark:bg-slate-900 text-amber-600 shadow-sm' : 'text-slate-500'}">无合格资源 (${noResourceGapItems.length})</button>
                 <button type="button" role="tab" data-gap-tab="pushed_pending" aria-selected="${activeGapTab === 'pushed_pending' ? 'true' : 'false'}" tabindex="${activeGapTab === 'pushed_pending' ? '0' : '-1'}" onclick="switchGapFillTab('pushed_pending')" class="px-3 py-1 rounded-lg text-xs font-semibold transition ${activeGapTab === 'pushed_pending' ? 'bg-white dark:bg-slate-900 text-indigo-600 dark:text-indigo-400 shadow-sm' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'}">
                   ${waitingTabLabel}
                 </button>
@@ -3315,25 +3353,25 @@
                 <i class="fa-solid fa-arrows-to-dot text-xs"></i>
                 <span>核对入库</span>
               </button>` : ''}
-              ${activeGapTab === 'todo' ? `
+              ${activeGapTab !== 'pushed_pending' ? `
               <button id="batchActionButton" onclick="executeBatchDownload()" disabled class="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold shadow-md shadow-blue-600/20 transition flex items-center space-x-1.5">
                 <i class="fa-solid fa-cloud-arrow-down text-xs"></i>
-                <span id="batchActionBtnText">批量一键推送 MP 补缺 (0)</span>
+                <span id="batchActionBtnText">批量一键推送 MP 补缺 (已选 0 季)</span>
               </button>` : ''}
+              ${activeGapTab === 'no_resource' ? `<button id="batchDiscardButton" type="button" onclick="openBatchDiscardPreview()" disabled class="px-3 py-2 rounded-lg bg-rose-600 text-white text-xs font-bold disabled:opacity-40">批量删除源端（本季）· 已选 0 季</button><button type="button" onclick="viewLastDiscardBatch()" class="px-3 py-2 rounded-lg border text-xs">查看最近删源回执</button>` : ''}
             </div>
             ${activeGapTab === 'todo' ? `
             <div class="flex flex-wrap items-center gap-1.5 pt-0.5 text-xs">
               <span class="text-slate-400 text-[11px] mr-0.5">筛选:</span>
               <button type="button" onclick="switchGapSubFilter('all')" class="px-2 py-0.5 rounded-md text-[11px] transition ${curGapSub === 'all' ? 'bg-blue-600 text-white font-semibold shadow-xs' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'}">全部 (${downloadTodoItems.length})</button>
               <button type="button" onclick="switchGapSubFilter('unsearched')" class="px-2 py-0.5 rounded-md text-[11px] transition ${curGapSub === 'unsearched' ? 'bg-blue-600 text-white font-semibold shadow-xs' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'}">未搜索 (${unsearchedGapItems.length})</button>
-              <button type="button" onclick="switchGapSubFilter('no_resource')" class="px-2 py-0.5 rounded-md text-[11px] transition ${curGapSub === 'no_resource' ? 'bg-blue-600 text-white font-semibold shadow-xs' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'}">无合格资源/低做种 (${noResourceGapItems.length})</button>
               <button type="button" onclick="switchGapSubFilter('partial')" class="px-2 py-0.5 rounded-md text-[11px] transition ${curGapSub === 'partial' ? 'bg-blue-600 text-white font-semibold shadow-xs' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'}">部分已推 (${partialGapItems.length})</button>
               <button type="button" onclick="switchGapSubFilter('error')" class="px-2 py-0.5 rounded-md text-[11px] transition ${curGapSub === 'error' ? 'bg-blue-600 text-white font-semibold shadow-xs' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'}">接口失败 (${errorGapItems.length})</button>
             </div>` : ''}
           </div>`;
         updateGapFillSitesToolbarBadge();
         banner.className = "p-3.5 rounded-xl bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800/60 flex items-start space-x-3 text-xs";
-        banner.innerHTML = activeGapTab === 'pushed_pending' ? `
+        banner.innerHTML = activeGapTab === 'no_resource' ? `<div class="space-y-1"><b>所选站点内暂未找到合格资源</b><div>包括未命中、做种不足、候选覆盖或身份不合格；不代表全网无资源。可重新搜索，或预览后主动放弃所选季并删除源端。接口失败、未开始及在途项不进入本页。</div></div>` : activeGapTab === 'pushed_pending' ? `
           <i class="fa-solid fa-hourglass-half text-indigo-500 text-sm mt-0.5"></i>
           <div class="flex-1 space-y-1">
             <div class="font-bold text-indigo-900 dark:text-indigo-300">已推送待入库清单：本季剩余缺集均已提交 MoviePilot</div>
@@ -3342,7 +3380,7 @@
           <i class="fa-solid fa-cloud-arrow-down text-blue-500 text-sm mt-0.5"></i>
           <div class="flex-1 space-y-1">
             <div class="font-bold text-blue-900 dark:text-blue-300">缺集待补：自动识别动漫／非动漫规则并推送缺失正片单元</div>
-            <div class="text-slate-600 dark:text-slate-300">动态门槛做种数≥${minSeeders}；单季仅部分分集推送成功时，本季保留在待补中并自动扣减已推送集数；源端清理操作统一归入「待复核清理」。</div>
+            <div class="text-slate-600 dark:text-slate-300">动态门槛做种数≥${minSeeders}；单季仅部分分集推送成功时，本季保留在待补中并自动扣减已推送集数；无合格资源结果移入独立页签；主动放弃补缺可单季预览删源，批量删源仅在无合格资源页签提供。</div>
           </div>`;
       } else {
         if (selectAllLabel) selectAllLabel.textContent = "全选连载项";
@@ -3380,8 +3418,8 @@
         ? ((currentCategory === 'download')
             ? (activeGapTab === 'pushed_pending'
                 ? downloadPushedItems
-                : (curGapSub === 'unsearched' ? unsearchedGapItems
-                   : curGapSub === 'no_resource' ? noResourceGapItems
+                : (activeGapTab === 'no_resource' ? noResourceGapItems
+                   : curGapSub === 'unsearched' ? unsearchedGapItems
                    : curGapSub === 'partial' ? partialGapItems
                    : curGapSub === 'error' ? errorGapItems
                    : downloadTodoItems))
@@ -3400,6 +3438,11 @@
         }
       }
 
+      if (items.length === 0 && currentCategory === 'download' && activeGapTab === 'no_resource' && !task?._seasonsLoadError) {
+        container.innerHTML = '<div class="p-8 text-center text-slate-500">当前没有已确认无合格资源的剧季；未搜索、接口失败和在途条目在其他页签。</div>';
+        updateSelection();
+        return;
+      }
       if (items.length === 0) {
         const isNoTask = !task;
         const isStopping = task && task.status === 'stopping';
@@ -3720,6 +3763,12 @@
       const count = document.querySelectorAll('input[name="itemCheck"]:checked').length;
       const el = document.getElementById('selectedCountText');
       if (el) el.innerHTML = `已选择 <b class="text-indigo-600 dark:text-indigo-400">${count}</b> 项`;
+      const discardBtn = document.getElementById('batchDiscardButton');
+      if (discardBtn) {
+        const busy = ['running', 'paused', 'stopping'].includes(taskList.find(t => t.id === currentTaskId)?.status);
+        discardBtn.disabled = count === 0 || busy;
+        discardBtn.textContent = `批量删除源端（本季）· 已选 ${count} 季`;
+      }
       const batchBtn = document.getElementById('batchActionButton');
       const batchBtnText = document.getElementById('batchActionBtnText');
       if (!batchBtn || !batchBtnText) return;
@@ -3728,13 +3777,13 @@
         if (currentCategory === 'archive') batchBtnText.textContent = `批量一键归档所选 (${count} 季)`;
         else if (currentCategory === 'review') batchBtnText.textContent = `批量一键清理所选冗余 (${count} 季)`;
         else if (currentCategory === 'already_archived') batchBtnText.textContent = `批量清理源端冗余 (${count} 季)`;
-        else if (currentCategory === 'download') batchBtnText.textContent = `批量一键推送 MP 补缺 (${count} 季)`;
+        else if (currentCategory === 'download') batchBtnText.textContent = `${currentGapView === 'no_resource' ? '批量重新搜索并推送' : '批量一键推送 MP 补缺'} (已选 ${count} 季)`;
       } else {
         batchBtn.setAttribute('disabled', 'true');
         if (currentCategory === 'archive') batchBtnText.textContent = '批量一键归档所选 (0)';
         else if (currentCategory === 'review') batchBtnText.textContent = '批量一键清理所选冗余 (0 季)';
         else if (currentCategory === 'already_archived') batchBtnText.textContent = '批量清理源端冗余 (0)';
-        else if (currentCategory === 'download') batchBtnText.textContent = '批量一键推送 MP 补缺 (0)';
+        else if (currentCategory === 'download') batchBtnText.textContent = '请勾选剧季后批量推送 (已选 0 季)';
       }
     }
 
@@ -4210,9 +4259,100 @@
     }
 
     // ── 真缺集子分类筛选 ─────────────────
+    let batchDiscardPreview = null;
+    let batchDiscardSequence = 0;
+    let batchDiscardExecuting = false;
+
+    function updateBatchDiscardConsent() {
+      document.getElementById('confirmBatchDiscardBtn').disabled = batchDiscardExecuting || !batchDiscardPreview?.items?.length || !document.getElementById('batchDiscardConsent').checked;
+    }
+
+    function renderBatchDiscardPreview(data) {
+      return `<p class="font-bold">${escapeHtml(data.message)}</p><p class="text-rose-600">这是主动放弃补缺，不是归档后安全清源。仅删除以下季目录，不删除整剧根、其他季或归档库。</p>`
+        + (data.items || []).map(it => `<details class="border rounded p-2"><summary>${escapeHtml(it.title)} · 视频 ${it.file_stats.video_count}、字幕 ${it.file_stats.sub_count}、附件 ${it.file_stats.other_count} · ${escapeHtml(it.file_stats.total_size_display)}</summary><div class="break-all font-mono mt-2">${escapeHtml(it.season_path)}</div><div class="max-h-48 overflow-auto mt-2">${(it.files || []).map(f => `<div class="break-all">${escapeHtml(f.path)} · ${f.size} B</div>`).join('')}</div></details>`).join('')
+        + (data.blocked?.length ? `<details class="border rounded p-2"><summary>未纳入 ${data.blocked.length} 季（不会执行）</summary>${data.blocked.map(it => `<p>${escapeHtml(it.title)}：${escapeHtml(it.error)}</p>`).join('')}</details>` : '');
+    }
+
+    function renderBatchDiscardResult(data) {
+      const result = data.result || data;
+      return `<p class="font-bold">${escapeHtml(result.message || (data.state === 'running' ? '批次仍在执行，请稍后查看回执' : '本轮尚无完整回执；请对账后重新预览剩余项'))}</p>`
+        + (result.results || data.results || []).map(it => `<p class="${it.ok ? 'text-emerald-600' : 'text-rose-600'}">${escapeHtml(it.title)}：${escapeHtml(it.message)}</p>`).join('')
+        + (Array.isArray(data.blocked) ? data.blocked.map(it => `<p>${escapeHtml(it.title)}：未纳入，${escapeHtml(it.error)}</p>`).join('') : '');
+    }
+
+    async function openBatchDiscardPreview() {
+      if (batchDiscardExecuting || currentCategory !== 'download' || currentGapView !== 'no_resource') return;
+      const ids = [...document.querySelectorAll('input[name="itemCheck"]:checked:not(:disabled)')].map(cb => cb.value);
+      if (!ids.length) return;
+      if (ids.length > 100) { alert('单批最多预览 100 季，请分批选择。'); return; }
+      const taskId = currentTaskId;
+      const sequence = ++batchDiscardSequence;
+      batchDiscardPreview = null;
+      document.getElementById('batchDiscardConsent').checked = false;
+      document.getElementById('batchDiscardConsentLabel').classList.remove('hidden');
+      updateBatchDiscardConsent();
+      const body = document.getElementById('batchDiscardBody');
+      body.textContent = '正在逐季读取文件、核对无资源状态及在途任务；尚未删除任何文件…';
+      openModal('batchDiscardModal');
+      try {
+        const data = await api('/api/archive/discard-source-batch/preview', {method: 'POST', body: JSON.stringify({task_id: taskId, season_record_ids: ids})});
+        if (sequence !== batchDiscardSequence || taskId !== currentTaskId) return;
+        batchDiscardPreview = {...data, taskId};
+        body.innerHTML = renderBatchDiscardPreview(data);
+        document.getElementById('confirmBatchDiscardBtn').textContent = `确认删除以上 ${data.items.length} 季源目录`;
+        updateBatchDiscardConsent();
+      } catch (e) {
+        if (sequence === batchDiscardSequence) body.textContent = `预览未完成：${e.message}。未执行删除。`;
+      }
+    }
+
+    async function executeBatchDiscard() {
+      if (batchDiscardExecuting || !batchDiscardPreview?.items?.length || !document.getElementById('batchDiscardConsent').checked) return;
+      const chosen = batchDiscardPreview;
+      const sequence = ++batchDiscardSequence;
+      batchDiscardPreview = null;
+      batchDiscardExecuting = true;
+      updateBatchDiscardConsent();
+      const body = document.getElementById('batchDiscardBody');
+      body.textContent = '正在逐季重新核验并执行；请勿重复提交。回执会保留，失败季不会自动重试。';
+      try { sessionStorage.setItem(`mediaflow_discard_batch_${chosen.taskId}`, chosen.preview_token); } catch (_) { /* 回执仍由服务端持久保存。 */ }
+      try {
+        const result = await api('/api/archive/discard-source-batch/execute', {method: 'POST', body: JSON.stringify({preview_token: chosen.preview_token, confirm_abandon: true})});
+        if (sequence === batchDiscardSequence) body.innerHTML = renderBatchDiscardResult(result);
+        const task = taskList.find(t => t.id === chosen.taskId);
+        if (task) task._seasonsLoaded = false;
+        try {
+          await loadTasks();
+          if (currentTaskId === chosen.taskId) await selectTask(chosen.taskId);
+        } catch (_) { if (sequence === batchDiscardSequence) body.innerHTML += '<p>清单刷新未完成，请重新加载；以上执行回执仍有效，不要重复删除。</p>'; }
+      } catch (e) {
+        if (sequence === batchDiscardSequence) body.textContent = `执行请求未取得完整回执：${e.message}。不能据此判断未删除；请查看最近删源回执，不要重发整批。`;
+      } finally {
+        batchDiscardExecuting = false;
+        document.getElementById('batchDiscardConsentLabel').classList.add('hidden');
+        updateBatchDiscardConsent();
+      }
+    }
+
+    async function viewLastDiscardBatch() {
+      const token = sessionStorage.getItem(`mediaflow_discard_batch_${currentTaskId}`);
+      if (!token) { alert('当前浏览器尚无本任务的批量删源回执。'); return; }
+      const sequence = ++batchDiscardSequence;
+      batchDiscardPreview = null;
+      document.getElementById('batchDiscardConsentLabel').classList.add('hidden');
+      updateBatchDiscardConsent();
+      openModal('batchDiscardModal');
+      const body = document.getElementById('batchDiscardBody');
+      body.textContent = '正在读取回执…';
+      try {
+        const data = await api(`/api/archive/discard-source-batch/${encodeURIComponent(token)}`);
+        if (sequence === batchDiscardSequence) body.innerHTML = renderBatchDiscardResult(data);
+      } catch (e) { if (sequence === batchDiscardSequence) body.textContent = `回执读取失败：${e.message}`; }
+    }
+
     let currentGapSubFilter = 'all';
     function switchGapSubFilter(filter) {
-      currentGapSubFilter = ['all', 'unsearched', 'no_resource', 'partial', 'error'].includes(filter) ? filter : 'all';
+      currentGapSubFilter = ['all', 'unsearched', 'partial', 'error'].includes(filter) ? filter : 'all';
       renderEpisodesList();
     }
 
@@ -4378,12 +4518,17 @@
     function executeBatchDownload() {
       currentActionRecordId = null;
       const checked = [...document.querySelectorAll('input[name="itemCheck"]:checked')].map(cb => cb.value);
+      if (!checked.length) return;
       prepareDownloadModal(checked, null);
       openModal('downloadModal');
     }
 
     function openModal(id) { document.getElementById(id).classList.remove('hidden'); }
     function closeModal(id, keepReviewQueue = false) {
+      if (id === 'batchDiscardModal') {
+        batchDiscardSequence += 1;
+        batchDiscardPreview = null;
+      }
       if (id === 'manualConfirmModal' && !keepReviewQueue) {
         anomalyReviewQueue = [];
         anomalyReviewTaskId = null;
@@ -4767,7 +4912,7 @@
               <div class="text-base font-black text-purple-700 dark:text-purple-300">${c.redundant_source_count || srcItems.length || 0} 季</div>
             </div>
             <div class="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700">
-              <div class="text-[10px] text-slate-500">本次待处理事项</div>
+              <div class="text-[10px] text-slate-500">预览暂未纳入</div>
               <div class="text-base font-black text-slate-700 dark:text-slate-200">${groupRecommendedSkipped(skipped).length} 项</div>
             </div>
           `;
@@ -4876,6 +5021,34 @@
       await executeRecommendedBatchPlan(jobId);
     }
 
+    function renderRecommendedRepreview(changed, message) {
+      const items = Array.isArray(changed) ? changed : [];
+      const rows = items.map(ch => {
+        const added = [...new Set(ch.added_videos || [])];
+        const modified = [...new Set(ch.modified_videos || [])];
+        const summary = ch.error ? '目录读取未完成，需重新核验' :
+          [added.length ? `新增 ${added.length} 个视频` : '', modified.length ? `${modified.length} 个视频信息与预览不一致` : ''].filter(Boolean).join(' · ') || '待处理文件信息需重新核验';
+        const fileList = (paths, label) => paths.length ? `<div class="mt-3"><div class="text-xs font-medium text-slate-600 dark:text-slate-300 mb-2">${label} · ${paths.length} 个</div><ul class="space-y-2">${paths.map(p => {
+          const fields = (ch.modified_details?.[p] || []).map(f => ({size:'大小',id:'文件标识',modified:'修改时间'})[f] || '文件信息');
+          const path = String(p); const name = path.replace(/\\/g, '/').split('/').pop();
+          return `<li class="text-xs border-b border-slate-100 dark:border-slate-700 pb-2"><div class="break-all text-slate-700 dark:text-slate-200">${escapeHtml(name)}</div>${fields.length ? `<div class="text-slate-500 mt-1">差异：${escapeHtml(fields.join('、'))}</div>` : ''}<details class="mt-1"><summary class="cursor-pointer text-slate-400">完整路径</summary><div class="break-all select-text mt-1">${escapeHtml(path)}</div></details></li>`;
+        }).join('')}</ul></div>` : '';
+        return `<div class="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3">
+          <div class="font-semibold text-sm text-slate-800 dark:text-slate-100">${escapeHtml(ch.show_name || '作品')} · S${escapeHtml(String(ch.season_number ?? 1).padStart(2, '0'))}</div>
+          <div class="text-xs text-slate-500 dark:text-slate-400 mt-1">${escapeHtml(summary)}</div>
+          ${added.length || modified.length ? `<details class="mt-2"><summary class="text-xs text-indigo-600 dark:text-indigo-300 cursor-pointer">查看文件差异</summary><div class="max-h-64 overflow-y-auto pr-2">${fileList(added, '新增视频')}${fileList(modified, '信息不一致的视频')}</div></details>` : ''}
+        </div>`;
+      }).join('');
+      return `<div class="space-y-3">
+        <div class="rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 p-4">
+          <div class="font-semibold text-amber-900 dark:text-amber-200">本轮已暂停，请更新预览</div>
+          <p class="text-sm text-amber-800 dark:text-amber-300 mt-2">${items.length ? `${items.length} 个季需要重新核验。文件信息不一致或目录读取未完成，当前计划暂不能继续。` : escapeHtml(message || '当前计划需要重新核验。')}</p>
+          <p class="text-xs text-slate-500 dark:text-slate-400 mt-2">文件信息差异不代表视频内容已改变；更新预览不会自动执行删除。</p>
+        </div>
+        ${rows}
+      </div>`;
+    }
+
     async function executeRecommendedBatchPlan(resumeJobId = "") {
       resumeJobId = typeof resumeJobId === "string" ? resumeJobId : "";
       if (!currentTaskId || (!resumeJobId && !_currentRecommendedPlan)) return;
@@ -4915,25 +5088,11 @@
         const res = snap?.result || {};
         if (res.needs_repreview || snap?.status === 'needs_repreview') {
           const changed = Array.isArray(res.changed_seasons) ? res.changed_seasons : [];
-          if (bodyEl) {
-            bodyEl.innerHTML = `
-              <div class="p-4 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-300 dark:border-amber-700 space-y-2.5">
-                <div class="font-bold text-amber-800 dark:text-amber-300 flex items-center gap-1.5">
-                  <i class="fa-solid fa-triangle-exclamation"></i>
-                  <span>目录文件变化安全拦截 · 尚未执行任何删除</span>
-                </div>
-                <div class="text-[11px] text-amber-700 dark:text-amber-200">${escapeHtml(res.message || snap?.message || '检测到目录文件与预览快照不一致，请重新生成预览后再确认执行。')}</div>
-                ${changed.length > 0 ? `<div class="space-y-1.5 pt-1">${changed.map(ch => `
-                  <div class="p-2 rounded-lg bg-white/80 dark:bg-slate-900/60 border border-amber-200 dark:border-amber-800 text-[11px]">
-                    <div class="font-bold text-slate-800 dark:text-slate-200">${escapeHtml(ch.show_name || '')} S${String(ch.season_number || 1).padStart(2, '0')}</div>
-                    ${(ch.added_videos || []).length > 0 ? `<div class="text-slate-600 dark:text-slate-300 font-mono text-[10px]">新增: ${escapeHtml((ch.added_videos || []).join(', '))}</div>` : ''}
-                    ${(ch.modified_videos || []).length > 0 ? `<div class="text-slate-600 dark:text-slate-300 font-mono text-[10px]">变化: ${escapeHtml((ch.modified_videos || []).join(', '))}</div>` : ''}
-                  </div>`).join('')}</div>` : ''}
-              </div>
-            `;
-          }
-          if (footEl) footEl.textContent = '为保障网盘数据安全，已暂停本轮执行；请点击右侧按钮重新获取最新文件指纹。';
-          _resetRecBatchExecBtn('重新生成预览并核对', false, openRecommendedBatchModal);
+          const summaryEl = document.getElementById('recBatchSummaryBar');
+          if (summaryEl) summaryEl.innerHTML = '';
+          if (bodyEl) bodyEl.innerHTML = renderRecommendedRepreview(changed, res.message || snap?.message);
+          if (footEl) footEl.textContent = '更新预览后可查看新计划，再决定是否执行。';
+          _resetRecBatchExecBtn('更新预览', false, openRecommendedBatchModal);
           return;
         }
 
@@ -5091,7 +5250,8 @@
 
     // ── 9.5 补缺待入库双视图切换、入库核对、只读重算与跨条目映射 ────
     function switchGapFillTab(tab) {
-      currentGapView = (tab === 'pushed_pending') ? 'pushed_pending' : 'todo';
+      currentGapView = ['todo', 'no_resource', 'pushed_pending'].includes(tab) ? tab : 'todo';
+      currentGapSubFilter = 'all';
       renderEpisodesList();
     }
 
@@ -5100,8 +5260,8 @@
       event.preventDefault();
       const nextTab = (event.key === 'ArrowRight' || event.key === 'End') ? 'pushed_pending' : 'todo';
       if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
-        const order = ['todo', 'pushed_pending'];
-        const curIdx = order.indexOf(currentGapView === 'pushed_pending' ? 'pushed_pending' : 'todo');
+        const order = ['todo', 'no_resource', 'pushed_pending'];
+        const curIdx = Math.max(0, order.indexOf(currentGapView));
         const delta = event.key === 'ArrowRight' ? 1 : -1;
         switchGapFillTab(order[(curIdx + delta + order.length) % order.length]);
       } else {
@@ -8820,6 +8980,7 @@
       try {
         await Promise.allSettled([
           loadTasks(),
+          checkAppVersion(),
           checkHealth(),
           api('/api/system/config/roots').then(r => { configRoots = r; }).catch(e => console.warn('加载配置根路径失败:', e)),
           loadGapFillSitesRules(false)

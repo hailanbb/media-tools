@@ -31,7 +31,7 @@ from app.core.episode_parser import (
     parse_episode,
 )
 
-REVIEW_RULES_VERSION = "v2.5.53"
+REVIEW_RULES_VERSION = "v2.5.54"
 
 # 视频与伴生正则
 MEDIA_REGEX = re.compile(
@@ -169,6 +169,12 @@ def compare_plan_fingerprints(
             or (curr_fps[p]["modified"] and plan_fingerprints[p]["modified"] and curr_fps[p]["modified"] != plan_fingerprints[p]["modified"])
         )
     )
+    modified_details = {
+        p: [field for field in ("size", "id", "modified")
+            if curr_fps[p].get(field) != plan_fingerprints[p].get(field)
+            and (field == "size" or (curr_fps[p].get(field) and plan_fingerprints[p].get(field)))]
+        for p in modified
+    }
     # 仅新增视频或修改了关键视频/待删文件才触发重新预览
     added_videos = [p for p in added if MEDIA_REGEX.search(curr_fps[p]["name"])]
     modified_videos = [p for p in modified if MEDIA_REGEX.search(curr_fps[p]["name"])]
@@ -182,6 +188,7 @@ def compare_plan_fingerprints(
         "added_videos": added_videos,
         "removed_files": removed,
         "modified_files": modified,
+        "modified_details": modified_details,
         "modified_videos": modified_videos,
         "missing_delete_targets": missing_delete_targets,
         "changed_delete_targets": changed_delete_targets,
@@ -341,7 +348,7 @@ def generate_review_clean_plan(
         if p
     }
 
-    preserved_subdirs = [f for f in files if f.get("isDirectory")]
+    preserved_subdirs = [f for f in files if f.get("isDirectory") and not f.get("verified_auxiliary_only")]
     tmp_files = [f for f in files if not f.get("isDirectory") and TMP_DOWNLOAD_REGEX.search(f.get("name", ""))]
     videos = [f for f in files if not f.get("isDirectory") and MEDIA_REGEX.search(f.get("name", ""))]
 

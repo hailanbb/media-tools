@@ -219,7 +219,7 @@ class GapFillPersistenceAcceptanceTests(unittest.IsolatedAsyncioTestCase):
         await engine.dispose()
 
     async def test_01_three_season_batch_partial_deduction_and_restart_survival(self):
-        """3-season batch: A full accepted (-> pushed_pending), B E02+E03 accepted & E09 low_seeders (-> stays todo w/ actionable=[9]), C zero_hits (-> stays todo); survives reload + re-run deduplication."""
+        """3-season batch: A full accepted (-> pushed_pending), B E02+E03 accepted & E09 low_seeders (-> stays todo w/ actionable=[9]), C zero_hits (-> no_resource); survives reload + re-run deduplication."""
         async with async_session() as db:
             db.add(Task(id="t_batch", name="3季批处理", source_path="/qa/src", status="completed"))
             db.add(Task(id="t_other", name="其他任务", source_path="/qa/src_other", status="completed"))
@@ -301,7 +301,7 @@ class GapFillPersistenceAcceptanceTests(unittest.IsolatedAsyncioTestCase):
         ep9_rec = [e for e in seasons["rec_B"]["gap_fill_state"]["episodes"] if e["episode"] == 9][0]
         self.assertEqual(ep9_rec["outcome_code"], "low_seeders")
 
-        self.assertEqual(seasons["rec_C"]["gap_fill_state"]["view_bucket"], "todo")
+        self.assertEqual(seasons["rec_C"]["gap_fill_state"]["view_bucket"], "no_resource")
         self.assertEqual(seasons["rec_C"]["gap_fill_state"]["actionable_missing_episodes"], [4, 5])
         self.assertEqual(seasons["rec_C"]["gap_fill_state"]["last_run"]["outcome_status"], "zero_hits")
 

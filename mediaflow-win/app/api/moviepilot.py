@@ -1088,7 +1088,13 @@ async def download_gap_fill(
             confirmed_categories=body.confirmed_categories,
         )
     except Exception as e:
-        return {"ok": False, "message": f"补缺推送异常: {str(e)[:200]}", "errors": [str(e)]}
+        await db.rollback()
+        import logging
+        logging.getLogger(__name__).exception("补缺请求失败；已回滚本次数据库事务")
+        busy = "database is locked" in str(e).lower() or "PendingRollback" in type(e).__name__
+        message = ("数据库繁忙，本次推送未完整完成；已受理项须先核对下载台账，请勿直接重复推送" if busy
+                   else "补缺推送未完整完成，请查看服务日志并核对已受理项")
+        return {"ok": False, "message": message, "error_code": "database_busy" if busy else "gap_fill_failed", "errors": [message]}
 
 
 class _GapFillAbortRequest(BaseModel):

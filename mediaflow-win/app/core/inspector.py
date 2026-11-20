@@ -729,6 +729,7 @@ async def run_inspection(
     only_season_path: str | None = None,
     db=None,
     stop_event=None,
+    persist_metadata: bool = True,
 ) -> InspectionResult:
     """执行初检流程 — 扫描 CD2 目录、解析集号、查询 TMDB、生成诊断。
 
@@ -750,6 +751,12 @@ async def run_inspection(
     Returns:
         InspectionResult 初检结果
     """
+    async def save_inspection_snapshot(*args, **kwargs):
+        # 补缺执行前复查只读缓存，避免缓存 autoflush 跨网络请求占用写锁。
+        if persist_metadata:
+            await save_verified_metadata_snapshot(*args, **kwargs)
+
+
     import logging
 
     log = logging.getLogger("mediaflow.inspector")
@@ -940,7 +947,7 @@ async def run_inspection(
             async with db_lock:
                 for sn, info in tmdb_seasons_data.items():
                     if info.get("douban_id") and not info.get("candidate_id"):
-                        await save_verified_metadata_snapshot(db, f"douban_binding:{resolved_tmdb_id}:S{sn}",
+                        await save_inspection_snapshot(db, f"douban_binding:{resolved_tmdb_id}:S{sn}",
                             "douban_binding", str(resolved_tmdb_id), sn,
                             {"douban_id":info["douban_id"], "title":show_name, "season_number":sn,
                              "identity_checked":True, "checked_at":datetime.now().isoformat()})
@@ -950,7 +957,7 @@ async def run_inspection(
 
         if db is not None and primary_work_info.get("tmdb_id") and primary_work_info.get("seasons_present"):
             async with db_lock:
-                await save_verified_metadata_snapshot(
+                await save_inspection_snapshot(
                     db,
                     f"tmdb_tv:{primary_work_info['tmdb_id']}",
                     "tmdb_tv",
@@ -959,7 +966,7 @@ async def run_inspection(
                     {"seasons": primary_work_info.get("seasons_present"), **primary_work_info},
                 )
                 if primary_work_info.get("aliases"):
-                    await save_verified_metadata_snapshot(
+                    await save_inspection_snapshot(
                         db,
                         f"tmdb_aliases:{primary_work_info['tmdb_id']}",
                         "tmdb_aliases",
@@ -1033,6 +1040,8 @@ async def run_inspection(
             season_path = season_item["path"]
             try:
                 season_files = all_items if season_path == show_path else await cd2_client.list_files(season_path)
+                from app.core.auxiliary_inventory import mark_verified_auxiliary_folders
+                season_files = await mark_verified_auxiliary_folders(season_files, cd2_client)
                 video_items = [f for f in season_files if not f["isDirectory"] and is_video_file(f["name"])]
             except Exception as e:
                 result.errors.append(f"扫描 {show_name}/S{season_num:02d} 失败: {e}")
@@ -1099,7 +1108,7 @@ async def run_inspection(
                 info["mapping_id"] = active_mapping.get("mapping_id")
                 if info.get("total") and db is not None and target_tid and not info.get("stale_cache_reused"):
                     async with db_lock:
-                        await save_verified_metadata_snapshot(
+                        await save_inspection_snapshot(
                             db, f"tmdb:{int(target_tid)}:S{target_sn}",
                             "tmdb_season", str(target_tid), target_sn, info,
                         )
@@ -1115,7 +1124,7 @@ async def run_inspection(
                         info["stale_cache_reused"] = True
                 elif info.get("total") and not info.get("candidate_id") and db is not None and tmdb_id_num:
                     async with db_lock:
-                        await save_verified_metadata_snapshot(
+                        await save_inspection_snapshot(
                             db, f"tmdb:{int(tmdb_id_num)}:S{season_num}",
                             "tmdb_season", str(tmdb_id_num), season_num, info,
                         )

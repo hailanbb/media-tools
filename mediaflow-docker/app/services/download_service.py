@@ -3,7 +3,7 @@
 核心特性：
 1. 站点扩展：补缺入口自动将“天空”“观众”（启用状态下）合并进 MoviePilot 默认搜索站点，失败不静默缩窄范围
 2. 同档省容量：以最高做种数 H 计算做种同档 (H - seeders <= max(1, floor(H * 10%)))，档内按实际需下载字节升序，支持跨站去重与精确/有界多集拼包
-3. 整季回退与保护：合格散集能补齐时不买整包；散集不全且无队列重叠时核实完整分集/清单后回退整季包，保留已有集文件与转移历史
+3. 整季回退与保护：缺集大于 3 集优先合格整包，否则散集优先、补不齐回退整包；核验覆盖并排除在途重叠，保留已有文件与转移历史
 4. 防重提交与四段状态：提交前核验 MP 下载队列，超时先查队列防重复提交，分别记录请求缺号、物理覆盖、MP 受理与入库核验状态
 """
 
@@ -1064,8 +1064,14 @@ def verify_season_pack_candidate(
         return True, expected, "起止集数完整覆盖"
 
     # 3. 无文件清单且无单集列表时，核验显式全集说明（支持 MP 真实聚合结果；绝不把仅有 S03 当整季）
-    if by_period:
-        return False, set(), "按期综艺整季缺乏明确文件清单或分段表，暂不视为完整季包"
+    if by_period and (
+        parts_mode
+        or segment_number(combined)
+        or (isinstance(part_episode_mapping, dict) and any(
+            isinstance(v, list) and len(v) > 1 for v in part_episode_mapping.values()
+        ))
+    ):
+        return False, set(), "本季存在分段信息，整季包需文件清单或分段表确认覆盖"
     if parts_mode:
         # 存在 Part 标题散 files 时，避免无清单整包误覆盖已映射或未知分段
         explicit_full_num = re.search(rf"(?:全\s*0*{total_eps}\s*集|(?<!\d)0*{total_eps}\s*集全|(?<![A-Za-z0-9])E?0*1\s*[-~～至]\s*E?0*{total_eps}(?!\d))", combined, re.I)
@@ -1073,8 +1079,10 @@ def verify_season_pack_candidate(
             return False, set(), "带 Part 剧集整季包缺乏文件清单或正式全集映射核验"
 
     total_ep_meta = meta.get("total_episode")
+    if isinstance(total_ep_meta, str) and total_ep_meta.isdigit():
+        total_ep_meta = int(total_ep_meta)
     if isinstance(total_ep_meta, int) and total_ep_meta > 0 and total_ep_meta != total_eps:
-        return False, set(), f"标注总集数({total_ep_meta})与本季总集数({total_eps})不符，疑似仅含部分已播集"
+        return False, set(), f"资源标注 {total_ep_meta} 集/期，本季记录 {total_eps} 集/期，覆盖口径冲突，尚不能确认补齐缺口"
 
     # 若标题本身点明特定集范围/单集号（例如 S03E01-E08），必须完整覆盖
     explicit_range = re.search(r"[Ee]0*(\d{1,3})\s*[-~～至到]\s*[Ee]?0*(\d{1,3})", combined)
@@ -1090,7 +1098,7 @@ def verify_season_pack_candidate(
 
     # 必须具备明确与 total_eps 一致的整季完整性证据（支持 全08集 等前导零写法）
     has_full_count_text = bool(
-        re.search(rf"(?:全\s*0*{total_eps}\s*集|(?<!\d)0*{total_eps}\s*集全|(?<!\d)0*1\s*[-~～至]\s*0*{total_eps}\s*集)", combined, re.I)
+        re.search(rf"(?:全\s*0*{total_eps}\s*[集期]|(?<!\d)0*{total_eps}\s*[集期]全|(?<!\d)0*1\s*[-~～至]\s*0*{total_eps}\s*[集期])", combined, re.I)
     )
     has_complete_word = bool(re.search(r"\bComplete\b|完整全?季|全集打包", combined, re.I))
     if (total_ep_meta == total_eps and (has_complete_word or has_full_count_text)) or has_full_count_text:
@@ -1928,7 +1936,7 @@ def _evaluate_raw_candidates(
                 )
             )
         elif sp_note:
-            reject_reasons.append(sp_note)
+            reject_reasons.append(f"整季包核验：{sp_note}")
 
     return standalone_evals, pack_evals, reject_reasons
 
@@ -1993,7 +2001,11 @@ def _classify_reject_outcome(
                 "low_seeders",
                 f"找到 {raw_count} 个候选，最高 {max_seeders_seen} 人做种，本次要求至少 {min_seeders} 人",
             )
-        return "no_qualified_candidate", f"找到 {raw_count} 个候选（最高 {max_seeders_seen} 人做种），未通过筛选：{'；'.join(uniq[:3])}"
+        reasons = [f"部分资源做种低于 {min_seeders} 人" if r == "做种不足" else r for r in uniq]
+        return "no_qualified_candidate", (
+            f"未找到可补齐缺口的合格散集或整季包；检索 {raw_count} 个候选"
+            f"（全部候选最高 {max_seeders_seen} 人做种，不代表覆盖合格）。不同候选未通过的原因：{'；'.join(reasons[:3])}"
+        )
     return "no_qualified_candidate", f"找到 {raw_count} 个候选，未命中覆盖真实缺集的合格方案"
 
 
@@ -2141,6 +2153,7 @@ async def execute_gap_fill_download(
     stmt = select(SeasonRecord).where(SeasonRecord.id.in_(season_record_ids))
     res = await db.execute(stmt)
     records = list(res.scalars().all())
+    await db.commit()  # 释放读取事务，不跨外部检索持有 SQLite 快照。
 
     if not records:
         return {
@@ -2222,6 +2235,7 @@ async def execute_gap_fill_download(
             target_cat = cat_info.get("category") if cat_info.get("category") in ("anime", "non_anime") else "non_anime"
             cat_site_plan = await _get_category_plan(target_cat)
             site_plan = cat_site_plan
+            await db.commit()
             if not cat_site_plan.get("ready"):
                 skip_msg = f"{rec.show_name} S{rec.season_number:02d}：{cat_site_plan.get('reason') or '未启用可用补缺站点'}"
                 skipped.append(skip_msg)
@@ -2271,6 +2285,7 @@ async def execute_gap_fill_download(
                         archive_root=settings.archive_root,
                         global_source_root=settings.source_root,
                         db=db,
+                        persist_metadata=False,
                     )
                 except TypeError:
                     inspection = await run_inspection(
@@ -2282,6 +2297,7 @@ async def execute_gap_fill_download(
                         archive_root=settings.archive_root,
                         global_source_root=settings.source_root,
                     )
+                await db.commit()  # 结束复查期间的资料写入，再进行资源搜索。
                 fresh = next((s for s in inspection.seasons if s.season_path == rec.season_path), None)
                 if fresh is None:
                     errors.append(f"{rec.show_name}：未能读取本季最新清单，请确认源目录可访问")
@@ -2294,6 +2310,8 @@ async def execute_gap_fill_download(
                     skipped.append(f"{rec.show_name}：无法确定分段视频 {unnumbered} 属于哪一集，请补上集号")
                     continue
             except Exception as exc:
+                if not db.is_active:
+                    raise
                 errors.append(f"{rec.show_name}：读取本季文件或资料失败（{type(exc).__name__}）")
                 continue
             finally:
@@ -2378,6 +2396,7 @@ async def execute_gap_fill_download(
 
             # 持久化已推送待入库集（含 queued / transfer_pending / submitted_unverified / 历史Log推断）
             gap_view = await compute_season_gap_fill_view(db, rec)
+            await db.commit()
             persisted_pushed = set(gap_view.get("pushed_episodes") or [])
 
             # 实时下载队列与本批次已受理记录对齐（兼顾本地坐标与跨条目映射目标坐标）
@@ -3280,6 +3299,9 @@ async def execute_gap_fill_download(
             await refresh_task_summary(tid, db)
         await db.commit()
 
+    except Exception:
+        await db.rollback()
+        raise
     finally:
         await mp.close()
 

@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import sys
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
@@ -39,7 +40,18 @@ if (
 
 _db_url = f"sqlite+aiosqlite:///{_db_path}"
 
-engine = create_async_engine(_db_url, echo=_settings.debug)
+engine = create_async_engine(_db_url, echo=_settings.debug, connect_args={"timeout": 30})
+
+
+@event.listens_for(engine.sync_engine, "connect")
+def _configure_sqlite_connection(connection, _record):
+    cursor = connection.cursor()
+    try:
+        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.execute("PRAGMA journal_mode=WAL")
+    finally:
+        cursor.close()
+
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 

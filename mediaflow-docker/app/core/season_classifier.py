@@ -379,6 +379,7 @@ def consolidate_seasons_to_work_records(
             "review": 0,
             "download": 0,
             "download_pushed": 0,
+            "download_no_resource": 0,
             "airing": 0,
             "anomaly": 0,
             "anomaly_decision": 0,
@@ -402,6 +403,7 @@ def consolidate_seasons_to_work_records(
         "review": 0,
         "download": 0,
         "download_pushed": 0,
+        "download_no_resource": 0,
         "airing": 0,
         "anomaly": 0,
         "anomaly_decision": 0,
@@ -602,6 +604,11 @@ def consolidate_seasons_to_work_records(
 
         # 检查是否全部已推送待入库
         gap_state = base_dict.get("gap_fill_state") or {}
+        if best_cat == "download" and gap_state.get("view_bucket") == "no_resource":
+            if any((get_record_field(it[0], "gap_fill_state") or {}).get("view_bucket") != "no_resource"
+                   for it in active_items):
+                gap_state = {**gap_state, "view_bucket": "todo"}
+                base_dict["gap_fill_state"] = gap_state
         is_pushed_pending = (best_cat == "download" and gap_state.get("view_bucket") == "pushed_pending")
 
         # 计算待复核清理子动作与完成后预测去向 + 异常剧集具体问题分类 (v2.5.45)
@@ -730,6 +737,8 @@ def consolidate_seasons_to_work_records(
         counts[best_cat] += 1
         if is_pushed_pending:
             counts["download_pushed"] += 1
+        if best_cat == "download" and gap_state.get("view_bucket") == "no_resource":
+            counts["download_no_resource"] += 1
         if best_cat == "anomaly":
             if anomaly_sub == "decision":
                 counts["anomaly_decision"] += 1

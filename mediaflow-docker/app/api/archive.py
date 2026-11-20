@@ -2359,7 +2359,7 @@ async def _clean_duplicates_impl(
                 }
                 ev_cur["review_plan_preview"] = {
                     "plan_id": plan.get("plan_id") or "",
-                    "rules_version": plan.get("rules_version") or "v2.5.53",
+                    "rules_version": plan.get("rules_version") or "v2.5.54",
                     "can_clean": False,
                     "to_delete_count": 0,
                     "all_distinct_retained": bool(plan.get("all_distinct_retained")),
@@ -2542,7 +2542,7 @@ async def _clean_duplicates_impl(
                         ev_after = {}
                     ev_after["review_plan_preview"] = {
                         "plan_id": post_plan.get("plan_id") or "",
-                        "rules_version": post_plan.get("rules_version") or "v2.5.53",
+                        "rules_version": post_plan.get("rules_version") or "v2.5.54",
                         "can_clean": bool(post_plan.get("can_clean")),
                         "to_delete_count": len(post_plan.get("to_delete") or []),
                         "all_distinct_retained": bool(post_plan.get("all_distinct_retained")),
@@ -2669,7 +2669,7 @@ class CleanPreviewItem(BaseModel):
     to_keep: list[dict]
     to_delete: list[dict]
     plan_id: str = ""
-    rules_version: str = "v2.5.53"
+    rules_version: str = "v2.5.54"
     reclaimable_bytes: int = 0
     file_fingerprints: dict[str, dict[str, Any]] = {}
     deferred_files: list[dict] = []
@@ -2750,7 +2750,7 @@ async def clean_duplicates_preview(
                 to_keep=list(plan.get("to_keep", [])),
                 to_delete=list(plan.get("to_delete", [])),
                 plan_id=str(plan.get("plan_id", "")),
-                rules_version=str(plan.get("rules_version", "v2.5.53")),
+                rules_version=str(plan.get("rules_version", "v2.5.54")),
                 reclaimable_bytes=int(plan.get("reclaimable_bytes", 0)),
                 file_fingerprints=dict(plan.get("file_fingerprints") or {}),
                 deferred_files=list(plan.get("deferred_files") or []),
@@ -3085,7 +3085,7 @@ async def _clean_source_redundant_impl(
         if owns_cd2:
             await cd2.close()
 
-    msg = f"源端已清理，归档已保留：{success_count}/{len(records)} 季清源完成"
+    msg = f"清源结果：{success_count}/{len(records)} 季完成，其余源端保留"
     if errors:
         msg += f"，遇到 {len(errors)} 项提醒: {'; '.join(errors[:2])}"
 
@@ -3898,7 +3898,7 @@ async def build_recommended_batch_plan(
             async with sem:
                 try:
                     live_files = await asyncio.wait_for(
-                        cd2.list_files(w.get("season_path") or "", force_refresh=False),
+                        cd2.list_files(w.get("season_path") or "", force_refresh=True),
                         timeout=15.0,
                     )
                     c_plan = generate_review_clean_plan(
@@ -3933,7 +3933,7 @@ async def build_recommended_batch_plan(
                     "season_number": int(w.get("season_number") or 1),
                     "season_path": w.get("season_path") or "",
                     "plan_id": c_plan.get("plan_id") or "",
-                    "rules_version": c_plan.get("rules_version") or "v2.5.53",
+                    "rules_version": c_plan.get("rules_version") or "v2.5.54",
                     "can_clean": bool(c_plan.get("can_clean")),
                     "all_distinct_retained": bool(c_plan.get("all_distinct_retained")),
                     "distinct_retention_note": str(c_plan.get("distinct_retention_note") or ""),
@@ -3975,7 +3975,7 @@ async def build_recommended_batch_plan(
     plan_payload = {
         "ok": True,
         "plan_id": plan_id,
-        "rules_version": "v2.5.53",
+        "rules_version": "v2.5.54",
         "task_id": body.task_id,
         "created_at": datetime.now().isoformat(),
         "counts": {
@@ -4004,7 +4004,7 @@ async def build_recommended_batch_plan(
     return {
         "ok": True,
         "plan_id": plan_id,
-        "rules_version": "v2.5.53",
+        "rules_version": "v2.5.54",
         "task_id": body.task_id,
         "created_at": plan_payload["created_at"],
         "counts": plan_payload["counts"],
@@ -4105,7 +4105,7 @@ async def _run_recommended_batch_plan_locked(
     if not plan or plan.get("task_id") != body.task_id:
         raise HTTPException(status_code=404, detail="未找到匹配且有效的批量推荐处理计划，请重新生成预览")
 
-    if plan.get("rules_version") and plan["rules_version"] != "v2.5.53":
+    if plan.get("rules_version") and plan["rules_version"] != "v2.5.54":
         return {"ok": False, "needs_repreview": True, "message": "处理规则已更新，请重新生成本批次预览；旧版计划不会继续执行"}
     _RECOMMENDED_BATCH_PLANS[body.plan_id] = plan
     if plan.get("inflight_step") or plan.get("requires_repreview"):
@@ -4146,6 +4146,7 @@ async def _run_recommended_batch_plan_locked(
                         "season_number": c_item["season_number"],
                         "added_videos": diff["added_videos"],
                         "modified_videos": diff["modified_videos"],
+                        "modified_details": diff.get("modified_details", {}),
                     }
             except Exception as exc:
                 return {"season_record_id": c_item["season_record_id"], "show_name": c_item["show_name"], "season_number": c_item["season_number"], "error": f"文件指纹读取失败: {type(exc).__name__}", "added_videos": [], "modified_videos": []}
@@ -4163,7 +4164,7 @@ async def _run_recommended_batch_plan_locked(
             "ok": False,
             "needs_repreview": True,
             "changed_seasons": changed_seasons,
-            "message": f"检测到 {len(changed_seasons)} 个季在预览后出现新增或变化视频文件，为避免超出预览删除范围已暂停执行，请先更新预览后再确认。",
+            "message": f"检测到 {len(changed_seasons)} 个季的文件信息与预览不一致或目录读取未完成，已暂停执行，请更新预览后再确认。",
         }
 
     executed_merges: list[dict[str, Any]] = []

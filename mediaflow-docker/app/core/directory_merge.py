@@ -276,6 +276,32 @@ def _directory_inventory_snapshot(files):
                    for f in files), key=lambda f: (f["path"], f["id"]))
 
 
+def _directory_inventory_difference(expected, current):
+    """仅解释严格快照差异，不以数量相同或同名后缀交换放宽核验。"""
+    before = {f["path"]: f for f in expected}
+    after = {f["path"]: f for f in current}
+    if len(before) != len(expected) or len(after) != len(current):
+        return f"存在重复路径，无法逐项唯一对应（原 {len(expected)} 项、现 {len(current)} 项）"
+    added = set(after) - set(before)
+    removed = set(before) - set(after)
+    changed = []
+    labels = {"name": "名称", "id": "文件标识", "size": "大小",
+              "modified": "修改时间", "isDirectory": "文件/目录类型"}
+    for path in sorted(set(before) & set(after)):
+        fields = [label for key, label in labels.items() if before[path].get(key) != after[path].get(key)]
+        if fields:
+            changed.append(f"{_path_basename(path)}（{'、'.join(fields)}）")
+    summary = f"新增 {len(added)} 项、缺失 {len(removed)} 项、信息变化 {len(changed)} 项"
+    details = [f"新增：{_path_basename(p)}" for p in sorted(added)]
+    details += [f"缺失：{_path_basename(p)}" for p in sorted(removed)]
+    details += changed
+    if details:
+        summary += "；" + "；".join(details[:5])
+        if len(details) > 5:
+            summary += f"；另有 {len(details) - 5} 项"
+    return summary
+
+
 async def list_files_robust(
     cd2: CloudDrive2Client | None,
     dir_path: str,
@@ -385,10 +411,10 @@ async def delete_dir_robust(cd2: CloudDrive2Client | None, dir_path: str) -> boo
 
     if cd2 is not None:
         try:
-            if await cd2.list_files(norm_dir, force_refresh=True):
+            if await list_files_robust(cd2, norm_dir, force_refresh=True):
                 return False
             res = await cd2.delete_file(norm_dir)
-            return bool(res.get("success", True))
+            return isinstance(res, dict) and res.get("success") is True
         except Exception as e:
             log.warning("CD2 清理目录 %s 失败: %s", norm_dir, e)
             return False
@@ -671,6 +697,7 @@ async def build_directory_merge_plan(
                     "file_name": fname,
                     "target_dir": dest_dir,
                     "target_path": dest_path,
+                    "source_snapshot": build_file_fingerprints([re_item]).get(fpath),
                     "description": dest_desc,
                 })
 
@@ -1036,8 +1063,10 @@ async def execute_directory_merge(
     # 包含目录条目，防止预览后的新增季/附件被遗漏后仍假报整组完成。
     for inventory_path, snapshot in (plan.get("inventory_snapshots") or {}).items():
         current = await list_files_robust(cd2, inventory_path, force_refresh=True)
-        if _directory_inventory_snapshot(current) != snapshot:
-            raise RuntimeError(f"目录文件已变化，请更新归并预览: {inventory_path}")
+        current_snapshot = _directory_inventory_snapshot(current)
+        if current_snapshot != snapshot:
+            difference = _directory_inventory_difference(snapshot, current_snapshot)
+            raise RuntimeError(f"目录文件已变化，请更新归并预览: {inventory_path}；{difference}")
     if plan.get("align_only"):
         from app.core.directory_governance import _check_live_group_drift
         drift = await _check_live_group_drift(cd2, group, get_settings())
@@ -1047,6 +1076,10 @@ async def execute_directory_merge(
     source_check_cache = {}
     for item in files_to_move:
         await verify_snapshot(item["source_path"], item.get("source_snapshot"), source_check_cache)
+    for asset in assets_to_preserve:
+        if not asset.get("source_snapshot"):
+            raise RuntimeError("附件计划缺少文件指纹，请更新归并预览")
+        await verify_snapshot(asset["source_path"], asset["source_snapshot"], source_check_cache)
 
     prepared_dirs: dict[str, set[str]] = {}
     moved_files: list[str] = []
@@ -1105,6 +1138,8 @@ async def execute_directory_merge(
         dest_dir = asset["target_dir"]
         dest_name = asset["file_name"]
         try:
+            # 前置视频步骤可能耗时，附件移动前再次强读，不能只依赖批次开始时的快照。
+            await verify_snapshot(src_path, asset["source_snapshot"])
             final_dest = f"{dest_dir}/{dest_name}"
             if os.path.exists(final_dest) and not os.path.exists(src_path):
                 preserved_assets.append(dest_name)

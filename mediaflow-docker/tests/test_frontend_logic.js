@@ -165,7 +165,7 @@ console.log("===================================================================
     escapeHtml: String, escapeJsAttr: String, updateSelection() {}, findItemByRecordId: () => item, updateGapFillSitesToolbarBadge() {},
     openModal: id => {context.openedModal = id;}};
   vm.createContext(context);
-  vm.runInContext(source('cleanSeasonStatusNote') + ';' + source('renderEpisodesList') + ';renderEpisodesList()', context);
+  vm.runInContext(source('getGapFillLists') + ';' + source('cleanSeasonStatusNote') + ';' + source('renderEpisodesList') + ';renderEpisodesList()', context);
   assert(!getNode('episodeItemContainer').innerHTML.includes("markSeasonHandled('record', this)"));
   assert(getNode('episodeItemContainer').innerHTML.includes("holdSeasonForTask('record', this)"));
   context.currentCategory = 'download';
@@ -416,7 +416,7 @@ console.log("===================================================================
       'getCategoryName', 'toggleDirectoryGroupsSection', 'setDirectoryGroupViewTab',
       'toggleDirectoryGroupItemDetail', 'locateDirectoryGroupInAnomaly', 'locateDirectoryGroupInReview',
       'returnFromDirectoryGroupSection', 'filterResultCategory',
-      'renderDirectoryGroupsPanel', 'renderEpisodesList'
+      'renderDirectoryGroupsPanel', 'getGapFillLists', 'renderEpisodesList'
     ].map(sourceWithCr).join(';\n');
 
     vm.createContext(dgContext);
@@ -925,14 +925,15 @@ console.log("===================================================================
       'var _recExecPollToken = 0;',
       extractFn('_resetRecBatchExecBtn'),
       extractFn('_renderRecBatchProgress'),
+      extractFn('renderRecommendedRepreview'),
       extractFn('executeRecommendedBatchPlan')
     ].join(';\n'), recCtx);
 
     // Case 1: needs_repreview 不得伪装为完成，且按钮必须变为重新生成预览
     await recCtx.executeRecommendedBatchPlan();
-    assert(recEls.recBatchBody.innerHTML.includes('目录文件变化安全拦截'), 'needs_repreview 必须明确展示拦截提示');
+    assert(recEls.recBatchBody.innerHTML.includes('本轮已暂停，请更新预览'), 'needs_repreview 必须明确展示拦截提示');
     assert(!recEls.recBatchBody.innerHTML.includes('推荐处理执行完成'), 'needs_repreview 不得渲染执行完成卡片');
-    assert(recEls.recBatchExecBtn.innerHTML.includes('重新生成预览并核对'), 'needs_repreview 后按钮必须提示重新生成预览');
+    assert(recEls.recBatchExecBtn.innerHTML.includes('更新预览'), 'needs_repreview 后按钮必须提示重新生成预览');
     assert.strictEqual(recEls.recBatchExecBtn.disabled, false);
 
     // Case 2: 正常后台轮询完成，必须刷新列表且按钮不得停留在转圈状态

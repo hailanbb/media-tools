@@ -6,7 +6,7 @@ const html = fs.readFileSync(path.join(__dirname,'../frontend/index.html'),'utf8
 for (const m of html.matchAll(/<script\b[^>]*>([^]*?)<\/script>/g)) if (m[1].trim()) new vm.Script(m[1]);
 const ctx={escapeHtml:s=>String(s??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;'),escapeJsAttr:s=>s,cleanSeasonStatusNote:s=>s};
 vm.createContext(ctx);
-for(const name of ['groupRecommendedSkipped','renderRecommendedSkipped','readableLookupReason','renderDoubanLookup','seasonDecisionSummary']) {
+for(const name of ['renderRecommendedRepreview','groupRecommendedSkipped','renderRecommendedSkipped','readableLookupReason','renderDoubanLookup','seasonDecisionSummary']) {
  const match=html.match(new RegExp('function '+name+'\\([^]*?\\n    \\}'));
  assert(match,name);vm.runInContext(match[0],ctx);
 }
@@ -30,3 +30,16 @@ for (const category of ['review','anomaly','download','archive','airing']) {
 }
 assert(ctx.seasonDecisionSummary({season:'S12'},{meta_status:'not_listed'},{}).includes('未收录 S12'));
 console.log('v2.5.53 frontend: grouped blockers, dependency dedup, readable diagnostics, escaping, five-module summaries PASS');
+
+const paused=ctx.renderRecommendedRepreview([{show_name:'<作品>',season_number:0,modified_videos:['/src/a.mkv','/src/a.mkv']},{show_name:'读取失败',error:'TimeoutError'}]);
+assert(paused.includes('1 个视频信息与预览不一致'));
+assert(paused.includes('目录读取未完成'));
+assert(paused.includes('S00'));
+assert(paused.includes('&lt;作品&gt;'));
+assert(!/<details[^>]*\bopen\b/.test(paused));
+assert(!paused.includes('尚未执行任何删除'));
+assert(paused.includes('更新预览不会自动执行删除'));
+console.log('Paused preview: collapsed differences, deduplication, read errors and escaping PASS');
+
+const classified=ctx.renderRecommendedRepreview([{show_name:'示例',modified_videos:['/src/a.mkv'],modified_details:{'/src/a.mkv':['modified','size']}}]);
+assert(classified.includes('差异：修改时间、大小'));

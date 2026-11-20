@@ -8,7 +8,7 @@ from collections.abc import AsyncGenerator
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from pathlib import Path
@@ -116,7 +116,7 @@ async def auth_middleware(request: Request, call_next):
         path = request.url.path
         # 白名单：首页、静态文件、文档与健康检查放行
         is_public = (
-            path in ("/", "/index.html", "/favicon.ico")
+            path in ("/", "/index.html", "/favicon.ico", "/api/system/version")
             or path.startswith(("/static/", "/docs", "/openapi.json", "/api/system/health"))
             or path.endswith((".html", ".css", ".js", ".ico", ".png", ".svg", ".woff", ".woff2"))
         )
@@ -138,11 +138,17 @@ _frontend_dir = pathlib.Path(__file__).resolve().parent.parent / "frontend"
 
 
 @app.get("/")
+@app.get("/index.html", include_in_schema=False)
+@app.get("/static/index.html", include_in_schema=False)
 async def root():
     """返回前端首页。"""
     index = _frontend_dir / "index.html"
     if index.exists():
-        return FileResponse(index)
+        return HTMLResponse(
+            index.read_text(encoding="utf-8").replace("__MEDIAFLOW_VERSION__", VERSION)
+                .replace("<!--MEDIAFLOW_VERSION-->版本读取中", f"v{VERSION}"),
+            headers={"Cache-Control": "no-store", "X-MediaFlow-Version": VERSION},
+        )
     return {"message": "MediaFlow API is running. Frontend not found."}
 
 

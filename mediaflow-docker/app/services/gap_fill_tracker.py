@@ -26,6 +26,8 @@ from app.models.season import SeasonRecord
 from app.models.task import Task
 
 # 会从“默认待补清单”扣除（阻断本轮及后续重复推种）的集状态
+NO_RESOURCE_OUTCOMES = {"zero_hits", "low_seeders", "no_qualified_candidate", "wrong_identity"}
+
 BLOCKING_GAP_FILL_STATES = {
     "intent_submitting",
     "queued",
@@ -606,7 +608,15 @@ async def compute_season_gap_fill_view(
     if not is_gap_season:
         view_bucket = "none"
     elif actionable_missing:
-        view_bucket = "todo"
+        # 仅已搜索且本轮覆盖当前全部可补缺号的确定性无资源结果进入独立页签。
+        # 部分在途、接口失败、中止未开始和新增缺号仍留在待补页，不暗示可以删源。
+        searched_raw = _parse_json_safe(run_row.target_episodes_json, []) if run_row else []
+        searched = {int(ep) for ep in searched_raw if str(ep).isdigit()} if isinstance(searched_raw, list) else set()
+        no_resource = bool(
+            run_row and run_row.outcome_status in NO_RESOURCE_OUTCOMES
+            and not blocking_eps and set(actionable_missing) <= searched
+        )
+        view_bucket = "no_resource" if no_resource else "todo"
     elif blocking_eps:
         view_bucket = "pushed_pending"
     else:
@@ -1084,6 +1094,7 @@ async def refresh_task_summary(task_id: str, db: AsyncSession) -> dict[str, Any]
         "review_needed": counts["review"],
         "download_needed": max(0, counts["download"] - counts["download_pushed"]),
         "download_pushed": counts["download_pushed"],
+        "download_no_resource": counts["download_no_resource"],
         "airing": counts["airing"],
         "archive_check": counts["anomaly"],
         "already_archived": 0,

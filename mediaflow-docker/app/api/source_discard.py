@@ -2,10 +2,12 @@
 import json
 import posixpath
 import re
+import asyncio
+import logging
 from datetime import datetime, timezone
 from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from app.clients.clouddrive2 import CloudDrive2Client
 from app.clients.moviepilot import MoviePilotClient, parse_season_str
@@ -18,10 +20,12 @@ from app.models.gap_fill import GapFillEpisode
 from app.core import batch_journal
 from app.core.directory_merge import _directory_inventory_snapshot
 from app.core.episode_parser import is_video_file, is_subtitle_file
-from app.core.season_classifier import get_record_work_main_category
-from app.services.gap_fill_tracker import IN_FLIGHT_RECONCILE_STATES, refresh_task_summary
+from app.core.season_classifier import get_record_work_main_category, build_work_key, TERMINAL_STATUSES
+from app.services.gap_fill_tracker import IN_FLIGHT_RECONCILE_STATES, refresh_task_summary, compute_season_gap_fill_view
 
 router = APIRouter()
+log = logging.getLogger(__name__)
+_BATCH_LOCKS = {}
 
 
 class PreviewRequest(BaseModel):
@@ -31,6 +35,37 @@ class PreviewRequest(BaseModel):
 class ExecuteRequest(PreviewRequest):
     preview_token: str
     confirm_abandon: bool = False
+
+
+class BatchPreviewRequest(BaseModel):
+    task_id: str
+    season_record_ids: list[str] = Field(min_length=1, max_length=100)
+
+
+class BatchExecuteRequest(BaseModel):
+    preview_token: str
+    confirm_abandon: bool = False
+
+
+async def require_no_resource(db, rec):
+    if rec is None or (await compute_season_gap_fill_view(db, rec)).get('view_bucket') != 'no_resource':
+        reject("本季已不属于无合格资源清单，请更新预览；在途、接口失败及未搜索项不参与批量删源")
+    related = (await db.scalars(select(SeasonRecord).where(
+        SeasonRecord.task_id == rec.task_id,
+        SeasonRecord.season_number == rec.season_number,
+        SeasonRecord.status.not_in(tuple(TERMINAL_STATUSES)),
+    ))).all()
+    for other in related:
+        if other.id != rec.id and build_work_key(other) == build_work_key(rec):
+            if (await compute_season_gap_fill_view(db, other)).get('view_bucket') != 'no_resource':
+                reject("同一作品季的其他目录尚未满足无合格资源条件，请更新清单后逐项核对")
+
+
+async def read_listing(cd2, path):
+    listing = await cd2.list_files(path, force_refresh=True)
+    if not isinstance(listing, list):
+        reject("目录读取未返回完整清单，不能确认删除结果")
+    return listing
 
 
 def reject(message):
@@ -120,7 +155,7 @@ async def preview(body: PreviewRequest, db=Depends(get_db)):
     path = await check_scope(db, rec)
     cd2 = CloudDrive2Client()
     try:
-        parents = await cd2.list_files(posixpath.dirname(path), force_refresh=True)
+        parents = await read_listing(cd2, posixpath.dirname(path))
         target = next((x for x in parents if posixpath.normpath(x.get('path') or '') == path and x.get('isDirectory')), None)
         if target is None:
             reject("本季目录不存在，请更新条目结果")
@@ -161,6 +196,8 @@ async def execute(body: ExecuteRequest, db=Depends(get_db)):
     async with lock:
         rec = await db.get(SeasonRecord, body.season_record_id)
         path = await check_scope(db, rec)
+        if plan.get('require_no_resource'):
+            await require_no_resource(db, rec)
         if path != plan['path'] or rec.task_id != plan['task_id']:
             reject("本季目录已变化，请重新预览")
         if (datetime.now(timezone.utc)-datetime.fromisoformat(plan['created_at'])).total_seconds() > 1800 and plan.get('state') == 'previewed':
@@ -168,7 +205,7 @@ async def execute(body: ExecuteRequest, db=Depends(get_db)):
         cd2 = CloudDrive2Client()
         try:
             parent = posixpath.dirname(path)
-            listing = await cd2.list_files(parent, force_refresh=True)
+            listing = await read_listing(cd2, parent)
             target = next((x for x in listing if posixpath.normpath(x.get('path') or '') == path), None)
             if plan.get('state') == 'deleting' and target is not None:
                 reject("上次删除未完成对账；目录仍存在，请重新预览，不能重复套用旧删除请求")
@@ -181,7 +218,7 @@ async def execute(body: ExecuteRequest, db=Depends(get_db)):
                 result=await cd2.delete_file(path)
                 if isinstance(result,dict) and result.get('success') is False:
                     reject("云盘未完成删除，请核对执行结果")
-                listing=await cd2.list_files(parent,force_refresh=True)
+                listing=await read_listing(cd2, parent)
                 if any(posixpath.normpath(x.get('path') or '') == path for x in listing):
                     reject("删除后仍看到本季目录，尚未通过核验")
             rec.status='source_absent'
@@ -202,3 +239,96 @@ async def execute(body: ExecuteRequest, db=Depends(get_db)):
             return {'ok':True,'message':'已删除本季源目录并刷新父目录，本季标记为主动放弃补缺'}
         finally:
             await cd2.close()
+
+
+@router.post('/discard-source-batch/preview')
+async def preview_batch(body: BatchPreviewRequest, db=Depends(get_db)):
+    """只预览所选无资源季；无法核验项逐季列出，不扩大为整剧或整个页签。"""
+    items, blocked, paths = [], [], set()
+    for record_id in dict.fromkeys(body.season_record_ids):
+        label = record_id
+        try:
+            rec = await db.get(SeasonRecord, record_id)
+            if rec is None or rec.task_id != body.task_id:
+                reject("季记录不属于所选任务")
+            label = f'{rec.show_name} S{rec.season_number:02d}'
+            await require_no_resource(db, rec)
+            if rec.season_path in paths:
+                reject("同一物理季目录已纳入预览，不能重复删除")
+            data = (await preview(PreviewRequest(season_record_id=record_id), db))['data']
+            plan = batch_journal.load(data['preview_token'])
+            plan['require_no_resource'] = True
+            batch_journal.save(data['preview_token'], plan)
+            items.append({'season_record_id': record_id, 'title': label, **data})
+            paths.add(rec.season_path)
+        except HTTPException as exc:
+            blocked.append({'season_record_id': record_id, 'title': label, 'error': exc.detail})
+        except Exception:
+            await db.rollback()
+            log.exception('批量删源预览失败')
+            blocked.append({'season_record_id': record_id, 'title': label, 'error': '读取或核验失败，本季未纳入删除范围'})
+    token = 'plan_rec_' + uuid4().hex[:12]
+    batch_journal.save(token, {'kind': 'discard_source_batch', 'task_id': body.task_id,
+        'state': 'previewed', 'items': [{'season_record_id': x['season_record_id'],
+            'title': x['title'], 'preview_token': x['preview_token']} for x in items],
+        'blocked': blocked, 'results': [], 'created_at': datetime.now(timezone.utc).isoformat()})
+    return {'ok': True, 'preview_token': token, 'items': items, 'blocked': blocked,
+            'message': f'可执行 {len(items)} 季；未纳入 {len(blocked)} 季。确认后仅逐季删除列出的源目录。'}
+
+
+@router.get('/discard-source-batch/{token}')
+async def batch_status(token: str):
+    plan = batch_journal.load(token)
+    if not plan or plan.get('kind') != 'discard_source_batch':
+        reject('未找到批量删源预览')
+    state = plan['state']
+    lock = _BATCH_LOCKS.get(token)
+    if state == 'running' and not (lock and lock.locked()):
+        state = 'needs_repreview'
+    return {'state': state, 'results': plan.get('results', []), 'blocked': plan.get('blocked', []),
+            'total': len(plan['items']), 'result': plan.get('result')}
+
+
+@router.post('/discard-source-batch/execute')
+async def execute_batch(body: BatchExecuteRequest, db=Depends(get_db)):
+    if not body.confirm_abandon:
+        reject('尚未明确确认放弃所选季补缺并删除源端')
+    lock = _BATCH_LOCKS.setdefault(body.preview_token, asyncio.Lock())
+    if lock.locked():
+        reject('该批次正在执行，请查看回执，不要重复提交')
+    async with lock:
+        plan = batch_journal.load(body.preview_token)
+        if not plan or plan.get('kind') != 'discard_source_batch':
+            reject('未找到有效批量预览')
+        if plan['state'] == 'completed':
+            return plan['result']
+        if plan['state'] != 'previewed':
+            reject('上次执行尚未完成对账，请查看回执并重新预览剩余项，不能重发整批')
+        if not plan['items']:
+            reject('本次没有通过预览的可删除季')
+        if (datetime.now(timezone.utc) - datetime.fromisoformat(plan['created_at'])).total_seconds() > 1800:
+            reject('批量预览已过期，请重新预览')
+        plan['state'] = 'running'
+        batch_journal.save(body.preview_token, plan)
+        for item in plan['items']:
+            try:
+                response = await execute(ExecuteRequest(season_record_id=item['season_record_id'],
+                    preview_token=item['preview_token'], confirm_abandon=True), db)
+                result = {**item, 'ok': bool(response.get('ok')), 'message': response.get('message', '')}
+            except HTTPException as exc:
+                await db.rollback()
+                result = {**item, 'ok': False, 'message': exc.detail}
+            except Exception:
+                await db.rollback()
+                log.exception('批量删源单季执行异常')
+                result = {**item, 'ok': False, 'message': '执行结果未确认，请核对本季回执；未自动重试'}
+            plan['results'].append(result)
+            batch_journal.save(body.preview_token, plan)
+        completed = sum(bool(x['ok']) for x in plan['results'])
+        failed = len(plan['results']) - completed
+        plan['state'] = 'completed'
+        plan['result'] = {'ok': failed == 0 and not plan['blocked'], 'completed': completed,
+            'failed': failed, 'blocked': len(plan['blocked']), 'results': plan['results'],
+            'message': f'本轮结束：删除完成 {completed} 季、未完成 {failed} 季、预览未纳入 {len(plan["blocked"])} 季'}
+        batch_journal.save(body.preview_token, plan)
+        return plan['result']

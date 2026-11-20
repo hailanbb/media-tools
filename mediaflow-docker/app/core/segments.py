@@ -116,6 +116,8 @@ def diagnose_periods_structured(
     for item in (files or []):
         fname = str(item.get("name") or "")
         if item.get("isDirectory"):
+            if item.get("verified_auxiliary_only"):
+                continue
             subdirs.append(fname)
             continue
         if fname.lower().endswith(".strm"):
