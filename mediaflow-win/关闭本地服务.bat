@@ -1,15 +1,15 @@
 @echo off
 chcp 65001 >nul
-title MediaFlow - Í£Ö¹·şÎñ
+title MediaFlow - åœæ­¢æœåŠ¡
 color 0C
 
-echo ÕıÔÚÍ£Ö¹Õ¼ÓÃ 8080 ¶Ë¿ÚµÄ MediaFlow ½ø³Ì...
+echo æ­£åœ¨åœæ­¢å ç”¨ 8080 ç«¯å£çš„ MediaFlow è¿›ç¨‹...
 
 for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":8080" ^| findstr "LISTENING"') do (
-    echo ÕıÔÚ½áÊø PID: %%a
-    taskkill /F /PID %%a >nul 2>&1
+    echo æ­£åœ¨ç»“æŸ PID: %%a
+    taskkill /F /T /PID %%a >nul 2>&1
 )
 
 echo.
-echo MediaFlow ·şÎñÒÑ°²È«Í£Ö¹£¡
+echo MediaFlow æœåŠ¡å·²å®‰å…¨åœæ­¢ï¼
 pause
