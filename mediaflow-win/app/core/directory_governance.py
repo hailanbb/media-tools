@@ -983,6 +983,11 @@ async def find_blocking_group_for_record(
     if matched_group is None:
         return None
 
+    # 同一季内的内容等价副本清理不跨目录、不依赖归档目标选择。
+    # 身份冲突仍由清理执行器单独拦截；目录归并与清源继续使用组级门禁。
+    if operation == "clean_duplicates":
+        return None
+
     # 若提供 cd2_client 且此前已确认，执行实时网盘快速复核：一旦目标消失或新目录出现，立即自动失效
     if cd2_client is not None and matched_group.status in ("confirmed", "coexist"):
         drifted = await _check_live_group_drift(cd2_client, matched_group, settings)
@@ -1035,7 +1040,7 @@ async def _check_live_group_drift(cd2_client, group: DirectoryGroup, settings) -
         try:
             items = await cd2_client.list_files(pdir, force_refresh=True)
         except Exception:
-            return ""
+            return "目录读取失败，无法核验原确认，请恢复连接后重试"
         for it in items:
             if it.get("isDirectory") and target_tid and extract_dir_tmdb_id(it.get("name")) == target_tid:
                 live_source_paths.add(normalize_dir_path(it.get("path") or f"{pdir}/{it.get('name')}"))
@@ -1045,7 +1050,7 @@ async def _check_live_group_drift(cd2_client, group: DirectoryGroup, settings) -
         try:
             items = await cd2_client.list_files(pdir, force_refresh=True)
         except Exception:
-            return ""
+            return "目录读取失败，无法核验原确认，请恢复连接后重试"
         for it in items:
             if it.get("isDirectory") and target_tid and extract_dir_tmdb_id(it.get("name")) == target_tid:
                 live_archive_paths.add(normalize_dir_path(it.get("path") or f"{pdir}/{it.get('name')}"))
@@ -1069,7 +1074,7 @@ async def _check_live_group_drift(cd2_client, group: DirectoryGroup, settings) -
     if (
         group.confirmation_mode == "use_archive_target"
         and group.confirmed_target_path
-        and archive_parents
+        and normalize_dir_path(group.confirmed_target_path) in expected_arc
         and normalize_dir_path(group.confirmed_target_path) not in live_archive_paths
     ):
         return "已确认的归档目标目录已不存在，原确认已自动失效，请重新确认"

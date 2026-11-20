@@ -36,9 +36,11 @@ from app.clients.clouddrive2 import CloudDrive2Client
 from app.config import get_settings
 from app.core.directory_governance import (
     build_directory_group_target_options,
+    compute_group_paths_signature,
     normalize_dir_basename,
     normalize_dir_path,
 )
+from app.core.review_engine import build_file_fingerprints
 from app.core.episode_parser import is_subtitle_file, is_video_file, parse_episode
 from app.models.directory_group import DirectoryGroup
 from app.models.season import SeasonRecord
@@ -267,6 +269,13 @@ def select_prefix_with_basis(
     return default_fmt, [default_fmt, *[s for s in samples if s != default_fmt]], f"目标多模板同票，采用项目标准格式「{default_fmt}」"
 
 
+def _directory_inventory_snapshot(files):
+    return sorted(({"path": normalize_dir_path(f.get("path", "")), "name": f.get("name", ""),
+                    "id": str(f.get("id") or ""), "size": int(f.get("size") or 0),
+                    "modified": str(f.get("modified") or ""), "isDirectory": bool(f.get("isDirectory"))}
+                   for f in files), key=lambda f: (f["path"], f["id"]))
+
+
 async def list_files_robust(
     cd2: CloudDrive2Client | None,
     dir_path: str,
@@ -287,19 +296,23 @@ async def list_files_robust(
                         "path": normalize_dir_path(entry.path),
                         "isDirectory": entry.is_dir(),
                         "size": stat.st_size if not entry.is_dir() else 0,
+                        "modified": str(stat.st_mtime_ns),
+                        "id": f"{stat.st_dev}:{stat.st_ino}",
                     })
             return sorted(results, key=lambda x: x["name"])
         except Exception as e:
-            log.warning("本地读取目录 %s 失败: %s", norm_dir, e)
+            raise RuntimeError(f"本地读取目录失败: {norm_dir}") from e
 
     # 尝试 CloudDrive2
     if cd2 is not None:
         try:
             files = await cd2.list_files(norm_dir, force_refresh=force_refresh)
-            return files or []
+            if not isinstance(files, list):
+                raise RuntimeError("目录读取未返回完整清单")
+            return files
         except Exception as e:
-            log.warning("CD2 读取目录 %s 失败: %s", norm_dir, e)
-    return []
+            raise RuntimeError(f"CD2 读取目录失败: {norm_dir}") from e
+    raise RuntimeError(f"目录不存在或未提供云盘读取客户端: {norm_dir}")
 
 
 async def move_and_rename_file_robust(
@@ -307,40 +320,50 @@ async def move_and_rename_file_robust(
     src_file_path: str,
     target_dir_path: str,
     new_filename: str,
+    prepared_dirs: dict[str, set[str]] | None = None,
 ) -> str:
     """执行单个文件的移动与改名（兼容本地与 CloudDrive2，返回最终路径）。"""
     norm_src = normalize_dir_path(src_file_path)
     norm_target_dir = normalize_dir_path(target_dir_path)
     final_target_path = f"{norm_target_dir}/{new_filename}"
     old_filename = _path_basename(norm_src)
+    if normalize_dir_path(final_target_path) == norm_src:
+        return final_target_path
 
     # 检查本地文件系统
     if os.path.exists(norm_src):
         os.makedirs(norm_target_dir, exist_ok=True)
+        if os.path.exists(final_target_path) and os.path.normcase(norm_src) != os.path.normcase(final_target_path):
+            raise FileExistsError(f"目标已存在，禁止覆盖: {final_target_path}")
         shutil.move(norm_src, final_target_path)
         return final_target_path
 
     # CloudDrive2 客户端调用
     if cd2 is not None:
-        # 1. 确保目标目录存在
-        try:
-            await cd2.mkdir(norm_target_dir)
-        except Exception:
-            pass
+        prepared_dirs = prepared_dirs if prepared_dirs is not None else {}
+        if norm_target_dir not in prepared_dirs:
+            try:
+                await cd2.mkdir(norm_target_dir)
+            except Exception:
+                pass  # 仅由随后成功列举确认目标已存在；读取失败继续抛出
+            listed = await cd2.list_files(norm_target_dir, force_refresh=True)
+            prepared_dirs[norm_target_dir] = {f.get("name", "").casefold() for f in listed}
+        existing_names = prepared_dirs[norm_target_dir]
+        same_directory = normalize_dir_path(_path_dirname(norm_src)) == norm_target_dir
+        if new_filename.casefold() in existing_names or (not same_directory and old_filename.casefold() in existing_names):
+            raise FileExistsError(f"目标目录存在同名文件，禁止覆盖: {final_target_path}")
 
-        # 2. 如果文件名一致直接移动，若不一致则移动后重命名
-        if old_filename == new_filename:
-            mv_res = await cd2.move_file(norm_src, norm_target_dir, skip_existing=False)
+        if not same_directory:
+            mv_res = await cd2.move_file(norm_src, norm_target_dir, skip_existing=True)
             if not mv_res.get("success", False):
                 raise RuntimeError(f"CD2 移动文件失败: {mv_res.get('errorMessage') or '未知错误'}")
-        else:
-            mv_res = await cd2.move_file(norm_src, norm_target_dir, skip_existing=False)
-            if not mv_res.get("success", False):
-                raise RuntimeError(f"CD2 移动文件失败: {mv_res.get('errorMessage') or '未知错误'}")
+        if old_filename != new_filename:
             temp_path = f"{norm_target_dir}/{old_filename}"
             rn_res = await cd2.rename_file(temp_path, new_filename)
             if not rn_res.get("success", False):
                 raise RuntimeError(f"CD2 重命名文件失败: {rn_res.get('errorMessage') or '未知错误'}")
+            existing_names.discard(old_filename.casefold())
+        existing_names.add(new_filename.casefold())
         return final_target_path
 
     raise RuntimeError(f"无法定位文件或缺少有效存储驱动: {norm_src}")
@@ -362,6 +385,8 @@ async def delete_dir_robust(cd2: CloudDrive2Client | None, dir_path: str) -> boo
 
     if cd2 is not None:
         try:
+            if await cd2.list_files(norm_dir, force_refresh=True):
+                return False
             res = await cd2.delete_file(norm_dir)
             return bool(res.get("success", True))
         except Exception as e:
@@ -500,10 +525,11 @@ async def build_directory_merge_plan(
             sep = "\\" if ("\\" in parent_cat_dir and "/" not in parent_cat_dir) else "/"
             final_src_target = normalize_dir_path(f"{parent_cat_dir}{sep}{canon_dir_name}")
             source_target_will_create = True
-            if settings.archive_root and group.category_key:
-                archive_target_show = normalize_dir_path(
-                    f"{settings.archive_root.rstrip('/')}/{group.category_key.strip('/')}/{canon_dir_name}"
-                )
+            if settings.archive_root and group.category_key.startswith("cat:"):
+                category_path = group.category_key.removeprefix("cat:").strip("/")
+                if category_path == "_root_":
+                    category_path = ""
+                archive_target_show = normalize_dir_path(posixpath.join(settings.archive_root, category_path, canon_dir_name))
             elif archive_target_show:
                 archive_target_show = normalize_dir_path(
                     f"{_path_dirname(archive_target_show)}/{canon_dir_name}"
@@ -534,9 +560,12 @@ async def build_directory_merge_plan(
         can_execute = False
         block_reasons.append("未能确定源端目标主目录")
 
-    if not merge_from_show_paths:
+    archive_paths = {normalize_dir_path(e.get("norm_path")) for e in entries if e.get("side") == "archive"}
+    align_only = bool(not merge_from_show_paths and len(all_src_paths) == 1
+                      and not source_target_will_create and archive_target_show and len(archive_paths) <= 1)
+    if not merge_from_show_paths and not align_only:
         can_execute = False
-        block_reasons.append("当前组内未发现其他需要并入的源端目录")
+        block_reasons.append("源端无需归并，但归档目标尚不能唯一确定")
 
     for p in merge_from_show_paths:
         if p == final_src_target or final_src_target.startswith(f"{p}/") or p.startswith(f"{final_src_target}/"):
@@ -545,18 +574,32 @@ async def build_directory_merge_plan(
 
     # 确定本次作用季列表（G08: 支持一次组级计划覆盖多个季）
     probe_cache: dict[str, list[dict[str, Any]]] = {}
+    inventory_snapshots: dict[str, list[dict[str, Any]]] = {}
+
+    async def read_inventory(path):
+        # 归并决策不能使用云盘尚未加载的空缓存；每个目录本次只强读一次。
+        if path not in probe_cache:
+            listing = await list_files_robust(cd2_client, path, force_refresh=True)
+            probe_cache[path] = listing
+            inventory_snapshots[path] = _directory_inventory_snapshot(listing)
+        return probe_cache[path]
+
     discovered_seasons: set[int] = set()
     if season_numbers:
         discovered_seasons.update(int(s) for s in season_numbers if int(s) > 0)
     elif all_seasons:
         for src_show in merge_from_show_paths:
-            root_entries_probe = await list_files_robust(cd2_client, src_show, force_refresh=force_refresh)
+            root_entries_probe = await read_inventory(src_show)
             probe_cache[src_show] = root_entries_probe
             for re_item in root_entries_probe:
                 if re_item.get("isDirectory"):
                     m_s = re.match(r"(?i)^(?:Season\s*|S)(\d{1,2})$", re_item["name"])
                     if m_s and int(m_s.group(1)) > 0:
                         discovered_seasons.add(int(m_s.group(1)))
+        # 已知季也纳入收尾，不能因空根回落为 S01 而遗留 S06/S07 的旧记录。
+        for entry in entries:
+            if entry.get("side") == "source":
+                discovered_seasons.update(int(sn) for sn in entry.get("seasons", []) if int(sn) > 0)
         if not discovered_seasons:
             discovered_seasons.add(int(season_number))
     else:
@@ -586,12 +629,12 @@ async def build_directory_merge_plan(
     per_season_prefixes: dict[int, dict[str, Any]] = {}
 
     # 预先读取目标根文件以处理剧根公共资产 (M09)
-    target_root_files = [] if source_target_will_create else await list_files_robust(cd2_client, final_src_target, force_refresh=force_refresh)
+    target_root_files = [] if source_target_will_create else await read_inventory(final_src_target)
     target_root_names_lower = {tf["name"].lower() for tf in target_root_files if not tf.get("isDirectory")}
 
     # 检查旧剧根公共资产与未纳入本次合并的其他季
     for old_src_show in merge_from_show_paths:
-        root_entries = probe_cache[old_src_show] if old_src_show in probe_cache else await list_files_robust(cd2_client, old_src_show, force_refresh=force_refresh)
+        root_entries = await read_inventory(old_src_show)
         old_remaining_for_show: list[str] = []
         for re_item in root_entries:
             if re_item.get("isDirectory"):
@@ -601,6 +644,12 @@ async def build_directory_merge_plan(
                     rem_label = f"{posixpath.basename(old_src_show)}/{dir_name}"
                     remaining_seasons.append(rem_label)
                     old_remaining_for_show.append(rem_label)
+                elif not m_s:
+                    rem_label = f"{posixpath.basename(old_src_show)}/{dir_name}"
+                    remaining_seasons.append(rem_label)
+                    old_remaining_for_show.append(rem_label)
+                    can_execute = False
+                    block_reasons.append(f"季外子目录尚未纳入保全计划: {rem_label}")
             else:
                 fname = re_item["name"]
                 fpath = re_item["path"]
@@ -628,14 +677,19 @@ async def build_directory_merge_plan(
         # 逐季规划移动与改名 (G07, G08, G09)
         show_has_isolated_or_deferred = False
         for cur_sn in target_seasons:
-            old_season_dir = f"{old_src_show}/Season {cur_sn}"
-            old_season_files = await list_files_robust(cd2_client, old_season_dir, force_refresh=force_refresh)
+            season_entry = next((e for e in root_entries if e.get("isDirectory") and re.fullmatch(rf"(?:Season\s*|S)0*{cur_sn}", e.get("name", ""), re.I)), None)
+            if not season_entry:
+                continue
+            old_season_dir = season_entry.get("path") or f"{old_src_show}/{season_entry['name']}"
+            old_season_files = await read_inventory(old_season_dir)
             if not old_season_files:
+                directories_to_clean.append(old_season_dir)
                 continue
 
             target_season_dir = f"{final_src_target}/Season {cur_sn}"
             if cur_sn not in per_season_prefixes:
-                t_files_raw = [] if source_target_will_create else await list_files_robust(cd2_client, target_season_dir, force_refresh=force_refresh)
+                target_exists = any(e.get("isDirectory") and e.get("name") == f"Season {cur_sn}" for e in target_root_files)
+                t_files_raw = await read_inventory(target_season_dir) if target_exists else []
                 t_file_map = {f["name"]: f for f in t_files_raw if not f.get("isDirectory")}
                 chosen_p, p_samples, p_basis = select_prefix_with_basis(
                     list(t_file_map.keys()),
@@ -659,6 +713,10 @@ async def build_directory_merge_plan(
 
             for f in old_season_files:
                 if f.get("isDirectory"):
+                    isolated_conflicts.append({"season_number": cur_sn, "source_path": f.get("path"),
+                        "filename": f.get("name"), "reason": "季内子目录尚未完整盘点，保留原目录"})
+                    season_has_blocked = True
+                    show_has_isolated_or_deferred = True
                     continue
                 fname = f["name"]
                 fpath = f["path"]
@@ -710,6 +768,15 @@ async def build_directory_merge_plan(
                 # 拆分前缀与季集标记边界 (M03)
                 boundary = split_season_episode_boundary(fname, cur_sn)
                 if not boundary:
+                    # season.nfo、海报等季级附件不含 SxxEyy，不能当作错命名视频。
+                    # 不覆盖规范目录已有资料，原名保全到有来源标识的目录。
+                    if not is_video_file(fname) and not is_subtitle_file(fname):
+                        dest_dir = f"{target_season_dir}/合并保留/{posixpath.basename(old_src_show)}"
+                        assets_to_preserve.append({"source_path": fpath, "file_name": fname,
+                            "target_dir": dest_dir, "target_path": f"{dest_dir}/{fname}",
+                            "source_snapshot": build_file_fingerprints([f]).get(fpath),
+                            "description": "保全季级附件（保留原名，不覆盖已有资料）"})
+                        continue
                     if all_seasons:
                         isolated_conflicts.append({
                             "season_number": cur_sn,
@@ -744,6 +811,9 @@ async def build_directory_merge_plan(
                         )
                         if (
                             existing_f
+                            and is_video_file(fname)
+                            and src_unit.get("content_kind") == "regular"
+                            and bool(src_unit.get("episode_numbers"))
                             and src_unit["content_unit_key"] == tgt_unit["content_unit_key"]
                             and int(f.get("size") or 0) > 0
                             and int(existing_f.get("size") or 0) > 0
@@ -754,6 +824,8 @@ async def build_directory_merge_plan(
                                 "season_number": cur_sn,
                                 "source_path": fpath,
                                 "source_filename": fname,
+                                "source_snapshot": build_file_fingerprints([f]).get(fpath),
+                                "target_snapshot": build_file_fingerprints([existing_f]).get(existing_f.get("path")),
                                 "replaced_by": existing_f["name"],
                                 "replaced_by_path": existing_f.get("path", ""),
                                 "reason": f"与目标目录同名文件 [{existing_f['name']}] 为同内容等价副本，转入副本清理",
@@ -795,6 +867,7 @@ async def build_directory_merge_plan(
                     "episode_numbers": pe.episode_numbers,
                     "is_special": pe.is_special,
                     "size_bytes": f.get("size", 0),
+                    "source_snapshot": build_file_fingerprints([f]).get(fpath),
                     "is_conflict": is_conflict,
                     "conflict_reason": conflict_reason,
                     "collision_resolution": collision_resolution,
@@ -806,10 +879,15 @@ async def build_directory_merge_plan(
         if not old_remaining_for_show and not show_has_isolated_or_deferred:
             directories_to_clean.append(old_src_show)
 
+    if source_target_will_create and not (files_to_move or assets_to_preserve):
+        can_execute = False
+        block_reasons.append("源目录强制读取后未发现可迁入内容，不能创建空目标并迁移媒体记录")
+
     # 若主季尚未填充前缀信息（例如单季目录为空）
     if primary_season not in per_season_prefixes:
         target_season_dir = f"{final_src_target}/Season {primary_season}"
-        t_files_raw = [] if source_target_will_create else await list_files_robust(cd2_client, target_season_dir, force_refresh=force_refresh)
+        target_exists = any(e.get("isDirectory") and e.get("name") == f"Season {primary_season}" for e in target_root_files)
+        t_files_raw = await read_inventory(target_season_dir) if target_exists else []
         t_names = [f["name"] for f in t_files_raw if not f.get("isDirectory")]
         chosen_p, p_samples, p_basis = select_prefix_with_basis(
             t_names, season_number=primary_season, canonical_title=target_clean_name, selected_prefix=selected_prefix
@@ -849,7 +927,7 @@ async def build_directory_merge_plan(
     plan_id = f"plan_merge_{uuid4().hex[:12]}"
     plan = {
         "plan_id": plan_id,
-        "rules_version": "v2.5.45",
+        "rules_version": "v2.5.53",
         "task_id": task_id,
         "group_id": group_id,
         "canonical_dir_name": canon_dir_name,
@@ -880,6 +958,8 @@ async def build_directory_merge_plan(
         "directories_to_clean": list(dict.fromkeys(directories_to_clean)),
         "remaining_seasons": remaining_seasons,
         "can_execute": can_execute,
+        "align_only": align_only,
+        "inventory_snapshots": inventory_snapshots,
         "block_reasons": list(dict.fromkeys(block_reasons)),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -904,6 +984,7 @@ async def execute_directory_merge(
     *,
     plan_id: str = "",
     cd2_client: CloudDrive2Client | None = None,
+    skip_summary_refresh: bool = False,
 ) -> dict[str, Any]:
     """执行已通过预检的同作品源端目录合并与前缀统一计划（M01–M14）。"""
     task = await db.get(Task, task_id)
@@ -935,6 +1016,39 @@ async def execute_directory_merge(
     remaining_seasons = plan.get("remaining_seasons") or []
     merge_from_norm = {normalize_dir_path(p) for p in (plan.get("merge_from_show_paths") or [])}
 
+    async def verify_snapshot(path, snapshot, cache=None):
+        if not snapshot:
+            return
+        parent = _path_dirname(path)
+        listing = cache.get(parent) if cache is not None else None
+        if listing is None:
+            listing = await list_files_robust(cd2, parent, force_refresh=True)
+            if cache is not None:
+                cache[parent] = listing
+        current = next((f for f in listing if normalize_dir_path(f.get("path", "")) == normalize_dir_path(path)), None)
+        if current is None or int(current.get("size") or 0) != int(snapshot.get("size") or 0):
+            raise RuntimeError(f"文件已变化或不存在，请更新归并预览: {path}")
+        if snapshot.get("id") and str(current.get("id") or "") != str(snapshot["id"]):
+            raise RuntimeError(f"文件 ID 已变化，请更新归并预览: {path}")
+        if snapshot.get("modified") and current.get("modified") and str(current["modified"]) != str(snapshot["modified"]):
+            raise RuntimeError(f"文件修改时间已变化，请更新归并预览: {path}")
+
+    # 包含目录条目，防止预览后的新增季/附件被遗漏后仍假报整组完成。
+    for inventory_path, snapshot in (plan.get("inventory_snapshots") or {}).items():
+        current = await list_files_robust(cd2, inventory_path, force_refresh=True)
+        if _directory_inventory_snapshot(current) != snapshot:
+            raise RuntimeError(f"目录文件已变化，请更新归并预览: {inventory_path}")
+    if plan.get("align_only"):
+        from app.core.directory_governance import _check_live_group_drift
+        drift = await _check_live_group_drift(cd2, group, get_settings())
+        if drift:
+            raise RuntimeError(drift)
+
+    source_check_cache = {}
+    for item in files_to_move:
+        await verify_snapshot(item["source_path"], item.get("source_snapshot"), source_check_cache)
+
+    prepared_dirs: dict[str, set[str]] = {}
     moved_files: list[str] = []
     renamed_files: list[str] = []
     dedup_cleaned_files: list[str] = []
@@ -958,7 +1072,7 @@ async def execute_directory_merge(
                     renamed_files.append(new_name)
                 continue
 
-            await move_and_rename_file_robust(cd2, src_path, t_dir, new_name)
+            await move_and_rename_file_robust(cd2, src_path, t_dir, new_name, prepared_dirs)
             moved_files.append(new_name)
             if old_name != new_name:
                 renamed_files.append(new_name)
@@ -974,6 +1088,8 @@ async def execute_directory_merge(
     for c_item in collision_dedup_items:
         src_path = c_item["source_path"]
         try:
+            await verify_snapshot(src_path, c_item.get("source_snapshot"))
+            await verify_snapshot(c_item["replaced_by_path"], c_item.get("target_snapshot"))
             if os.path.exists(src_path):
                 os.remove(src_path)
                 dedup_cleaned_files.append(c_item["source_filename"])
@@ -981,7 +1097,7 @@ async def execute_directory_merge(
                 await cd2.delete_file(src_path)
                 dedup_cleaned_files.append(c_item["source_filename"])
         except Exception as e:
-            log.warning("清理同名等价副本失败 %s: %s", src_path, e)
+            raise RuntimeError(f"同名副本尚未核实清理，已保留源端: {src_path}") from e
 
     # 2. 保全剧根公共资产与附件 (M09)
     for asset in assets_to_preserve:
@@ -993,10 +1109,18 @@ async def execute_directory_merge(
             if os.path.exists(final_dest) and not os.path.exists(src_path):
                 preserved_assets.append(dest_name)
                 continue
-            await move_and_rename_file_robust(cd2, src_path, dest_dir, dest_name)
+            await move_and_rename_file_robust(cd2, src_path, dest_dir, dest_name, prepared_dirs)
+            target_listing = await list_files_robust(cd2, dest_dir, force_refresh=True)
+            target_file = next((f for f in target_listing if f.get("name") == dest_name and not f.get("isDirectory")), None)
+            source_listing = await list_files_robust(cd2, _path_dirname(src_path), force_refresh=True)
+            if target_file is None or any(normalize_dir_path(f.get("path", "")) == normalize_dir_path(src_path) for f in source_listing):
+                raise RuntimeError("附件迁入后未通过双端核验")
+            expected_size = (asset.get("source_snapshot") or {}).get("size")
+            if expected_size is not None and int(target_file.get("size") or 0) != int(expected_size):
+                raise RuntimeError("附件迁入后大小不一致")
             preserved_assets.append(dest_name)
         except Exception as e:
-            log.warning("保全资产失败 %s: %s", src_path, e)
+            raise RuntimeError(f"附件保全未完成，已停止收尾: {src_path}") from e
 
     # 3. 双端后验 (M11, G08 支持多季后验)
     checked_dirs_cache: dict[str, set[str]] = {}
@@ -1019,6 +1143,14 @@ async def execute_directory_merge(
         if ok:
             cleaned_dirs.append(dpath)
 
+    planned_roots = ({normalize_dir_path(p) for p in directories_to_clean} & merge_from_norm) if not remaining_seasons else set()
+    if planned_roots - {normalize_dir_path(p) for p in cleaned_dirs}:
+        raise RuntimeError("文件迁入后旧剧根尚未核验为空，保留原记录并等待收尾")
+
+    if not files_to_move and not collision_dedup_items and not assets_to_preserve and not plan.get("align_only"):
+        if any(p not in {normalize_dir_path(x) for x in cleaned_dirs} for p in merge_from_norm):
+            raise RuntimeError("旧目录仍有内容，未完成空目录收尾，保留目录组待处理状态")
+
     # 5. 局部云盘强制刷新 (M01, M14, 刷新失败单列不掩盖媒体合并成功)
     refresh_candidates = {
         task.source_path,
@@ -1030,10 +1162,11 @@ async def execute_directory_merge(
     for sn in affected_seasons:
         refresh_candidates.add(f"{source_target_show}/Season {sn}")
 
+    refreshed_entries = {}
     for r_dir in refresh_candidates:
         if r_dir:
             try:
-                await cd2.list_files(r_dir, force_refresh=True)
+                refreshed_entries[normalize_dir_path(r_dir)] = await cd2.list_files(r_dir, force_refresh=True)
             except Exception as e:
                 log.warning("刷新云盘目录缓存异常 %s: %s", r_dir, e)
                 refresh_failed.append(f"{r_dir}: {e}")
@@ -1066,7 +1199,7 @@ async def execute_directory_merge(
         # G06: 若目标为新建规范目录，尚无对应 SeasonRecord，则将首个源季记录就地迁移为新规范目录的主记录
         target_rec = t_recs[0] if t_recs else None
         migrated_primary = None
-        if target_rec is None and src_recs:
+        if target_rec is None and src_recs and any(int(f.get("season_number") or season_number) == sn for f in files_to_move):
             target_rec = src_recs[0]
             migrated_primary = target_rec
             target_rec.show_name = target_show_basename
@@ -1116,6 +1249,25 @@ async def execute_directory_merge(
     group.invalidated_reason = ""
     group.confirmed_at = datetime.now(timezone.utc)
 
+    # 本次执行造成的目录变化更新快照；其他季同步确认，避免自身操作被误判为外部漂移。
+    old_entries = json.loads(group.paths_json or "[]")
+    cleaned_norms = {normalize_dir_path(p) for p in cleaned_dirs}
+    entries = [e for e in old_entries if normalize_dir_path(e.get("norm_path") or "") not in cleaned_norms]
+    if not any(e.get("side") == "source" and normalize_dir_path(e.get("norm_path") or "") == norm_source_target for e in entries):
+        target_entry = next((f for f in refreshed_entries.get(normalize_dir_path(posixpath.dirname(source_target_show)), []) if normalize_dir_path(f.get("path", "")) == norm_source_target), {})
+        entries.append({"side": "source", "norm_path": norm_source_target, "raw_name": target_show_basename,
+                        "stable_id": str(target_entry.get("id") or ""), "tmdb_id": str(group.tmdb_id),
+                        "category": group.category_key, "seasons": affected_seasons})
+    group.paths_json = json.dumps(entries, ensure_ascii=False)
+    group.paths_signature = compute_group_paths_signature(entries)
+    for rec in all_group_recs:
+        ev = json.loads(rec.evidence_json or "{}")
+        dg = ev.get("directory_group") or {}
+        if dg.get("id") == group.id:
+            ev["directory_group"] = {**dg, "status": "confirmed", "requires_confirm": False,
+                                     "invalidated_reason": "", "confirmed_target_path": archive_target_show}
+            rec.evidence_json = json.dumps(ev, ensure_ascii=False)
+
     grp_ev["last_merge_receipt"] = {
         "plan_id": plan.get("plan_id"),
         "executed_at": datetime.now(timezone.utc).isoformat(),
@@ -1129,12 +1281,12 @@ async def execute_directory_merge(
     }
     group.evidence_json = json.dumps(grp_ev, ensure_ascii=False)
 
-    summary = await refresh_task_summary(task_id, db)
+    summary = {} if skip_summary_refresh else await refresh_task_summary(task_id, db)
     await db.commit()
     await db.refresh(group)
 
     target_show_name = posixpath.basename(source_target_show).split(" [tmdbid=")[0]
-    success_msg = f"已合并到{target_show_name}目录，已统一 {len(renamed_files)} 个文件名，旧目录已清理，目录已刷新"
+    success_msg = f"已合并到{target_show_name}目录，已统一 {len(renamed_files)} 个文件名，已清理 {len(cleaned_dirs)} 个实际空目录，目录已刷新"
     if refresh_failed:
         success_msg += f"（{len(refresh_failed)} 个目录刷新待重试）"
 

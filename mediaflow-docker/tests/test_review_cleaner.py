@@ -155,7 +155,8 @@ class TestReviewEngine(unittest.TestCase):
             {"name": "Show - S01E01 - UBWEB.zh.srt", "path": "/p/E01_UB.zh.srt", "size": 50000, "isDirectory": False},
         ]
 
-        plan = generate_review_clean_plan(files, season_number=1, total_episodes=2)
+        plan = generate_review_clean_plan(files, season_number=1, total_episodes=2,
+                                          verified_deleted_video_names={"Show - S01E02 - CHDWEB.mkv"})
         self.assertTrue(plan["can_clean"])
 
         deleted_names = [f["name"] for f in plan["to_delete"]]

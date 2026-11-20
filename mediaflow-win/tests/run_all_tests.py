@@ -19,6 +19,11 @@ import time
 sys.stdout.reconfigure(encoding='utf-8')
 
 SUITES = [
+    {"name": "v2.5.53 当前任务识别与附件保全回归", "cmd": [sys.executable, "tests/test_v2553_task_audit.py"], "type": "python"},
+    {"name": "v2.5.53 详情与阻塞项展示回归", "cmd": ["node", "tests/test_v2553_frontend.js"], "type": "node"},
+    {"name": "v2.5.51 核对队列与批次结果交互", "cmd": ["node", "tests/test_v2551_frontend.js"], "type": "node"},
+    {"name": "v2.5.51 推荐处理闭环专项回归", "cmd": [sys.executable, "tests/test_v2551_review_closure.py"], "type": "python"},
+    {"name": "v2.5.52 推荐处理与豆瓣通道", "cmd": [sys.executable, "tests/test_v2552_recommended.py"], "type": "python"},
     {"name": "分段及订阅联合操作", "cmd": [sys.executable, "tests/test_governance.py"], "type": "python"},
     {"name": "外文发行名防误报与同TMDB多目录治理验收", "cmd": [sys.executable, "tests/test_release_alias_and_multi_dir.py"], "type": "python"},
     {"name": "补缺选种、站点扩展与整季回退验收", "cmd": [sys.executable, "tests/test_gap_fill_optimization.py"], "type": "python"},
@@ -33,7 +38,6 @@ SUITES = [
     {"name": "5. 复核清理与孤儿伴生仲裁测试", "cmd": [sys.executable, "tests/test_review_cleaner.py"], "type": "python"},
     {"name": "6. 归档迁移与源端零残留测试", "cmd": [sys.executable, "tests/test_archiver.py"], "type": "python"},
     {"name": "7. MoviePilot 智能治理双轨分离测试", "cmd": [sys.executable, "tests/test_moviepilot.py"], "type": "python"},
-    {"name": "8. 全系统端到端真实服务生命周期测试", "cmd": [sys.executable, "tests/full_system_test.py"], "type": "python"},
     {"name": "9. 物理安全底线与字幕保护专项测试", "cmd": [sys.executable, "tests/test_phase1_security.py"], "type": "python"},
     {"name": "10. 领域算法多集识别与增量合并测试", "cmd": [sys.executable, "tests/test_phase3_domain.py"], "type": "python"},
     {"name": "11. 跨库集数差分与前端契约审计测试", "cmd": [sys.executable, "tests/test_amw_and_cross_diff.py"], "type": "python"},
@@ -50,6 +54,7 @@ SUITES = [
 ]
 
 LIVE_SUITES = [
+    {"name": "8. 全系统端到端真实服务生命周期测试", "cmd": [sys.executable, "tests/full_system_test.py"], "type": "python"},
     {"name": "22. 真实服务只读契约与并发无锁探针 (8080)", "cmd": [sys.executable, "tests/smoke_real_server.py"], "type": "python"},
     {"name": "23. 原生 Edge Playwright 无头浏览器 E2E 冒烟巡检", "cmd": [sys.executable, "tests/e2e_browser_smoke.py"], "type": "python"},
 ]

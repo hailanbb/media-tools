@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 import json
 import posixpath
 import urllib.parse
@@ -391,7 +392,7 @@ def diagnose_season(
 
         # 若允许加更特辑容错且官方总集数正常 (>=6)，超出部分紧邻总集数（<= total + 4 且数量 <= 3），无正片重复集，视为附随特辑直接就绪可归档
         if allow_bonus_specials and total_episodes >= 6 and max(out_of_range) <= total_episodes + 4 and len(out_of_range) <= 3 and not has_regular_dup:
-            extra_desc = f"（附带 {len(out_of_range)} 集加更/特辑: {out_of_range}）"
+            extra_desc = f"（另有集号 {out_of_range}，保留原文件与编号，不改写资料总数）"
             return "archive_ready", f"全 {total_episodes} 集齐全{extra_desc}，可归档"
         dup_note = f"；第 {','.join(map(str, regular_duplicates or duplicate_episodes))} 集另有重复版本" if (regular_duplicates or duplicate_episodes) else ""
         return "review_needed", f"当前资料收录 {total_episodes} 集，本地另有集号 {out_of_range} 待核实{dup_note}。"
@@ -572,10 +573,10 @@ async def _investigate_season_identity(
     if release_signals.get("mixed_works"):
         titles = " / ".join(release_signals.get("distinct_release_titles") or [])
         return {
-            "kind": "mixed_works",
+            "kind": "release_title_unverified",
             "blocking": True,
-            "ambiguous": False,
-            "message": f"同季目录混放多个发行作品文件（{titles}），请拆清来源或人工确认后处理。",
+            "ambiguous": True,
+            "message": f"发行名对应关系尚未核实（{titles}）。已保留相关文件；需核实这些发行名是否属于同一作品，不能仅凭名称差异认定混放。",
             "detected_work": {},
             "clues": release_signals.get("distinct_release_titles") or [],
             "sample_files": release_signals.get("sample_files") or [],
@@ -598,7 +599,9 @@ async def _investigate_season_identity(
             tmdb_client=active_tmdb,
             mp_client=mp_client,
         )
-        best_cand = cands[0] if cands else {}
+        from app.core.identity_resolver import _titles_pair_compatible
+        best_cand = next((c for c in cands if ("score" not in c or float(c.get("score") or 0) > 0)
+                          and any(_titles_pair_compatible(dominant, str(c.get(k) or "")) for k in ("name", "original_name"))), {})
         ep_matches: list[dict[str, Any]] = []
         if best_cand.get("tmdb_id") and release_signals.get("ep_title_hints"):
             ep_list = await _fetch_candidate_season_episodes(
@@ -614,7 +617,7 @@ async def _investigate_season_identity(
         ep_desc = f"，{len(ep_matches)} 集分集英文名吻合" if ep_matches else ""
         msg = (
             f"作品归属冲突：目录主条目 {primary_name} (TMDB {tmdb_id_num or '?'}) 仅收录 {present_label}，"
-            f"本地文件实为发行片名「{dominant}」，高度对应 {cand_desc}{ep_desc}。请确认是否拆回/改绑本季。"
+            f"本地文件包含发行片名「{dominant}」，与目录名称存在差异；参考 {cand_desc}{ep_desc}。发行名差异尚不能单独证明错配，请核对身份依据。"
         )
         return {
             "kind": "identity_conflict",
@@ -654,13 +657,16 @@ async def _investigate_season_identity(
 
         matched_homonym = None
         for cand in conflict_cands:
+            if "score" in cand and float(cand.get("score") or 0) <= 0:
+                continue
+            from app.core.identity_resolver import _titles_pair_compatible
+            if not any(_titles_pair_compatible(dominant or primary_work_info.get("original_name") or show_name, str(cand.get(k) or "")) for k in ("name", "original_name")):
+                continue
             c_year = cand.get("season_year") or str(cand.get("first_air_date") or "")[:4]
             if release_years and c_year and c_year.isdigit() and int(c_year) not in release_years:
                 continue
             matched_homonym = cand
             break
-        if not matched_homonym and conflict_cands:
-            matched_homonym = conflict_cands[0]
 
         if matched_homonym:
             shared = is_short_or_shared_title(
@@ -881,6 +887,13 @@ async def run_inspection(
                 season_mappings[sn] = mp_map
 
         needed_seasons = [sn for sn, _ in season_dirs]
+        known_douban_bindings = {}
+        if db is not None and tmdb_id_num:
+            async with db_lock:
+                for sn in needed_seasons:
+                    saved = await get_verified_metadata_snapshot(db, f"douban_binding:{tmdb_id_num}:S{sn}", ttl_seconds=365 * 86400)
+                    if saved and saved.get("douban_id"):
+                        known_douban_bindings[sn] = saved["douban_id"]
         async def resolve_metadata():
             try:
                 return await _resolve_show_metadata(
@@ -891,6 +904,7 @@ async def run_inspection(
                     tmdb_client=active_tmdb,
                     log=log,
                     evidence_out=meta_evidence,
+                    known_douban_bindings=known_douban_bindings,
                 )
             except TypeError:
                 # 兼容测试环境中对 _resolve_show_metadata 的 5/6 参 Patch
@@ -921,6 +935,15 @@ async def run_inspection(
 
         if cancelled_tasks and task_id and task_id in cancelled_tasks:
             return []
+
+        if db is not None and resolved_tmdb_id:
+            async with db_lock:
+                for sn, info in tmdb_seasons_data.items():
+                    if info.get("douban_id") and not info.get("candidate_id"):
+                        await save_verified_metadata_snapshot(db, f"douban_binding:{resolved_tmdb_id}:S{sn}",
+                            "douban_binding", str(resolved_tmdb_id), sn,
+                            {"douban_id":info["douban_id"], "title":show_name, "season_number":sn,
+                             "identity_checked":True, "checked_at":datetime.now().isoformat()})
 
         primary_work_info: dict[str, Any] = dict(meta_evidence.get("work_info") or {})
         primary_work_valid = bool(primary_work_info.get("seasons_present") or tmdb_seasons_data)
@@ -1207,7 +1230,7 @@ async def run_inspection(
                         "kind": "mixed_works",
                         "blocking": True,
                         "ambiguous": False,
-                        "message": f"同季目录混放多个发行作品文件（{' / '.join(release_signals.get('distinct_release_titles') or [])}），请拆分后处理。",
+                        "message": f"发行名对应关系尚未核实（{' / '.join(release_signals.get('distinct_release_titles') or [])}），相关文件保留，不能仅凭名称差异认定混放。",
                         "sample_files": release_signals.get("sample_files") or [],
                     }
 
@@ -1611,6 +1634,8 @@ async def run_inspection(
                     period_evidence = {
                         "is_segmented": True,
                         "parts_total": len(parts),
+                        "mapping": parts,
+                        "ordinals": info.get("ordinals") or {},
                         "outcome_kind": period_struct.get("outcome_kind", "ok"),
                         "source_status": src_period[0] if src_period else None,
                         "archive_status": arc_period[0] if arc_period else None,
@@ -1625,6 +1650,8 @@ async def run_inspection(
                     period_evidence = {
                         "is_segmented": True,
                         "parts_total": len(parts),
+                        "mapping": parts,
+                        "ordinals": info.get("ordinals") or {},
                         "outcome_kind": period_struct.get("outcome_kind", "unrecognized_content"),
                         "subdirs": period_struct.get("subdirs") or [],
                         "unrecognized_videos": period_struct.get("unrecognized_videos") or [],
@@ -1897,7 +1924,10 @@ async def run_inspection(
                 "metadata_binding_verified": bool(active_mapping or (info.get("total") and not info.get("candidate_id"))),
                 "asset_fingerprint": asset_fp,
                 "source_total_conflict": source_total_conflict_info,
-                "source_fusion": info.get("source_fusion") or {},
+                "source_fusion": info.get("source_fusion") or ({"douban_lookup": {
+                    "status": "failed" if any(d.get("status") == "failed" for d in meta_evidence.get("rejected_douban", [])) else "not_adopted",
+                    "attempts": meta_evidence.get("rejected_douban", [])[-32:],
+                }} if meta_evidence.get("rejected_douban") else {}),
                 "review_plan_preview": review_plan_preview,
                 "review_resolution": review_resolution,
                 "meta_error": meta_evidence.get("meta_error") or "",
@@ -2957,16 +2987,65 @@ def _douban_evidence(detail, subject_id, search_title, show_name, wanted, tmdb_i
             if n > 0 and (not wanted or sn in wanted) and bound_season in (None, sn)}
 
 
+def _douban_lookup_status(attempts, adopted=False):
+    if adopted:
+        return "adopted"
+    if any(a.get("status") in ("rejected", "ambiguous") for a in attempts):
+        return "not_adopted"
+    if any(a.get("status") in ("failed", "blocked", "unavailable") for a in attempts):
+        return "failed"
+    return "not_found"
+
+
 async def _fetch_seasons_via_douban(mp_client, show_name, log=None, needed_seasons=None,
-                                  extra_queries=None, tmdb_id=None, season_years=None):
+                                  extra_queries=None, tmdb_id=None, season_years=None, diagnostics=None, known_bindings=None):
+    from app.core.douban_lookup import search_items, normalize_detail, search_page_candidates, subject_page_detail, lookup_error_reason
+    diagnostics = diagnostics if diagnostics is not None else []
     wanted = set(needed_seasons or [])
     bindings = _DOUBAN_SEASON_IDS.get(str(tmdb_id), {})
     result = {}
+    detail_cache = {}
     async def read(subject_id, title, season=None):
+        subject_id = str(subject_id)
+        if not subject_id.isdigit():
+            return {}
         try:
-            detail = await mp_client.get_douban_media_info(subject_id, type_name="电视剧")
-            return _douban_evidence(detail, subject_id, title, show_name, wanted, tmdb_id, season, season_years)
+            if subject_id not in detail_cache:
+                detail = {}
+                channels = [("moviepilot_media", "get_douban_media_info"), ("moviepilot_detail", "get_douban_detail")]
+                for channel, method in channels:
+                    if not callable(getattr(type(mp_client), method, None)):
+                        continue
+                    try:
+                        response = await asyncio.wait_for(getattr(mp_client, method)(subject_id), timeout=8.0)
+                        detail = normalize_detail(response)
+                        if detail.get("seasons") or detail.get("number_of_episodes") or (detail.get("title") and str(detail.get("type") or "").casefold() in ("电影", "movie")):
+                            break
+                        diagnostics.append({"source":channel, "subject_id":subject_id, "title":title, "status":"unavailable", "reason":"详情缺少季集数，切换备用渠道"})
+                    except Exception as exc:
+                        diagnostics.append({"source":channel, "subject_id":subject_id, "title":title, "status":"failed", "reason":lookup_error_reason(exc), "error_type":type(exc).__name__})
+                if not detail.get("seasons") and not detail.get("number_of_episodes") and not (detail.get("title") and str(detail.get("type") or "").casefold() in ("电影", "movie")):
+                    async with httpx.AsyncClient(timeout=8.0) as http:
+                        response = await http.get(f"https://movie.douban.com/subject/{subject_id}/", headers={"User-Agent":"Mozilla/5.0"})
+                        if response.status_code != 200:
+                            raise ValueError(f"豆瓣详情 HTTP {response.status_code}")
+                        detail = subject_page_detail(response.text, subject_id)
+                detail_cache[subject_id] = detail
+            detail = detail_cache[subject_id]
+            found = _douban_evidence(detail, subject_id, title, show_name, wanted, tmdb_id, season, season_years)
+            reason = "身份与季号匹配，取得季资料" if found else "未取得可匹配的季号、年份或连续集数资料"
+            if not isinstance(detail, dict) or not detail:
+                reason = "详情返回为空"
+            elif detail.get("tmdb_id") and tmdb_id and str(detail["tmdb_id"]) != str(tmdb_id):
+                reason = "详情绑定另一 TMDB 作品，未采纳"
+            elif str(detail.get("type") or "").casefold() in ("电影", "movie"):
+                reason = "候选是电影，未采纳"
+            diagnostics.append({"source": "douban_detail", "subject_id": str(subject_id), "title":title,
+                                "status": "matched" if found else "rejected", "reason": reason})
+            return found
         except Exception as exc:
+            diagnostics.append({"source": "douban_detail", "subject_id": str(subject_id), "title":title,
+                                "status": "failed", "reason": lookup_error_reason(exc), "error_type": type(exc).__name__})
             if log:
                 log.warning("豆瓣条目 %s 读取失败 (%s)", subject_id, type(exc).__name__)
             return {}
@@ -2975,7 +3054,10 @@ async def _fetch_seasons_via_douban(mp_client, show_name, log=None, needed_seaso
         did = bindings.get(str(sn))
         if did:
             result.update(await read(did, "", sn))
-    unbound = wanted - {int(sn) for sn in bindings}
+    for sn, did in (known_bindings or {}).items():
+        if int(sn) in wanted and int(sn) not in result:
+            result.update(await read(did, ""))
+    unbound = wanted - set(result)
     if not wanted or unbound:
         base_queries = _generate_search_queries(show_name)
         season_labels = {1: "一", 2: "二", 3: "三", 4: "四", 5: "五", 6: "六", 7: "七", 8: "八", 9: "九", 10: "十", 11: "十一", 12: "十二"}
@@ -2987,37 +3069,86 @@ async def _fetch_seasons_via_douban(mp_client, show_name, log=None, needed_seaso
                                 else f"{base_queries[0]} Season {sn}")
             if sn > 1 and chinese_title:
                 seasonal.append(f"{base_queries[0]}{sn}")
-        queries = list(dict.fromkeys(seasonal + base_queries + list(extra_queries or [])))
+        queries = list(dict.fromkeys(base_queries[:1] + seasonal + base_queries[1:] + list(extra_queries or [])))
         candidates = {}
+        search_sem = asyncio.Semaphore(3)
         async with httpx.AsyncClient(timeout=8.0) as http:
-            for q in queries:
-                try:
-                    resp = await http.get("https://movie.douban.com/j/subject_suggest", params={"q": q},
-                                          headers={"User-Agent": "Mozilla/5.0"})
-                    if resp.status_code == 200:
-                        for it in resp.json():
-                            if str(it.get("id") or "").isdigit():
-                                candidates[str(it["id"])] = it.get("title") or ""
-                except (ValueError, httpx.HTTPError, AttributeError):
-                    pass
-                try:
-                    for it in await mp_client.search_media(q, source="douban"):
-                        did = str(it.get("douban_id") or it.get("media_id") or it.get("id") or "")
-                        if did.isdigit():
-                            candidates[did] = it.get("title") or ""
-                except Exception as exc:
-                    if log:
-                        log.debug("豆瓣搜索失败 (%s)", type(exc).__name__)
+            async def search(q):
+                async with search_sem:
+                    found = {}
+                    try:
+                        resp = await http.get("https://movie.douban.com/j/subject_suggest", params={"q": q},
+                                              headers={"User-Agent": "Mozilla/5.0"})
+                        if resp.status_code == 200:
+                            suggest_hits = search_items(resp.json())
+                            diagnostics.append({"source":"douban_suggest", "query":q, "status":"returned" if suggest_hits else "empty", "candidate_count":len(suggest_hits), "reason":"返回候选" if suggest_hits else "此搜索接口返回空列表（不代表网站无条目）"})
+                            for it in suggest_hits:
+                                if str(it.get("id") or "").isdigit():
+                                    found[str(it["id"])] = it.get("title") or ""
+                        else:
+                            diagnostics.append({"source":"douban_suggest", "query":q, "status":"failed", "reason":f"HTTP {resp.status_code}"})
+                    except (ValueError, httpx.HTTPError, AttributeError) as exc:
+                        diagnostics.append({"source":"douban_suggest", "query":q, "status":"failed", "reason":lookup_error_reason(exc), "error_type":type(exc).__name__})
+                    try:
+                        hits = await asyncio.wait_for(mp_client.search_media(q, source="douban"), timeout=10.0)
+                        hits = search_items(hits)
+                        diagnostics.append({"source":"moviepilot_douban", "query":q, "status":"returned" if hits else "empty", "candidate_count":len(hits), "reason":"返回候选" if hits else "MoviePilot 豆瓣搜索返回空列表"})
+                        for it in hits:
+                            did = str(it.get("douban_id") or it.get("media_id") or it.get("id") or "")
+                            if did.isdigit():
+                                found[did] = it.get("title") or ""
+                    except Exception as exc:
+                        diagnostics.append({"source":"moviepilot_douban", "query":q, "status":"failed", "reason":lookup_error_reason(exc), "error_type":type(exc).__name__})
+                    return found
+            for found in await asyncio.gather(*(search(q) for q in queries[:8])):
+                candidates.update(found)
         matches = {}
         # 优先读取标题中命中季号的候选，详情预算随本次涉及的季数增长。
         ranked = sorted(candidates.items(), key=lambda item: _parse_season_from_text(item[1]) not in unbound)
-        for did, title in ranked[:max(24, 4 * len(unbound))]:
-            for sn, info in (await read(did, title)).items():
-                if str(sn) not in bindings:
+        detail_sem = asyncio.Semaphore(3)
+        async def bounded_read(did, title):
+            async with detail_sem:
+                return await read(did, title)
+        for found in await asyncio.gather(*(bounded_read(did, title) for did, title in ranked[:min(48, max(24, 4 * len(unbound)))])):
+            for sn, info in found.items():
+                if sn not in result:
                     matches.setdefault(sn, []).append(info)
         for sn, hits in matches.items():
             if len(hits) == 1:
                 result[sn] = hits[0]
+            else:
+                diagnostics.append({"source": "douban", "season": sn, "status": "ambiguous", "reason": "多个候选均匹配，未自动绑定"})
+        if not result or (wanted - set(result)):
+            async with httpx.AsyncClient(timeout=8.0) as http:
+                web_queries = [(q, source, url, params) for q in queries[:2] for source, url, params in (
+                    ("douban_search_page", "https://search.douban.com/movie/subject_search", {"search_text":q,"cat":"1002"}),
+                    ("douban_classic_search", "https://www.douban.com/search", {"q":q,"cat":"1002"}),
+                )]
+                for q, web_source, url, params in web_queries:
+                    try:
+                        resp = await http.get(url, params=params, headers={"User-Agent":"Mozilla/5.0"})
+                        if resp.status_code != 200:
+                            raise ValueError(f"HTTP {resp.status_code}")
+                        found, state = search_page_candidates(resp.text)
+                        new_candidates = [(did, title) for did, title in found.items() if did not in candidates]
+                        new_candidates.sort(key=lambda item: _parse_season_from_text(item[1]) not in (wanted - set(result)))
+                        for detail_result in await asyncio.gather(*(bounded_read(did, title) for did, title in new_candidates[:12])):
+                            for sn, info in detail_result.items():
+                                matches.setdefault(sn, []).append(info)
+                        candidates.update(found)
+                        diagnostics.append({"source":web_source, "query":q, "status":state,
+                            "candidate_count":len(found), "reason": {"returned":"网页返回条目候选", "empty":"网页明确显示无结果",
+                            "blocked":"豆瓣网页要求验证，未取得搜索结果", "unavailable":"网页没有可读取的结果，可能需要动态加载或登录"}[state]})
+                    except (ValueError, httpx.HTTPError, AttributeError) as exc:
+                        diagnostics.append({"source":web_source, "query":q, "status":"failed", "reason":lookup_error_reason(exc), "error_type":type(exc).__name__})
+                    for sn, hits in matches.items():
+                        unique = {info["douban_id"]: info for info in hits}
+                        if sn not in result and len(unique) == 1:
+                            result[sn] = next(iter(unique.values()))
+                    if result and (not wanted or wanted <= set(result)):
+                        break
+    if not diagnostics:
+        diagnostics.append({"source": "douban", "status": "no_match", "reason": "搜索未返回可用候选"})
     return next((i["douban_id"] for i in result.values()), None), result
 
 
@@ -3084,6 +3215,8 @@ async def auto_recalibrate_season(
 
             for cand in candidate_pool:
                 cid = cand.get("id")
+                if current_tmdb_id and str(cid) != str(current_tmdb_id):
+                    continue
                 cname = cand.get("name") or ""
                 air_date = cand.get("first_air_date") or ""
                 c_year = int(air_date[:4]) if len(air_date) >= 4 and air_date[:4].isdigit() else None
@@ -3230,16 +3363,6 @@ def _merge_season_sources(primary: dict, secondary: dict | None) -> dict:
                 b_ev["missing_evidence_reason"] = ""
                 merged["finished"] = True
                 merged["broadcast_evidence"] = b_ev
-            elif secondary.get("bound") and not reg_future and not reg_undated and str(primary.get("season_year") or "").isdigit():
-                from datetime import datetime as _dt
-                if int(primary["season_year"]) < _dt.now().year and len(aired_set) > 0:
-                    b_ev["status"] = "finished"
-                    b_ev["schedule_verified"] = True
-                    b_ev["source"] = "tmdb_douban_fused_historical"
-                    b_ev["undated_extra_ignored"] = extra_undated
-                    b_ev["missing_evidence_reason"] = ""
-                    merged["finished"] = True
-                    merged["broadcast_evidence"] = b_ev
 
     merged["source_fusion"] = {
         "tmdb_total": tmdb_total,
@@ -3290,6 +3413,7 @@ async def _resolve_show_metadata(
     tmdb_client=None,
     log=None,
     evidence_out: dict[str, Any] | None = None,
+    known_douban_bindings: dict[int, str] | None = None,
 ) -> tuple[int | None, dict[int, dict]]:
     """多层闭环媒体元数据解析引擎：
     Pass 1: 本地指定的 TMDB ID 查询 (若有效则保留；若主条目有效但仅缺部分季，绝不把外剧强行当成同剧)
@@ -3491,7 +3615,8 @@ async def _resolve_show_metadata(
                 break
 
     # 3. 豆瓣双轨深度检索与交叉核对
-    if mp_client and not ev.get("fetch_failed"):
+    if mp_client:
+        douban_diagnostics = []
         db_id, db_seasons = await _fetch_seasons_via_douban(
             mp_client=mp_client,
             show_name=show_name,
@@ -3500,10 +3625,19 @@ async def _resolve_show_metadata(
             extra_queries=discovered_cn,
             tmdb_id=tmdb_id_num,
             season_years={sn: s.get("season_year") for sn, s in seasons_data.items()},
+            diagnostics=douban_diagnostics,
+            known_bindings=known_douban_bindings,
         )
         for sn in needed_seasons:
             if sn in db_seasons or sn in seasons_data:
                 seasons_data[sn] = _merge_season_sources(seasons_data.get(sn, {}), db_seasons.get(sn))
+                fusion = seasons_data[sn].setdefault("source_fusion", {})
+                fusion["douban_lookup"] = {
+                    "status": _douban_lookup_status(douban_diagnostics, sn in db_seasons),
+                    "checked_at": datetime.now().isoformat(),
+                    "attempts": douban_diagnostics[-32:],
+                }
+        ev["rejected_douban"] = [d for d in douban_diagnostics if d["status"] != "matched"]
         if log and db_seasons:
             log.info("豆瓣季度核对 %s: %s", show_name, {sn: (v["douban_id"], v["total"]) for sn, v in db_seasons.items()})
 

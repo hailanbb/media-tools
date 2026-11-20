@@ -6,3 +6,4 @@ pydantic>=2.10,<3.0
 pydantic-settings>=2.7,<3.0
 httpx>=0.28,<1.0
 python-multipart>=0.0.18
+pypinyin>=0.53,<1.0

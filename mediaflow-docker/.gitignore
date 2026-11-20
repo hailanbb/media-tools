@@ -9,3 +9,5 @@ data/
 manual-actions-*/
 mf-probe-*/
 scratch/
+
+.test-deps/

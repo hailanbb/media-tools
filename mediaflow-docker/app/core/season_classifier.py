@@ -2,7 +2,7 @@
 
 严格遵循《MediaFlow五模块处理流程重构与智能清理方案-v2.5.44.md》：
 1. 页面/导航展示顺序（全端一致）：
-   待复核清理 (review) → 异常剧集 (anomaly) → 缺集待补 (download) → 连载留源 (airing) → 齐全可归档 (archive)
+   待复核清理 (review) → 异常剧集 (anomaly) → 缺集待补 (download) → 齐全可归档 (archive) → 连载留源 (airing)
 
 2. 分流计算优先级（短路求值，播期判断在下载资格之前，避免将未播内容误推为缺集）：
    优先级 1: 待复核清理 (review) — 有源端同内容多余副本（含缺集兼副本、连载稳定副本）、同 ID 目录规范化归并、归档已齐待清源
@@ -26,7 +26,7 @@ import re
 from typing import Any, Sequence
 
 # 导航与汇总展示统一顺序 (G21)
-MODULE_DISPLAY_ORDER: tuple[str, ...] = ("review", "anomaly", "download", "airing", "archive")
+MODULE_DISPLAY_ORDER: tuple[str, ...] = ("review", "anomaly", "download", "archive", "airing")
 
 MODULE_LABELS: dict[str, str] = {
     "review": "待复核清理",
@@ -115,6 +115,20 @@ def _is_distinct_retained_valid(evidence: dict[str, Any]) -> bool:
     if saved_fp and curr_fp and saved_fp != curr_fp:
         return False
     return True
+
+
+def supplemental_coverage_preserved(rec: Any, evidence: dict[str, Any]) -> bool:
+    """齐全且已播毕的已核实作品，少量相邻扩展集号保留；不改写资料总数。"""
+    total = int(get_record_field(rec, 'total_episodes') or 0)
+    episodes = set(_safe_json(get_record_field(rec, 'recognized_episodes_json') or
+                              get_record_field(rec, 'recognized_episodes'), []))
+    extra = {n for n in episodes if isinstance(n, int) and n > total}
+    conflict = _safe_json(get_record_field(rec, 'conflict_json') or get_record_field(rec, 'conflict'), {})
+    return bool(total >= 6 and extra and len(extra) <= 3 and max(extra) <= total + 4
+        and set(range(1, total+1)) <= episodes and evidence.get('metadata_binding_verified')
+        and (evidence.get('broadcast_evidence') or {}).get('status') == 'finished'
+        and not evidence.get('source_total_conflict') and not conflict.get('blocking')
+        and get_record_field(rec, 'status') not in ANOMALY_STATUSES)
 
 
 def _predict_post_review_category(rec: Any, evidence: dict[str, Any]) -> str:
@@ -209,8 +223,8 @@ def classify_single_record(
     dir_grp = evidence.get("directory_group") or {}
     dir_grp_id = str(dir_grp.get("id") or "")
     dir_grp_requires_confirm = bool(dir_grp.get("requires_confirm"))
-    if pending_dir_group_ids and dir_grp_id in pending_dir_group_ids:
-        dir_grp_requires_confirm = True
+    if pending_dir_group_ids is not None and dir_grp_id:
+        dir_grp_requires_confirm = dir_grp_id in pending_dir_group_ids
 
     meta_status = str(evidence.get("meta_status") or evidence.get("metadata_status") or "")
     b_ev = (evidence.get("broadcast_evidence") or {}) if isinstance(evidence, dict) else {}
@@ -229,7 +243,7 @@ def classify_single_record(
     max_rec_ep = max((e for e in rec_eps if isinstance(e, int) and e > 0), default=0)
     has_overflow_contradiction = bool(
         mc_contra.get("has_contradiction")
-        or (total_eps and int(total_eps) > 0 and max_rec_ep > int(total_eps) and not evidence.get("is_segmented"))
+        or (total_eps and int(total_eps) > 0 and max_rec_ep > int(total_eps) and not supplemental_coverage_preserved(rec, evidence) and not (evidence.get("is_segmented") or (evidence.get("period_evidence") or {}).get("is_segmented")))
     )
     has_blocking_identity = bool(
         conflict.get("blocking")
@@ -246,7 +260,7 @@ def classify_single_record(
         if dir_grp_requires_confirm:
             return "review", "merge_directory"
         # 1C. 源端有可证实清理的同内容重复副本（含缺集兼副本 G01、连载期稳定副本 G02）
-        if has_cleanable_dups or (status == "review_needed" and not distinct_retained):
+        if has_cleanable_dups or (status == "review_needed" and not distinct_retained and "can_clean" not in rp_preview):
             return "review", "clean"
 
     # 2. 异常剧集 (anomaly) 判定
@@ -270,9 +284,6 @@ def classify_single_record(
     elif b_status == "evidence_pending" or evidence.get("schedule_evidence_pending") or b_ev.get("heuristic_180d_blocked"):
         is_anomaly = True
         action_type = "verify_broadcast"
-    elif total_eps and rec_eps and max(rec_eps) > total_eps and status not in ("archive_ready", "airing"):
-        is_anomaly = True
-        action_type = "inspect_info"
 
     if is_anomaly:
         return "anomaly", action_type
@@ -607,7 +618,7 @@ def consolidate_seasons_to_work_records(
         dups_b = [int(x) for x in (base_dict.get("duplicate_episodes") or []) if str(x).isdigit() and int(x) > 0]
         tot_eps_b = base_dict.get("total_episodes")
         st_b = str(base_dict.get("status") or "")
-        is_overflow_b = bool(tot_eps_b and rec_eps_b and max(rec_eps_b) > int(tot_eps_b) and st_b not in ("archive_ready", "airing"))
+        is_overflow_b = bool(tot_eps_b and rec_eps_b and max(rec_eps_b) > int(tot_eps_b) and st_b not in ("archive_ready", "airing") and not supplemental_coverage_preserved(primary_rec, ev_b))
         rp_prev_b = (ev_b.get("review_plan_preview") or {}) if isinstance(ev_b.get("review_plan_preview"), dict) else {}
 
         review_actions: list[str] = []
@@ -659,7 +670,7 @@ def consolidate_seasons_to_work_records(
                 anomaly_sub = "decision"
                 anomaly_problem_kind = "episode_basis_mismatch"
                 anomaly_problem_label = "集数口径待核对"
-                primary_action_kind = "verify_identity"
+                primary_action_kind = "verify_basis"
             elif meta_st_b in ("fetch_failed", "query_failed") or ev_b.get("last_remote_recheck_error"):
                 anomaly_sub = "pending_evidence"
                 anomaly_problem_kind = "metadata_read_failed"

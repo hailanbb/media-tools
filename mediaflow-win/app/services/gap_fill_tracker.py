@@ -417,6 +417,8 @@ def _dt_ts(dt: datetime | None) -> float:
 async def compute_season_gap_fill_view(
     db: AsyncSession,
     rec: SeasonRecord,
+    *,
+    prefetched: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """计算单季真实待补集 vs 已推送待入库状态（合并新持久化表 + 历史 OperationLog 安全兜底）。"""
     physical_missing = sorted({int(x) for x in _parse_json_safe(rec.missing_episodes_json, []) if str(x).isdigit()})
@@ -424,15 +426,18 @@ async def compute_season_gap_fill_view(
     identity_key = build_identity_key(rec.show_name, rec.tmdb_id, rec.season_number, mapping)
     npath = _norm_path(rec.season_path)
 
-    ep_rows = (
-        await db.execute(
-            select(GapFillEpisode).where(
-                GapFillEpisode.season_path == npath,
-                GapFillEpisode.identity_key == identity_key,
-                GapFillEpisode.state != "superseded",
+    if prefetched is not None:
+        ep_rows = prefetched["episodes"].get((npath, identity_key), [])
+    else:
+        ep_rows = (
+            await db.execute(
+                select(GapFillEpisode).where(
+                    GapFillEpisode.season_path == npath,
+                    GapFillEpisode.identity_key == identity_key,
+                    GapFillEpisode.state != "superseded",
+                )
             )
-        )
-    ).scalars().all()
+        ).scalars().all()
 
     # 优先采用当前 task_id 的记录，同时兼顾跨任务针对同一季路径+身份的在途推送防重
     ep_by_num: dict[int, GapFillEpisode] = {}
@@ -440,32 +445,38 @@ async def compute_season_gap_fill_view(
     for row in sorted(valid_rows, key=lambda r: (getattr(r, "task_id", None) == rec.task_id, _dt_ts(getattr(r, "updated_at", None) or getattr(r, "created_at", None)), getattr(r, "id", 0))):
         ep_by_num[int(row.episode_number)] = row
 
-    run_row = (
-        await db.execute(
-            select(GapFillSeasonRun)
-            .where(
-                GapFillSeasonRun.task_id == rec.task_id,
-                GapFillSeasonRun.season_path == npath,
-                GapFillSeasonRun.identity_key == identity_key,
+    if prefetched is not None:
+        run_row = prefetched["runs"].get((npath, identity_key))
+    else:
+        run_row = (
+            await db.execute(
+                select(GapFillSeasonRun)
+                .where(
+                    GapFillSeasonRun.task_id == rec.task_id,
+                    GapFillSeasonRun.season_path == npath,
+                    GapFillSeasonRun.identity_key == identity_key,
+                )
+                .order_by(GapFillSeasonRun.updated_at.desc(), GapFillSeasonRun.id.desc())
             )
-            .order_by(GapFillSeasonRun.updated_at.desc(), GapFillSeasonRun.id.desc())
-        )
-    ).scalar_one_or_none()
+        ).scalars().first()
 
     # 历史任务兼容：若尚未落入 GapFillEpisode 新表，尝试安全读取 OperationLog(action="download_gap_fill")
     legacy_inferred_eps: dict[int, dict[str, Any]] = {}
     if not ep_by_num and physical_missing:
-        op_rows = (
-            await db.execute(
-                select(OperationLog)
-                .where(
-                    OperationLog.task_id == rec.task_id,
-                    OperationLog.action == "download_gap_fill",
-                    OperationLog.status == "completed",
+        if prefetched is not None:
+            op_rows = prefetched["legacy"]
+        else:
+            op_rows = (
+                await db.execute(
+                    select(OperationLog)
+                    .where(
+                        OperationLog.task_id == rec.task_id,
+                        OperationLog.action == "download_gap_fill",
+                        OperationLog.status == "completed",
+                    )
+                    .order_by(OperationLog.id.desc())
                 )
-                .order_by(OperationLog.id.desc())
-            )
-        ).scalars().all()
+            ).scalars().all()
         rec_clean_norm = normalize_title_token(rec.show_name)
         for op in op_rows:
             d = _parse_json_safe(op.detail_json, {})
@@ -1019,11 +1030,29 @@ async def refresh_task_summary(task_id: str, db: AsyncSession) -> dict[str, Any]
         set((await dg_call).all()) if _inspect.isawaitable(dg_call) else set()
     )
 
+    # 单次汇总只读取一次三类台账；分集查询保留跨任务防重语义。
+    gap_seasons = [s for s in all_seasons if s.status in ("download_needed", "period_missing", "airing") or _parse_json_safe(s.missing_episodes_json, [])]
+    prefetched = {"episodes": {}, "runs": {}, "legacy": []}
+    paths = sorted({_norm_path(s.season_path) for s in gap_seasons})
+    if paths:
+        ep_rows = (await db.execute(select(GapFillEpisode).where(
+            GapFillEpisode.season_path.in_(paths), GapFillEpisode.state != "superseded"))).scalars().all()
+        for row in ep_rows:
+            prefetched["episodes"].setdefault((row.season_path, row.identity_key), []).append(row)
+        runs = (await db.execute(select(GapFillSeasonRun).where(
+            GapFillSeasonRun.task_id == task_id, GapFillSeasonRun.season_path.in_(paths)
+        ).order_by(GapFillSeasonRun.updated_at.desc(), GapFillSeasonRun.id.desc()))).scalars().all()
+        for row in runs:
+            prefetched["runs"].setdefault((row.season_path, row.identity_key), row)
+        prefetched["legacy"] = (await db.execute(select(OperationLog).where(
+            OperationLog.task_id == task_id, OperationLog.action == "download_gap_fill",
+            OperationLog.status == "completed").order_by(OperationLog.id.desc()))).scalars().all()
+
     records_with_gap_view: list[dict[str, Any]] = []
     for s in all_seasons:
         gap_view = None
-        if s.status in ("download_needed", "period_missing", "airing") or s.missing_episodes_json:
-            gap_view = await compute_season_gap_fill_view(db, s)
+        if s in gap_seasons:
+            gap_view = await compute_season_gap_fill_view(db, s, prefetched=prefetched)
         records_with_gap_view.append({
             "id": s.id,
             "task_id": s.task_id,

@@ -6,6 +6,7 @@ import json
 import re
 from pathlib import Path
 from typing import Any
+from functools import lru_cache
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -218,6 +219,18 @@ def extract_release_clues(filename: str) -> dict[str, Any]:
     }
 
 
+@lru_cache(maxsize=2048)
+def _romanized_title(title: str) -> str:
+    # 仅从已有作品标题生成完整拼音；不用拼音首字母或拼音结果反查/改绑作品。
+    if not re.fullmatch(r"[\u3400-\u9fff]{3,}", title):
+        return ""
+    try:
+        from pypinyin import lazy_pinyin
+    except ImportError:
+        return ""
+    return normalize_title_token("".join(lazy_pinyin(title)))
+
+
 def _collect_known_work_titles_with_meta(
     primary_work: dict[str, Any], show_name: str
 ) -> tuple[set[str], set[str], bool]:
@@ -250,6 +263,10 @@ def _collect_known_work_titles_with_meta(
         if n:
             norms.add(n)
             norms.add(strip_leading_article(n))
+            romanized = _romanized_title(n)
+            if romanized:
+                norms.add(romanized)
+                latin_norms.add(romanized)
         lcore = _extract_latin_core(c)
         ln = normalize_title_token(lcore) if lcore else ""
         if ln and len(ln) >= 3:
@@ -293,6 +310,13 @@ def _titles_pair_compatible(title_a: str, title_b: str) -> bool:
         return False
     if na == nb:
         return True
+    # 原始发行名的方括号有时包含正式中文标题，不应连标题一起丢弃。
+    # 仅认可完整且相同的中文标题片段；“先导片/会员版”等内容标签不作桥接。
+    ignored = {'先导片', '特别节目', '特别篇', '会员版', '纯享版', '加长版', '中央电视台综艺频道'}
+    ca = {t for t in re.findall(r'[\u3400-\u9fff]+(?:20\d{2})?', title_a) if len(t) >= 3 and t not in ignored}
+    cb = {t for t in re.findall(r'[\u3400-\u9fff]+(?:20\d{2})?', title_b) if len(t) >= 3 and t not in ignored}
+    if ca & cb:
+        return True
     if len(na) >= 4 and len(nb) >= 4 and (na in nb or nb in na):
         return True
     la = strip_leading_article(normalize_title_token(_extract_latin_core(title_a)))
@@ -304,21 +328,19 @@ def _titles_pair_compatible(title_a: str, title_b: str) -> bool:
 
 def _cluster_release_titles(raw_titles: list[str], known_norms: set[str]) -> list[str]:
     """按语义等价合并多个片名写法（字幕组前缀、双语标题、已知别名），仅在真正存在不同作品时保留多簇。"""
-    clusters: list[str] = []
-    for t in raw_titles:
-        if not t:
-            continue
-        merged = False
-        for rep in clusters:
-            if _titles_pair_compatible(t, rep):
-                merged = True
-                break
-            if known_norms and _titles_compatible(t, known_norms) and _titles_compatible(rep, known_norms):
-                merged = True
-                break
-        if not merged:
-            clusters.append(t)
-    return clusters
+    clusters: list[list[str]] = []
+    for title in dict.fromkeys(t for t in raw_titles if t):
+        matches = [group for group in clusters if any(
+            _titles_pair_compatible(title, member) or
+            (known_norms and _titles_compatible(title, known_norms) and _titles_compatible(member, known_norms))
+            for member in group)]
+        merged = [title]
+        for group in matches:
+            merged.extend(group)
+            clusters.remove(group)
+        clusters.append(merged)
+    return [group[-1] for group in clusters]
+
 
 
 def _titles_compatible(title_a: str, known_norms: set[str]) -> bool:
@@ -328,7 +350,7 @@ def _titles_compatible(title_a: str, known_norms: set[str]) -> bool:
     if not na:
         return True
     na_stripped = strip_leading_article(na)
-    candidates_a = {na, na_stripped}
+    candidates_a = {na, na_stripped, normalize_title_token(title_a.replace('[', ' ').replace(']', ' '))}
     latin_a = normalize_title_token(_extract_latin_core(title_a))
     if latin_a and len(latin_a) >= 3:
         candidates_a.add(latin_a)

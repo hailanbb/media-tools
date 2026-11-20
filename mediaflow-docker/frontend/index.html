@@ -65,7 +65,7 @@
     /* 移动端平滑滚动与隐藏滚动条 (Scroll Snap 胶囊栏) */
     .no-scrollbar::-webkit-scrollbar { display: none; }
     .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
-    
+
     /* 移动端触控优化 */
     @media (max-width: 768px) {
       .touch-target {
@@ -105,7 +105,7 @@
   <!-- ================= 顶部全局导航栏 ================= -->
   <header class="sticky top-0 z-40 w-full bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 transition-colors">
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
-      
+
       <!-- 系统Logo与优化后的系统名称 -->
       <div class="flex items-center space-x-6">
         <div class="flex items-center space-x-3 cursor-pointer" onclick="showTaskDetailView()">
@@ -115,7 +115,7 @@
           <div>
             <div class="flex items-center gap-2">
               <span class="text-base font-bold tracking-tight text-slate-900 dark:text-white">MediaFlow</span>
-              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.50</span>
+              <span id="appVersionBadge" class="text-[11px] px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60">v2.5.51</span>
             </div>
             <!-- 完善后的命名 -->
             <p class="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">智能媒体库整理与归档工作台</p>
@@ -176,7 +176,7 @@
 
     <!-- ================= 左侧导航侧边栏 (桌面端常驻 / 移动端滑动抽屉) ================= -->
     <aside id="appSidebar" class="fixed md:static inset-y-0 left-0 z-50 md:z-auto w-[85vw] max-w-xs md:w-80 bg-white dark:bg-slate-900 md:bg-transparent md:dark:bg-transparent shadow-2xl md:shadow-none p-5 md:p-0 transform -translate-x-full md:translate-x-0 transition-transform duration-300 ease-in-out overflow-y-auto flex-shrink-0 space-y-6">
-      
+
       <!-- 移动端抽屉专属顶部标题与关闭按钮 -->
       <div class="flex md:hidden items-center justify-between pb-3 border-b border-slate-200 dark:border-slate-800">
         <div class="flex items-center space-x-2">
@@ -189,7 +189,7 @@
           <i class="fa-solid fa-xmark text-sm"></i>
         </button>
       </div>
-      
+
       <!-- 1. 初检任务列表模块 (支持大批量任务滚动、搜索、重新初检、删除) -->
       <div class="space-y-3">
         <div class="flex items-center justify-between">
@@ -263,7 +263,7 @@
 
       <!-- ================= 视图 A：初检任务结果看板 (默认主视图) ================= -->
       <div id="taskDetailView" class="space-y-6">
-        
+
         <!-- 任务头部信息栏 -->
         <div class="app-card rounded-2xl p-5">
           <div class="flex flex-wrap items-center justify-between gap-4">
@@ -313,7 +313,7 @@
                 </span>
                 <span class="text-[11px] px-2 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-900 text-indigo-700 dark:text-indigo-300 font-mono font-semibold shrink-0" id="liveBannerCountText">[0/0]</span>
               </div>
-              
+
               <div class="flex items-center space-x-2 shrink-0">
                 <span class="text-base font-extrabold text-indigo-600 dark:text-indigo-400 font-mono mr-1" id="liveBannerPercent">1%</span>
                 <button onclick="triggerPauseCurrentTask()" id="liveBannerPauseBtn" class="px-2.5 py-1 rounded-lg bg-amber-100 hover:bg-amber-200 dark:bg-amber-950 text-amber-700 dark:text-amber-300 text-xs font-semibold flex items-center gap-1 transition">
@@ -375,15 +375,6 @@
               <p class="text-[10px] sm:text-[11px] text-slate-500 dark:text-slate-400 mt-1 truncate">补缺/整理修复 ➔</p>
             </div>
 
-            <div onclick="filterResultCategory('airing')" id="cat-card-airing" class="cursor-pointer rounded-xl p-3 sm:p-3.5 border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 hover:border-indigo-400 transition relative group flex-shrink-0 w-36 sm:w-auto snap-start shadow-sm">
-              <div class="flex items-center justify-between text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
-                <span>连载留源</span>
-                <i class="fa-solid fa-clock text-slate-500 text-xs"></i>
-              </div>
-              <div class="text-xl sm:text-2xl font-bold text-slate-800 dark:text-slate-200" id="catCountAiring">0 <span class="text-xs font-normal">季</span></div>
-              <p class="text-[10px] sm:text-[11px] text-slate-500 dark:text-slate-400 mt-1 truncate">追更留源清单 ➔</p>
-            </div>
-
             <div onclick="filterResultCategory('archive')" id="cat-card-archive" class="cursor-pointer rounded-xl p-3 sm:p-3.5 border-2 border-indigo-500 bg-indigo-50/70 dark:bg-indigo-950/30 transition relative group flex-shrink-0 w-36 sm:w-auto snap-start shadow-sm">
               <div class="flex items-center justify-between text-xs font-medium text-emerald-800 dark:text-emerald-300 mb-1">
                 <span>齐全可归档</span>
@@ -393,12 +384,21 @@
               <p class="text-[10px] sm:text-[11px] text-emerald-600/80 dark:text-emerald-400/80 mt-1 truncate">可归档清单 ➔</p>
             </div>
 
+            <div onclick="filterResultCategory('airing')" id="cat-card-airing" class="cursor-pointer rounded-xl p-3 sm:p-3.5 border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 hover:border-indigo-400 transition relative group flex-shrink-0 w-36 sm:w-auto snap-start shadow-sm">
+              <div class="flex items-center justify-between text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
+                <span>连载留源</span>
+                <i class="fa-solid fa-clock text-slate-500 text-xs"></i>
+              </div>
+              <div class="text-xl sm:text-2xl font-bold text-slate-800 dark:text-slate-200" id="catCountAiring">0 <span class="text-xs font-normal">季</span></div>
+              <p class="text-[10px] sm:text-[11px] text-slate-500 dark:text-slate-400 mt-1 truncate">追更留源清单 ➔</p>
+            </div>
+
           </div>
         </div>
 
         <!-- 钻取清单与专属操作区 (按分类严格隔离批量按钮) -->
         <div class="app-card rounded-2xl p-5 space-y-4">
-          
+
           <div class="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-200 dark:border-slate-800">
             <div class="flex items-center space-x-3">
               <div class="flex items-center space-x-2">
@@ -626,7 +626,7 @@
       </div>
 
       <div class="space-y-4 text-xs">
-        
+
         <!-- 常用快捷目录 (明确区分 nas 源盘 vs nas.finish 归档盘) -->
         <div>
           <label class="block font-semibold text-slate-700 dark:text-slate-300 mb-1.5">常用快捷目录 (已区分源库与归档库):</label>
@@ -760,7 +760,7 @@
     </div>
   </div>
 
-  
+
   <!-- 弹窗：媒体整理修复详情抽屉/模态框 (第 9.3 节) -->
   <div id="repairDetailModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
     <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-2xl w-full p-4 sm:p-6 space-y-4 border border-slate-200 dark:border-slate-800 shadow-2xl max-h-[90vh] flex flex-col">
@@ -990,7 +990,7 @@
       <div class="space-y-2 text-xs">
         <div class="text-slate-600 dark:text-slate-300 font-medium" id="calibrateShowTitle">剧集名称</div>
         <p class="text-[11px] text-slate-400 leading-relaxed">针对综艺上下期拆分（如爱奇艺12期拆成TMDB 23集）或网络短剧TMDB虚标，可在此手动修正真实总集数。</p>
-        
+
         <div class="pt-2">
           <label class="block text-[11px] font-semibold text-slate-500 mb-1">真实总集数 (输入数字):</label>
           <div class="flex items-center gap-2">
@@ -1081,6 +1081,7 @@
         <span id="mcFileChangeHint" class="text-[11px] text-slate-500 dark:text-slate-400">仅保存资料确认，无文件改动</span>
         <div class="flex justify-end gap-2">
           <button onclick="closeModal('manualConfirmModal')" class="px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-xs text-slate-600 dark:text-slate-300">取消</button>
+          <button id="mcSkipQueueBtn" onclick="skipAnomalyReview()" class="hidden px-3 py-1.5 rounded-lg border text-xs">跳过此项，核对下一项</button>
           <button id="mcSubmitBtn" onclick="submitManualConfirmation()" class="px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-sm">保存确认并更新结果</button>
         </div>
       </div>
@@ -1471,7 +1472,7 @@
       <div class="flex items-center justify-between px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-900">
         <div class="flex items-center gap-2 min-w-0">
           <i class="fa-solid fa-clipboard-list text-indigo-600 dark:text-indigo-400"></i>
-          <h3 id="gapFillDetailTitle" class="text-sm font-bold truncate">剧季补缺与识别依据详情</h3>
+          <h3 id="gapFillDetailTitle" class="text-sm font-bold truncate">本季详情</h3>
         </div>
         <form method="dialog">
           <button type="submit" aria-label="关闭弹窗" class="w-8 h-8 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-200/60 dark:hover:bg-slate-800 flex items-center justify-center transition">
@@ -2368,7 +2369,7 @@
       document.getElementById('inspectProgressBar').style.width = '1%';
       document.getElementById('inspectProgressShow').textContent = '正在连接 CloudDrive2 递归探测目录结构...';
       document.getElementById('inspectProgressCount').textContent = '[扫描中]';
-      
+
       const pauseBtnText = document.getElementById('modalPauseText');
       if (pauseBtnText) pauseBtnText.textContent = '暂停';
       const pauseIcon = document.getElementById('modalPauseIcon');
@@ -2713,7 +2714,7 @@
     }
 
     // ── 9. 视图切换 ──────────────────────────────────────────
-    
+
     // ── 移动端侧边抽屉 (Drawer) 控制 ──────────────────────────────
     function openSidebarDrawer() {
       const sidebar = document.getElementById('appSidebar');
@@ -3202,6 +3203,7 @@
             <i class="fa-solid fa-wand-magic-sparkles text-xs"></i>
             <span>执行推荐处理</span>
           </button>
+          <button type="button" onclick="viewLastRecommendedExecution()" class="px-3 py-2 rounded-lg border text-xs">查看最近执行结果</button>
           <button id="batchActionButton" onclick="executeBatchReview()" disabled class="px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold shadow-md shadow-amber-600/20 transition flex items-center space-x-1.5">
             <i class="fa-solid fa-broom text-xs"></i>
             <span id="batchActionBtnText">批量清理所选冗余 (0)</span>
@@ -3214,8 +3216,10 @@
             <div class="text-slate-600 dark:text-slate-300">点击「执行推荐处理」可一次预览全部可执行项（含保留理由、删留清单与完成后去向）；加长版、Vlog、加更等独立内容版本默认保全。</div>
           </div>`;
       } else if (currentCategory === 'anomaly' || currentCategory === 'already_archived') {
-        if (selectAllLabel) selectAllLabel.textContent = "逐项核对";
+        if (selectAllLabel) selectAllLabel.textContent = "全选当前异常";
         batchContainer.innerHTML = `
+          <button type="button" onclick="startAnomalyReviewQueue()" class="px-3 py-1.5 rounded-lg bg-indigo-600 text-white text-xs">逐项核对所选</button>
+          <button type="button" onclick="holdSelectedAnomalies(this)" class="px-3 py-1.5 rounded-lg border text-xs">所选本次保留</button>
           <div role="tablist" aria-label="异常分类清单" class="inline-flex flex-wrap items-center gap-1 rounded-xl bg-slate-100 dark:bg-slate-800/80 p-1">
             <button type="button" role="tab" data-anomaly-tab="all" aria-selected="${curAnomalyTab === 'all' ? 'true' : 'false'}" onclick="switchAnomalyTab('all')" class="px-3 py-1 rounded-lg text-xs font-semibold transition ${curAnomalyTab === 'all' ? 'bg-white dark:bg-slate-900 text-purple-600 dark:text-purple-400 shadow-sm' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'}">
               全部 (${anomalyItems.length})
@@ -3509,7 +3513,7 @@
           : '';
         const conflictBadgeLabel = (conf && conf.kind === 'ambiguous_title')
           ? '重名待确认'
-          : ((conf && conf.kind === 'mixed_works') ? '混放作品拦截' : '归属冲突拦截');
+          : ((conf && (conf.kind === 'release_title_unverified' || (conf.kind === 'mixed_works' && !(ev?.release_evidence?.explicit_file_tmdb_conflicts?.length)))) ? '发行名待核实' : ((conf && conf.kind === 'mixed_works') ? '作品标识冲突' : '归属待核实'));
         const conflictBadgeHtml = (conf && conf.blocking)
           ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-rose-50 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 font-semibold border border-rose-200 dark:border-rose-800">${escapeHtml(conflictBadgeLabel)}</span>`
           : '';
@@ -3558,7 +3562,7 @@
 
         const hasEvDetails = Boolean(ev && (ev.meta_status || ev.meta_error || (ev.release_evidence && ev.release_evidence.dominant_release_title) || (ev.mediaserver_check && (ev.mediaserver_check.checked || ev.mediaserver_check.error))));
         const showDetailBtn = (item.actionType !== 'inspect_gap_detail') && (isAiringCard || currentCategory === 'archive' || currentCategory === 'download' || currentCategory === 'anomaly' || Boolean(item.isAnomaly) || ['identity_review', 'unknown', 'review_needed', 'period_review', 'download_needed', 'period_missing'].includes(rawStatus) || Boolean(conf && conf.blocking) || Boolean(gapState && gapState.episodes && gapState.episodes.length > 0) || hasEvDetails || Boolean(mp && mp.target_tmdb_id));
-        const disableCheck = isAiringCard || currentCategory === 'anomaly' || ['inspect_info', 'inspect_gap_detail', 'clean_redundant'].includes(item.actionType) || (currentCategory === 'download' && activeGapTab === 'pushed_pending');
+        const disableCheck = isAiringCard || (currentCategory !== 'anomaly' && ['inspect_info', 'inspect_gap_detail', 'clean_redundant'].includes(item.actionType)) || (currentCategory === 'download' && activeGapTab === 'pushed_pending');
 
         let archiveModeBadgeHtml = '';
         if (currentCategory === 'archive' && !isAiringCard) {
@@ -3575,18 +3579,7 @@
           </div>
         ` : '';
 
-        let gapCatBadgeHtml = '';
-        if (currentCategory === 'download' || ['download_needed', 'period_missing'].includes(rawStatus)) {
-          const cat = item.raw?.gap_category === 'anime' ? 'anime' : 'non_anime';
-          const src = item.raw?.gap_category_source || 'auto';
-          const rsn = item.raw?.gap_category_reason || '系统自动按路径与元数据识别';
-          const tmdbIdClean = item.raw?.tmdb_id || item.tmdbId || '';
-          if (cat === 'anime') {
-            gapCatBadgeHtml = `<button type="button" onclick="toggleWorkCategory('${escapeJsAttr(item.id)}', '${escapeJsAttr(tmdbIdClean)}', '${escapeJsAttr(item.show)}', 'non_anime')" class="text-xs px-2 py-0.5 rounded-full bg-pink-50 dark:bg-pink-950/70 text-pink-700 dark:text-pink-300 font-semibold border border-pink-200 dark:border-pink-800 hover:opacity-80 transition cursor-pointer" title="${escapeHtml(rsn)} (点击切换为非动漫)">🎨 动漫 (${src === 'manual' ? '手动' : '自动'}) <i class="fa-solid fa-arrows-rotate text-[10px] ml-0.5 opacity-60"></i></button>`;
-          } else {
-            gapCatBadgeHtml = `<button type="button" onclick="toggleWorkCategory('${escapeJsAttr(item.id)}', '${escapeJsAttr(tmdbIdClean)}', '${escapeJsAttr(item.show)}', 'anime')" class="text-xs px-2 py-0.5 rounded-full bg-cyan-50 dark:bg-cyan-950/70 text-cyan-700 dark:text-cyan-300 font-semibold border border-cyan-200 dark:border-cyan-800 hover:opacity-80 transition cursor-pointer" title="${escapeHtml(rsn)} (点击切换为动漫)">🎬 非动漫 (${src === 'manual' ? '手动' : '自动'}) <i class="fa-solid fa-arrows-rotate text-[10px] ml-0.5 opacity-60"></i></button>`;
-          }
-        }
+        // 作品分类规则仍在详情中可查看与调整，卡片不显示分类标签。
         const reviewNextBadgeHtml = (currentCategory === 'review' && item.predictedNextCategoryLabel)
           ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 font-semibold border border-amber-200 dark:border-amber-800">处理后 → ${escapeHtml(item.predictedNextCategoryLabel)}</span>`
           : '';
@@ -3604,7 +3597,7 @@
                   <span class="text-xs px-2 py-0.5 rounded-full bg-${badgeColor}-100 dark:bg-${badgeColor}-950/70 text-${badgeColor}-700 dark:text-${badgeColor}-400 font-semibold border border-${badgeColor}-300 dark:border-${badgeColor}-800">
                     ${escapeHtml(item.season)} (${escapeHtml(item.statusText)})
                   </span>
-                  ${gapCatBadgeHtml}
+
                   ${reviewNextBadgeHtml}
                   ${airingBadgeHtml}
                   ${archiveModeBadgeHtml}
@@ -3614,9 +3607,9 @@
                   ${mappingBadgeHtml}
                   ${item.tmdbId ? `<span class="text-xs px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 font-mono">TMDB: ${escapeHtml(item.tmdbId)}</span>` : ''}
                 </div>
-                <div class="text-xs text-slate-500 dark:text-slate-400 font-mono flex flex-wrap gap-x-3">
-                  <span>${escapeHtml(item.pathA || '')}</span>
-                  ${item.pathB ? `<span>${escapeHtml(item.pathB)}</span>` : ''}
+                <div class="text-xs text-slate-500 dark:text-slate-400 font-mono flex flex-col gap-1">
+                  <span class="block break-all"><b>源端：</b>${escapeHtml(item.pathA || '')}</span>
+                  ${item.pathB ? `<span class="block break-all"><b>归档目标：</b>${escapeHtml(item.pathB)}</span>` : ''}
                   ${airingTimeHtml}
                 </div>
                 ${assocDirHtml}
@@ -3644,7 +3637,7 @@
                   <button type="button" onclick="openDirectoryGroupDialog('${escapeHtml(dirGrp.id || '')}')" class="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold shadow-sm transition" title="处理同作品目录规范化或跨作品归属冲突">核对目录归并</button>
                 ` : (evMetaStatus === 'fetch_failed' || evMetaStatus === 'query_failed' || Boolean(ev && ev.last_remote_recheck_error)) ? `
                   <button type="button" onclick="recheckSeasonEvidence('${item.id}', this)" class="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold disabled:opacity-50 shadow-sm transition" title="仅补查该失败项及必要依赖，不无差别重跑整任务" ${['running', 'paused', 'stopping'].includes(task.status) ? 'disabled' : ''}>重试失败项</button>
-                ` : ((conf && conf.blocking) || rawStatus === 'identity_review' || Boolean(ev?.manual_confirmation?.contradiction?.has_contradiction) || (item.totalEpisodes && item.maxRec > item.totalEpisodes) || item.anomalySubtype === 'episode_overflow') ? `
+                ` : ((conf && conf.blocking) || rawStatus === 'identity_review') ? `
                   <button type="button" onclick="openManualConfirmModal('${item.id}')" class="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold shadow-sm transition flex items-center gap-1.5">
                     <i class="fa-solid fa-scale-balanced text-xs"></i>
                     <span>核对归属</span>
@@ -3652,32 +3645,12 @@
                 ` : `
                   <button type="button" onclick="openManualConfirmModal('${item.id}')" class="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold shadow-sm transition flex items-center gap-1.5" ${['running', 'paused', 'stopping'].includes(task.status) ? 'disabled' : ''}>
                     <i class="fa-solid fa-user-check text-xs"></i>
-                    <span>人工确认</span>
+                    <span>补充本季事实</span>
                   </button>
                 `}
                 ${!isAiringCard ? `
-                  <details class="relative inline-block">
-                    <summary class="list-none cursor-pointer px-2 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-300 text-xs font-semibold hover:bg-slate-100 transition flex items-center gap-1" title="更多按需操作">
-                      <span>更多</span>
-                      <i class="fa-solid fa-chevron-down text-[10px]"></i>
-                    </summary>
-                    <div class="absolute right-0 mt-1 w-44 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-xl z-20 p-1.5 space-y-1 text-xs">
-                      <button type="button" onclick="holdSeasonForTask('${item.id}', this)" class="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 flex items-center gap-1.5" ${['running', 'paused', 'stopping'].includes(task.status) ? 'disabled' : ''}>
-                        <i class="fa-regular fa-bookmark text-indigo-500"></i>
-                        <span>跳过本轮</span>
-                      </button>
-                      <button type="button" onclick="refreshModifiedSeason('${item.id}', this)" class="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 flex items-center gap-1.5" ${['running', 'paused', 'stopping'].includes(task.status) ? 'disabled' : ''}>
-                        <i class="fa-solid fa-arrows-rotate text-blue-500"></i>
-                        <span>刷新修改结果</span>
-                      </button>
-                      ${(rawObj.can_mark_handled !== false && evMetaStatus !== 'metadata_unverified') ? `
-                        <button type="button" onclick="markSeasonHandled('${item.id}', this)" class="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 flex items-center gap-1.5" ${['running', 'paused', 'stopping'].includes(task.status) ? 'disabled' : ''}>
-                          <i class="fa-solid fa-check text-emerald-500"></i>
-                          <span>已手动处理</span>
-                        </button>
-                      ` : ''}
-                    </div>
-                  </details>
+                  <button type="button" onclick="holdSeasonForTask('${item.id}', this)" class="px-2.5 py-1.5 rounded-lg border text-slate-600 dark:text-slate-300 text-xs" title="本轮暂不处理，保留文件，可从本次保留清单恢复" ${['running', 'paused', 'stopping'].includes(task.status) ? 'disabled' : ''}>本次保留</button>
+                  <button type="button" onclick="refreshModifiedSeason('${item.id}', this)" class="px-2.5 py-1.5 rounded-lg border text-blue-600 dark:text-blue-300 text-xs" title="重新读取本季身份、豆瓣与播期资料，并按当前文件重算结果" ${['running', 'paused', 'stopping'].includes(task.status) ? 'disabled' : ''}>重新取证并更新</button>
                 ` : ''}
               ` : currentCategory === 'review' ? `
                 ${(dirGrp && dirGrp.requires_confirm) ? `
@@ -3720,6 +3693,9 @@
                   </button>
                 `}
               `}
+              ${currentCategory === 'download' && activeGapTab !== 'pushed_pending' && !isAiringCard ? `
+                <button type="button" onclick="openDeleteSourceSeasonModal('${escapeJsAttr(item.id)}')" class="px-2.5 py-1.5 rounded-lg border border-rose-300 text-rose-600 dark:text-rose-400 text-xs font-semibold" title="主动放弃补缺；先预览本季全部文件，再确认删除" ${['running','paused','stopping'].includes(task.status) ? 'disabled' : ''}>删除源端（本季）</button>
+              ` : ''}
             </div>
           </div>`;
         }).join('');
@@ -3751,13 +3727,13 @@
         batchBtn.removeAttribute('disabled');
         if (currentCategory === 'archive') batchBtnText.textContent = `批量一键归档所选 (${count} 季)`;
         else if (currentCategory === 'review') batchBtnText.textContent = `批量一键清理所选冗余 (${count} 季)`;
-        else if (currentCategory === 'anomaly' || currentCategory === 'already_archived') batchBtnText.textContent = `批量清理源端冗余 (${count} 季)`;
+        else if (currentCategory === 'already_archived') batchBtnText.textContent = `批量清理源端冗余 (${count} 季)`;
         else if (currentCategory === 'download') batchBtnText.textContent = `批量一键推送 MP 补缺 (${count} 季)`;
       } else {
         batchBtn.setAttribute('disabled', 'true');
         if (currentCategory === 'archive') batchBtnText.textContent = '批量一键归档所选 (0)';
         else if (currentCategory === 'review') batchBtnText.textContent = '批量一键清理所选冗余 (0 季)';
-        else if (currentCategory === 'anomaly' || currentCategory === 'already_archived') batchBtnText.textContent = '批量清理源端冗余 (0)';
+        else if (currentCategory === 'already_archived') batchBtnText.textContent = '批量清理源端冗余 (0)';
         else if (currentCategory === 'download') batchBtnText.textContent = '批量一键推送 MP 补缺 (0)';
       }
     }
@@ -4083,9 +4059,13 @@
 
     // ── 放弃补缺并删除源端单季目录 ─────────────────
     let currentDeleteSourceSeasonRecId = null;
+    let currentDeleteSourceSeasonToken = null;
+    let deleteSourcePreviewSequence = 0;
 
     async function openDeleteSourceSeasonModal(recId) {
+      const previewSequence = ++deleteSourcePreviewSequence;
       currentDeleteSourceSeasonRecId = recId;
+      currentDeleteSourceSeasonToken = null;
       const item = findItemByRecordId(recId);
       const name = item ? `${item.show} ${item.season}` : '本季';
       document.getElementById('deleteSourceSeasonTitle').textContent = `放弃补缺并删除源端: ${name}`;
@@ -4102,10 +4082,11 @@
       openModal('deleteSourceSeasonModal');
 
       try {
-        const res = await api('/api/archive/delete-source-season/preview', {
+        const res = await api('/api/archive/discard-source-season/preview', {
           method: 'POST',
           body: JSON.stringify({ season_record_id: recId })
         });
+        if (previewSequence !== deleteSourcePreviewSequence) return;
         if (!res.ok) {
           body.innerHTML = `
             <div class="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300 space-y-1">
@@ -4117,6 +4098,8 @@
         }
 
         const data = res.data || {};
+        if (currentDeleteSourceSeasonRecId !== recId) return;
+        currentDeleteSourceSeasonToken = data.preview_token || null;
         const stats = data.file_stats || {};
         const eps = data.episodes || [];
         const warnings = data.warnings || [];
@@ -4165,20 +4148,21 @@
               </div>
             ` : ''}
             ${warnHtml}
+            <details><summary class="cursor-pointer">查看本季全部文件（${(data.files || []).length} 个）</summary><div class="max-h-48 overflow-auto font-mono text-[10px] mt-2">${(data.files || []).map(f => `<div>${escapeHtml(f.path)}</div>`).join('')}</div></details>
             <div class="text-[11px] text-slate-500 dark:text-slate-400 space-y-1">
               ${willDeleteShowDir ? `
                 <div class="text-rose-600 dark:text-rose-400 font-semibold">• 检测到该剧目已无其他有效季，将直接删除整剧根目录（彻底清除海报与nfo等伴生文件）。</div>
                 <div>• 删除后将在任务初检目录【${escapeHtml(data.task_source_path || '源目录')}】中强制刷新 CloudDrive2 云盘缓存。</div>
               ` : `
-                <div>• 执行后本季源文件将移至 CloudDrive2 回收站，并在初检目录【${escapeHtml(data.task_source_path || '源目录')}】刷新云盘缓存。</div>
+                <div>• 执行后核验本季目录已删除并刷新父目录；能否从回收站恢复取决于云盘服务。</div>
               `}
-              <div>• 仅允许针对已核实齐全归档的剧季执行源端清理；源端独有加更/加长版将先保护归档，再安全移除冗余副本。</div>
+              <div>• 这是主动放弃补缺，现有源文件可能是唯一副本；不会自动保全到归档库。删除后标记为已放弃，不计作补缺成功。</div>
             </div>
           </div>
         `;
 
         if (confirmBtn) {
-          confirmBtn.disabled = hasActiveDownloads;
+          confirmBtn.disabled = hasActiveDownloads || !currentDeleteSourceSeasonToken;
           if (hasActiveDownloads) {
             confirmBtn.title = 'MoviePilot 尚有该剧活跃下载任务，禁止删除';
           } else {
@@ -4195,7 +4179,7 @@
     }
 
     async function executeDeleteSourceSeason() {
-      if (!currentDeleteSourceSeasonRecId) return;
+      if (!currentDeleteSourceSeasonRecId || !currentDeleteSourceSeasonToken) return;
       const confirmBtn = document.getElementById('confirmDeleteSourceSeasonBtn');
       const origHtml = confirmBtn ? confirmBtn.innerHTML : '';
       if (confirmBtn) {
@@ -4204,9 +4188,9 @@
       }
 
       try {
-        const res = await api('/api/archive/delete-source-season', {
+        const res = await api('/api/archive/discard-source-season', {
           method: 'POST',
-          body: JSON.stringify({ season_record_id: currentDeleteSourceSeasonRecId })
+          body: JSON.stringify({ season_record_id: currentDeleteSourceSeasonRecId, preview_token: currentDeleteSourceSeasonToken, confirm_abandon: true })
         });
         if (!res.ok) throw new Error(res.error || res.message || '删除失败');
         closeModal('deleteSourceSeasonModal');
@@ -4399,7 +4383,11 @@
     }
 
     function openModal(id) { document.getElementById(id).classList.remove('hidden'); }
-    function closeModal(id) {
+    function closeModal(id, keepReviewQueue = false) {
+      if (id === 'manualConfirmModal' && !keepReviewQueue) {
+        anomalyReviewQueue = [];
+        anomalyReviewTaskId = null;
+      }
       document.getElementById(id).classList.add('hidden');
       if (id === 'recommendedBatchModal') {
         if (typeof _recBatchAbortCtrl !== 'undefined' && _recBatchAbortCtrl) {
@@ -4421,9 +4409,50 @@
     }
 
     let currentManualConfirmRecId = null;
+    let anomalyReviewQueue = [];
+    let anomalyReviewTaskId = null;
+    function startAnomalyReviewQueue() {
+      anomalyReviewQueue = Array.from(document.querySelectorAll('input[name="itemCheck"]:checked:not(:disabled)')).map(el => el.value);
+      if (!anomalyReviewQueue.length) { alert('请先勾选需要核对的剧季'); return; }
+      anomalyReviewTaskId = currentTaskId;
+      openNextAnomalyReview();
+    }
+    function openNextAnomalyReview() {
+      if (anomalyReviewTaskId !== currentTaskId) { anomalyReviewQueue = []; return; }
+      let id;
+      while ((id = anomalyReviewQueue.shift())) {
+        if (findItemByRecordId(id)) { openManualConfirmModal(id, true); return; }
+      }
+      anomalyReviewTaskId = null;
+    }
+    function skipAnomalyReview() {
+      closeModal('manualConfirmModal', true);
+      openNextAnomalyReview();
+    }
+    async function holdSelectedAnomalies(btn) {
+      const ids = Array.from(document.querySelectorAll('input[name="itemCheck"]:checked:not(:disabled)')).map(el => el.value);
+      if (!ids.length) { alert('请先勾选需要本次保留的剧季'); return; }
+      if (btn) btn.disabled = true;
+      const taskId = currentTaskId;
+      const failures = [];
+      try {
+        for (const id of ids) {
+          try { await api(`/api/tasks/${taskId}/seasons/${id}/hold`, {method:'POST', body:'{}'}); }
+          catch (e) { failures.push(`${id}: ${e.message}`); }
+        }
+        const task = taskList.find(t => t.id === taskId);
+        if (task) task._seasonsLoaded = false;
+        await loadTasks();
+        if (currentTaskId === taskId) await selectTask(taskId);
+        if (failures.length) alert(`以下项目未保留：${failures.join('；')}`);
+      } finally { if (btn?.isConnected) btn.disabled = false; }
+    }
 
-    function openManualConfirmModal(recordId) {
+
+    function openManualConfirmModal(recordId, fromQueue = false) {
+      if (!fromQueue) { anomalyReviewQueue = []; anomalyReviewTaskId = null; }
       currentManualConfirmRecId = recordId;
+      document.getElementById('mcSkipQueueBtn')?.classList.toggle('hidden', anomalyReviewTaskId !== currentTaskId);
       const item = findItemByRecordId(recordId);
       if (!item) { alert('未找到该剧季记录'); return; }
       const ev = item.evidence || (item.raw && item.raw.evidence) || {};
@@ -4434,7 +4463,7 @@
         ...recEps,
         ...assocRecs.flatMap(r => (r.recognized_episodes || []).filter(e => Number(e) > 0))
       ].map(Number))).sort((a, b) => a - b);
-      const cands = (ev.candidates || []).filter(c => c && c.episode_count);
+      const cands = (ev.candidates || []).filter(c => c && c.episode_count && !['rejected_as_primary', 'rejected'].includes(c.result));
 
       const titleEl = document.getElementById('mcShowTitle');
       if (titleEl) titleEl.textContent = `人工确认: ${item.show} ${item.season}`;
@@ -4652,12 +4681,14 @@
             apply_file_changes: true
           })
         });
-        closeModal('manualConfirmModal');
+        closeModal('manualConfirmModal', true);
         const task = taskList.find(t => t.id === currentTaskId);
         if (task) task._seasonsLoaded = false;
         await loadTasks();
         await selectTask(currentTaskId);
-        alert(res.message || '人工确认已保存并更新分流结果');
+        if (res.ok === false) { alert(res.message || '确认尚未完成'); return; }
+        if (anomalyReviewTaskId === currentTaskId) openNextAnomalyReview();
+        else alert(res.message || '人工确认已保存并更新分流结果');
       } catch (e) {
         alert(`保存人工确认失败: ${e.message}`);
       } finally {
@@ -4736,8 +4767,8 @@
               <div class="text-base font-black text-purple-700 dark:text-purple-300">${c.redundant_source_count || srcItems.length || 0} 季</div>
             </div>
             <div class="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700">
-              <div class="text-[10px] text-slate-500">需跳过/人工处理</div>
-              <div class="text-base font-black text-slate-700 dark:text-slate-200">${skipped.length} 项</div>
+              <div class="text-[10px] text-slate-500">本次待处理事项</div>
+              <div class="text-base font-black text-slate-700 dark:text-slate-200">${groupRecommendedSkipped(skipped).length} 项</div>
             </div>
           `;
         }
@@ -4751,7 +4782,7 @@
               <div class="font-bold text-amber-800 dark:text-amber-300">① 同作品目录规范化归并（${groups.length} 组）</div>
               ${groups.map(g => `<div class="text-[11px] flex justify-between gap-2 border-t border-amber-100 dark:border-amber-900/40 pt-1">
                 <span class="font-semibold">${escapeHtml(g.canonical_dir_name || g.title || g.group_id)}</span>
-                <span class="font-mono text-slate-500">移动 ${g.file_count || 0} · 同内容去重 ${g.dedup_count || 0}</span>
+                <span class="font-mono text-slate-500">${g.align_only ? '核验并对齐目录记录' : `移动 ${g.file_count || 0} · 去重 ${g.dedup_count || 0} · 附件保全 ${g.asset_count || 0} · 空目录核验 ${g.empty_dir_count || 0}`}</span>
               </div>`).join('')}
             </div>
           `);
@@ -4778,20 +4809,16 @@
             </div>
           `);
         }
-        if (skipped.length > 0) {
-          parts.push(`
-            <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 space-y-1">
-              <div class="font-bold text-slate-700 dark:text-slate-200">不纳入自动执行 / 跳过项（${skipped.length} 项）</div>
-              ${skipped.map(sk => `<div class="text-[11px] text-slate-500">• ${escapeHtml(sk.title || sk.show_name || sk.season_record_id || '')}：${escapeHtml(sk.reason || '需人工确认')}</div>`).join('')}
-            </div>
-          `);
-        }
+        if (skipped.length > 0) parts.push(renderRecommendedSkipped(skipped));
         if (parts.length === 0) {
           parts.push(`<div class="p-6 text-center text-slate-400">当前没有可自动执行的待复核清理项。</div>`);
         }
         if (bodyEl) bodyEl.innerHTML = parts.join('');
         if (footEl) footEl.textContent = `计划编号 ${res.plan_id || '-'} · 预计释放 ${c.reclaimable_display || '0 B'} · 自动校验文件指纹`;
-        if (execBtn) execBtn.disabled = totalExec === 0;
+        if (execBtn) {
+          execBtn.disabled = totalExec === 0;
+          if (totalExec === 0) execBtn.innerHTML = '暂无可执行动作';
+        }
       } catch (e) {
         if (ctrl.signal.aborted && ctrl.signal.reason === 'modal_closed') return;
         const msg = (ctrl.signal.aborted && ctrl.signal.reason === 'timeout')
@@ -4831,12 +4858,27 @@
             <div class="h-full bg-amber-500 transition-all duration-300" style="width:${pct}%"></div>
           </div>
           <div class="text-[11px] text-slate-600 dark:text-slate-300">${escapeHtml(msg)}</div>
+          <button type="button" onclick="stopRecommendedBatch('${escapeJsAttr(snap.job_id)}', this)" class="px-3 py-1.5 rounded-lg border text-xs">完成当前步骤后停止</button>
         </div>
       `;
     }
 
-    async function executeRecommendedBatchPlan() {
-      if (!currentTaskId || !_currentRecommendedPlan) return;
+    async function stopRecommendedBatch(jobId, btn) {
+      if (btn) btn.disabled = true;
+      try { await api(`/api/archive/recommended-execute-stop/${encodeURIComponent(jobId)}`, {method:'POST'}); }
+      catch (e) { alert(e.message); if (btn?.isConnected) btn.disabled = false; }
+    }
+
+    async function viewLastRecommendedExecution() {
+      const jobId = typeof sessionStorage !== 'undefined' ? sessionStorage.getItem(`mediaflow:recommended:${currentTaskId}`) : null;
+      if (!jobId) { alert('当前页面没有记录最近的执行批次'); return; }
+      openModal('recommendedBatchModal');
+      await executeRecommendedBatchPlan(jobId);
+    }
+
+    async function executeRecommendedBatchPlan(resumeJobId = "") {
+      resumeJobId = typeof resumeJobId === "string" ? resumeJobId : "";
+      if (!currentTaskId || (!resumeJobId && !_currentRecommendedPlan)) return;
       const execBtn = document.getElementById('recBatchExecBtn');
       const bodyEl = document.getElementById('recBatchBody');
       const footEl = document.getElementById('recBatchFootNote');
@@ -4846,13 +4888,14 @@
         execBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin text-xs"></i><span>后台执行中...</span>';
       }
       try {
-        let snap = await api('/api/archive/recommended-execute-start', {
+        let snap = resumeJobId ? await api(`/api/archive/recommended-execute-status/${encodeURIComponent(resumeJobId)}`) : await api('/api/archive/recommended-execute-start', {
           method: 'POST',
           body: JSON.stringify({
             task_id: currentTaskId,
             plan_id: _currentRecommendedPlan.plan_id
           })
         });
+        if (snap?.job_id && typeof sessionStorage !== 'undefined') sessionStorage.setItem(`mediaflow:recommended:${currentTaskId}`, snap.job_id);
         _renderRecBatchProgress(bodyEl, snap);
 
         while (snap && snap.status === 'running') {
@@ -4894,7 +4937,7 @@
           return;
         }
 
-        if (!res.ok && !res.partial_success) {
+        if (!res.ok && !res.partial_success && !res.outcomes) {
           throw new Error(res.message || '执行推荐处理未完成');
         }
 
@@ -4904,13 +4947,16 @@
               const lbl = x.show_name
                 ? `${x.show_name}${x.season_number ? ' S' + String(x.season_number).padStart(2, '0') : ''}`
                 : (x.title || x.label || x.season_record_id || String(x));
-              return `<span class="inline-block px-1.5 py-0.5 rounded bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 font-mono text-[10px]">${escapeHtml(lbl)}</span>`;
+              return `<span class="inline-block px-1.5 py-0.5 rounded bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 font-mono text-[10px]">${escapeHtml(lbl)}${x.reason || x.status_detail ? '：' + escapeHtml(x.reason || x.status_detail) : ''}</span>`;
             }).join(' ')
           : '<span class="text-slate-400">无</span>';
         const failedSteps = Array.isArray(res.failed_steps) ? res.failed_steps : [];
+        const resolved = res.fully_resolved === true;
+        const noProgress = res.no_progress === true || (!resolved && failedSteps.length > 0 &&
+          [res.executed_merges, res.executed_cleans, res.executed_redundant].every(x => !Array.isArray(x) || x.length === 0));
         if (bodyEl) {
           bodyEl.innerHTML = `
-            <div class="p-3.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 space-y-2">
+            <div class="p-3.5 rounded-xl border space-y-2 ${resolved ? 'bg-emerald-50 border-emerald-200' : 'bg-amber-50 border-amber-300'}">
               <div class="font-bold text-emerald-800 dark:text-emerald-300 flex items-center gap-1.5">
                 <i class="fa-solid fa-circle-check"></i>
                 <span>${escapeHtml(res.message || '推荐处理执行完成（含局部重算与四类去向汇总）')}</span>
@@ -4933,14 +4979,16 @@
                   <div class="flex flex-wrap gap-1">${fmtList([...(out.remaining_anomalies || []), ...(out.skipped_items || [])])}</div>
                 </div>
               </div>
-              ${failedSteps.length > 0 ? `<div class="p-2 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-200 text-[11px]">⚠️ 以下项目执行前目录文件已变化或失败，已自动拦截并支持重新预览/重试：${escapeHtml(failedSteps.map(x => `${x.title || x.season_record_id || x.group_id}(${x.error || '需重试'})`).join('、'))}</div>` : ''}
+              <div class="p-2 rounded-lg border border-amber-300 text-xs"><b>本批次仍在「待复核清理」：${(out.remaining_review || []).length} 季</b><div class="mt-1">${fmtList(out.remaining_review)}</div><div>执行结束不等于所有项目已解决。仅显示本批次范围内的结果。</div></div>
+              ${failedSteps.length > 0 ? `<div class="p-2 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-200 text-[11px]">⚠️ 以下项目未完成，具体原因：${escapeHtml(failedSteps.map(x => `${x.title || x.season_record_id || x.group_id}(${x.error || '需重试'})`).join('、'))}</div>` : ''}
             </div>
           `;
         }
-        if (footEl) footEl.textContent = '本轮推荐处理已完成并已自动刷新列表，可点击关闭返回主界面。';
+        if (footEl) footEl.textContent = resolved ? '本批次已全部解决，列表已刷新。' : (noProgress ? '本轮没有进展，已停止重复确认。请按上方具体原因解决阻塞，再从列表重新预览。' : '本轮已处理可执行项目；剩余范围变化后可更新预览。');
         if (execBtn && execBtn.isConnected) {
-          execBtn.disabled = true;
-          execBtn.innerHTML = '<i class="fa-solid fa-check text-xs"></i><span>本轮已执行完成</span>';
+          execBtn.disabled = resolved || noProgress;
+          execBtn.innerHTML = resolved ? '本批次已全部解决' : (noProgress ? '本轮无进展 · 请查看原因' : '更新剩余项预览');
+          execBtn.onclick = (!resolved && !noProgress) ? openRecommendedBatchModal : null;
         }
         const task = taskList.find(t => t.id === currentTaskId);
         if (task) task._seasonsLoaded = false;
@@ -4950,7 +4998,7 @@
         if (bodyEl) {
           bodyEl.innerHTML = `<div class="p-4 rounded-xl bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300 text-xs">执行推荐处理失败：${escapeHtml(e.message || '未知错误')}</div>`;
         }
-        _resetRecBatchExecBtn('重新确认执行', false, executeRecommendedBatchPlan);
+        _resetRecBatchExecBtn('更新预览后继续', false, openRecommendedBatchModal);
       }
     }
 
@@ -5990,6 +6038,76 @@
       await toggleWorkCategory(recordId, tmdbId, showName, cat);
     }
 
+    function groupRecommendedSkipped(items) {
+      const grouped = new Map();
+      for (const item of items || []) {
+        const key = item.group_id || item.season_record_id || item.title;
+        if (!grouped.has(key)) grouped.set(key, {...item, dependencies: []});
+        else if (item.reason_type === 'dependency') grouped.get(key).dependencies.push(item);
+        else if (grouped.get(key).reason_type === 'dependency') {
+          const previous = grouped.get(key); grouped.set(key, {...item, dependencies: [previous, ...previous.dependencies]});
+        }
+      }
+      return [...grouped.values()];
+    }
+
+    function renderRecommendedSkipped(items) {
+      const groups = groupRecommendedSkipped(items);
+      const labels = {read_error:'读取未完成', file_conflict:'具体文件待核实', active_download:'等待下载结束', dependency:'等待前置处理', directory_blocked:'目录条件待核实', fact_conflict:'本季事实待核实'};
+      const buckets = new Map();
+      for (const item of groups) {
+        const label = labels[item.reason_type] || '其他未完成事项';
+        if (!buckets.has(label)) buckets.set(label, []);
+        buckets.get(label).push(item);
+      }
+      return `<div class="p-3 rounded-xl border space-y-3"><div class="font-bold">尚未纳入本次执行：${groups.length} 个独立事项</div>
+        ${[...buckets].map(([label, rows]) => `<details ${groups.length <= 5 ? 'open' : ''}><summary class="cursor-pointer font-semibold">${escapeHtml(label)} · ${rows.length} 项</summary>
+        ${rows.map(row => `<div class="mt-2 p-2 rounded border text-xs space-y-1"><div class="font-semibold">${escapeHtml(row.title || row.show_name || '未命名作品')}</div>
+          <div>${escapeHtml(row.reason || '尚未取得有效处理依据')}</div>
+          ${row.dependencies.length ? `<div>此事项还影响 ${row.dependencies.length} 季的后续清源；解决后重新核验清源条件。</div>` : ''}
+          ${row.next_action ? `<div class="text-slate-500">下一步：${escapeHtml(row.next_action)}</div>` : ''}
+          ${row.group_id ? `<button type="button" class="text-indigo-600 underline" onclick="closeModal('recommendedBatchModal');openDirectoryGroupDialog('${escapeJsAttr(row.group_id)}')">定位作品目录与文件</button>` : ''}
+          ${row.affected_files?.length ? `<details><summary>涉及文件（${row.affected_files.length}）</summary>${row.affected_files.map(f=>`<div class="break-all">${escapeHtml(f.path || f.name)}：${escapeHtml(f.reason || '')}</div>`).join('')}</details>` : ''}
+        </div>`).join('')}</details>`).join('')}</div>`;
+    }
+
+    function readableLookupReason(attempt) {
+      const reason = String(attempt.reason || '');
+      if (/^(ValueError|JSONDecodeError)$/.test(reason)) return '返回内容无法解析为作品资料';
+      if (/Timeout/.test(reason)) return '资料服务响应超时';
+      if (reason.includes('详情缺少季集数')) return '该渠道没有提供本季集数';
+      return reason || ({failed:'资料读取未完成', unavailable:'暂未取得可用资料', rejected:'候选未通过本季核验', empty:'本次搜索未命中'})[attempt.status] || '已完成一次查询';
+    }
+
+    function renderDoubanLookup(lookup, adoptedId) {
+      const attempts = lookup.attempts || [];
+      const labels = {adopted:'已取得并核验本季资料', failed:'本次未取得可用的本季资料', not_adopted:'候选未通过本季核验', not_found:'本次搜索未命中'};
+      const status = lookup.status === 'not_adopted' && attempts.length && attempts.every(a=>a.status==='no_match') ? 'not_found' : lookup.status;
+      const headline = adoptedId ? '已取得并核验本季资料' : (labels[status] || '尚无本季查询记录');
+      const counts = new Map();
+      for (const a of attempts.filter(a=>['failed','unavailable','blocked','rejected','ambiguous'].includes(a.status))) {
+        const reason = readableLookupReason(a); counts.set(reason, (counts.get(reason)||0)+1);
+      }
+      const channels = {douban_suggest:'豆瓣搜索建议',moviepilot_douban:'MoviePilot 豆瓣搜索',moviepilot_media:'MoviePilot 媒体详情',moviepilot_detail:'MoviePilot 豆瓣详情',douban_detail:'豆瓣条目核验',douban_search_page:'豆瓣条目搜索页',douban_classic_search:'豆瓣通用搜索页',douban:'豆瓣综合核验'};
+      return `<div><b>豆瓣资料：</b>${escapeHtml(headline)}${adoptedId && /^\d+$/.test(String(adoptedId)) ? ` · <a href="https://movie.douban.com/subject/${adoptedId}/" target="_blank" rel="noopener" class="underline">查看条目</a>` : ''}</div>
+        ${attempts.length ? `<details class="text-xs"><summary class="cursor-pointer">查询情况与诊断</summary>
+          ${!adoptedId ? `<div class="my-2">${[...counts.keys()].slice(0,3).map(x=>escapeHtml(x)).join('；') || '搜索已完成，尚未取得可匹配的本季资料'}。这不表示豆瓣没有收录。</div>` : ''}
+          <details><summary class="cursor-pointer text-slate-500">逐渠道诊断（${attempts.length} 条）</summary>
+          ${attempts.map(a=>`<div class="mt-2 border-t pt-1"><b>${escapeHtml(channels[a.source] || '资料渠道')}</b>${a.title ? ' · '+escapeHtml(a.title) : ''}${a.subject_id ? ' · 豆瓣 '+escapeHtml(a.subject_id) : ''}${a.query ? ' · '+escapeHtml(a.query) : ''}<div>${escapeHtml(readableLookupReason(a))}</div></div>`).join('')}</details></details>` : ''}`;
+    }
+
+    function seasonDecisionSummary(item, ev, conf) {
+      const category = item.raw?.main_category || item.mainCategory || '';
+      if (ev.meta_status === 'not_listed') return `当前作品资料未收录 ${item.season}，需要核实季号与作品归属。`;
+      if (conf.blocking) return conf.kind === 'mixed_works' ? '文件归属依据存在冲突，请查看具体文件与作品标识。' : '作品或季号归属尚未核实。';
+      if (category === 'archive') return '已确认本季播毕，现有内容覆盖齐全，可以归档；独立内容版本一并保留。';
+      if (category === 'airing') return '本季仍在播出或等待开播，文件继续留在源目录。';
+      if (category === 'download') return '本季已播毕，仍有确认缺口，等待补齐。';
+      if (category === 'review') return '有可处理的目录整理或副本清理事项，处理后自动更新去向。';
+      if (ev.broadcast_evidence?.status === 'evidence_pending' || ev.broadcast_evidence?.status === 'unknown') return '本季播期尚未核实，暂不能确定补缺或归档条件。';
+      return cleanSeasonStatusNote(item.raw?.status_detail || item.statusDetail || item.note || '请查看本季依据与处理建议').split(' 请核对越界文件')[0];
+    }
+
     function openGapFillDetail(recordId) {
       const item = findItemByRecordId(recordId);
       if (!item) { alert('未找到该剧季详情'); return; }
@@ -6011,7 +6129,7 @@
       if (titleEl) {
         titleEl.textContent = isAiring
           ? `${item.show} ${item.season} — 连载留源与季级播期详情`
-          : `${item.show} ${item.season} — 补缺与识别详情`;
+          : `${item.show} ${item.season} — 本季详情`;
       }
 
       const parts = [];
@@ -6142,7 +6260,7 @@
       const confMsg = (conf && (conf.message || conf.reason)) || ev.conflict_reason || '';
       const metaStatusVal = ev.meta_status || ev.metadata_status || '';
       const metaErrVal = ev.meta_error || ev.metadata_error || '';
-      const referenceCandidates = (ev.candidates || []).filter(c => c.result === 'reference_only' || (c.result === 'accepted' && String(c.tmdb_id) !== String(item.tmdbId)));
+      const referenceCandidates = (ev.candidates || []).filter(c => ['reference_only', 'rejected_as_primary'].includes(c.result) || (c.result === 'accepted' && String(c.tmdb_id) !== String(item.tmdbId)));
       if (referenceCandidates.length && metaStatusVal === 'metadata_unverified') {
         parts.push(`<div class="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/30 text-xs space-y-2">
           <div class="font-bold">候选资料参考 · 未确认对应关系</div>
@@ -6313,7 +6431,25 @@
         `);
       }
 
-      bodyEl.innerHTML = parts.join('');
+      const fusion = ev.source_fusion || {};
+      const lookup = fusion.douban_lookup || {};
+      const decision = seasonDecisionSummary(item, ev, conf);
+      const detailCategory = item.raw?.main_category || item.mainCategory || '';
+      const nextStep = ({review:'返回列表执行推荐处理，完成后自动更新去向。', download:'按已确认缺口执行补缺；可在下方查看逐集进度。', archive:'返回列表执行归档，迁入前仍会核验目标内容。', airing:'继续留源，无需人工确认。'})[detailCategory]
+        || ((conf.blocking || ev.meta_status === 'not_listed') ? '查看下方具体文件与作品依据，核实作品及季号后保存确认。' : '使用“重新取证并更新”补齐本季资料；具体未核实原因见下方依据。');
+      const total = item.totalEpisodes || item.raw?.total_episodes || '未核实';
+      const broadcast = ({finished:'已播毕', airing:'连载中', upcoming:'待播'})[ev.broadcast_evidence?.status] || '待核实';
+      const fullDecision = item.raw?.status_detail || item.statusDetail || item.note || '';
+      const summaryHtml = `<div class="p-3 rounded-xl border bg-slate-50 dark:bg-slate-800 space-y-2">
+        <div class="font-bold">当前结论</div><div>${escapeHtml(decision)}</div>
+        <div class="text-xs"><b>下一步：</b>${escapeHtml(nextStep)}</div>
+        <div class="text-xs">资料收录：${escapeHtml(total)} 集 · 播期：${escapeHtml(broadcast)} · TMDB ${escapeHtml(item.tmdbId || '未核实')}</div>
+        ${ev.review_resolution?.all_distinct_retained ? '<div class="text-xs text-emerald-600">同集独立版本已保留，无需作为重复副本处理。</div>' : ''}
+        <div class="text-xs break-all"><b>源端：</b>${escapeHtml(item.pathA || item.raw?.season_path || '未记录')}</div>
+        <div class="text-xs break-all"><b>归档目标：</b>${escapeHtml(item.pathB || item.raw?.archive_target_path || '待确定')}（目标路径不代表已经归档）</div>
+        ${renderDoubanLookup(lookup, fusion.douban_id)}
+      </div>`;
+      bodyEl.innerHTML = summaryHtml + `<details class="mt-3"><summary class="cursor-pointer font-semibold">识别依据、文件与历史记录</summary><div class="mt-3 space-y-3"><div class="text-xs break-words">${escapeHtml(fullDecision)}</div>${parts.join('')}</div></details>`;
       dlg.showModal();
     }
 
@@ -7144,7 +7280,7 @@
         }
       });
     }
-    
+
     // ── 11. 目录浏览器（真实 CD2 API）────────────────────────
     let currentBrowsePath = '';
     let selectedTargetPath = '';
@@ -7385,7 +7521,7 @@
       if (!container) return;
 
       const q = (document.getElementById('subSearchInput')?.value || '').trim().toLowerCase();
-      
+
       // 1. 过滤当前媒体大类
       let list = allSubscriptions.filter(s => s.media_type === currentMediaTab);
 
@@ -7607,7 +7743,7 @@
 
     async function selectCleanMode(mode) {
       currentCleanMode = mode;
-      
+
       const cards = ['cleanModeSafeCard', 'cleanModeShortTvCard', 'cleanModeOldZombieCard', 'cleanModeDeepCard'];
       cards.forEach(cid => {
         const el = document.getElementById(cid);
@@ -8031,7 +8167,7 @@
       const totalCount = currentPreviewData.matched_count;
       const modeName = currentPreviewData.mode_name;
       const mediaName = currentMediaTab === 'movie' ? '电影' : '电视剧';
-      
+
       const itemNamesPreview = selectedItems.slice(0, 8).map((x, i) => `${i + 1}. ${x.name} (${x.year || '-'})`).join('\n');
       const moreSuffix = count > 8 ? `\n... 等共 ${count} 部作品` : '';
 

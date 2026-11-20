@@ -999,6 +999,8 @@ async def preview_task_directory_group_merge(
         raise HTTPException(status_code=409, detail="请在初检结束后合并目录组")
 
     from app.core.directory_merge import build_directory_merge_plan
+    from app.clients.clouddrive2 import CloudDrive2Client
+    cd2 = CloudDrive2Client()
     try:
         plan = await build_directory_merge_plan(
             db,
@@ -1008,11 +1010,14 @@ async def preview_task_directory_group_merge(
             source_target_path=body.source_target_path,
             season_number=body.season_number,
             selected_prefix=body.selected_prefix,
+            cd2_client=cd2,
         )
         await db.commit()
         return {"ok": True, "plan": plan}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        await cd2.close()
 
 
 @router.post("/{task_id}/directory-groups/{group_id}/merge-execute")

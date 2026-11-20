@@ -25,12 +25,13 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from uuid import uuid4
 
 from app.core.episode_parser import (
+    companion_matches_video,
     classify_content_unit,
     detect_segment_part,
     parse_episode,
 )
 
-REVIEW_RULES_VERSION = "v2.5.45"
+REVIEW_RULES_VERSION = "v2.5.53"
 
 # 视频与伴生正则
 MEDIA_REGEX = re.compile(
@@ -164,6 +165,7 @@ def compare_plan_fingerprints(
         if p not in stable_swapped_paths
         and (
             curr_fps[p]["size"] != plan_fingerprints[p]["size"]
+            or (curr_fps[p]["id"] and plan_fingerprints[p].get("id") and curr_fps[p]["id"] != plan_fingerprints[p]["id"])
             or (curr_fps[p]["modified"] and plan_fingerprints[p]["modified"] and curr_fps[p]["modified"] != plan_fingerprints[p]["modified"])
         )
     )
@@ -171,7 +173,8 @@ def compare_plan_fingerprints(
     added_videos = [p for p in added if MEDIA_REGEX.search(curr_fps[p]["name"])]
     modified_videos = [p for p in modified if MEDIA_REGEX.search(curr_fps[p]["name"])]
     missing_delete_targets = [p for p in removed if p in planned_delete_paths]
-    needs_repreview = bool(added_videos or modified_videos)
+    changed_delete_targets = [p for p in added + modified if p in planned_delete_paths]
+    needs_repreview = bool(added_videos or modified_videos or changed_delete_targets)
     return {
         "changed": bool(added or removed or modified),
         "needs_repreview": needs_repreview,
@@ -181,6 +184,7 @@ def compare_plan_fingerprints(
         "modified_files": modified,
         "modified_videos": modified_videos,
         "missing_delete_targets": missing_delete_targets,
+        "changed_delete_targets": changed_delete_targets,
     }
 
 
@@ -307,6 +311,7 @@ def generate_review_clean_plan(
     total_episodes: int,
     force_clean: bool = False,
     active_download_paths: Optional[Set[str]] = None,
+    verified_deleted_video_names: Optional[Set[str]] = None,
 ) -> Dict[str, Any]:
     """
     v2.5.45 统一内容等价组复核清理计划生成器（预览与执行共用同一计划与证据版本）。
@@ -642,62 +647,6 @@ def generate_review_clean_plan(
     for uv in unparsed_videos:
         to_keep.append(uv)
 
-    # 5. 外挂字幕绝对保护 + 伴生刮削级联清理（无关联依据的 NFO/图片保留）
-    kept_video_eps: Set[int] = set()
-    for kv in to_keep:
-        for e in (kv.get("episodes") or []):
-            if isinstance(e, int) and e > 0:
-                kept_video_eps.add(e)
-
-    for f in files:
-        if f.get("isDirectory"):
-            continue
-        f_name = f.get("name", "")
-        is_sub = bool(SUBTITLE_REGEX.search(f_name))
-        is_scrape = bool(SCRAPE_REGEX.search(f_name))
-        if not is_sub and not is_scrape:
-            continue
-
-        stem = re.sub(r"\.[^.]+$", "", f_name)
-        if is_scrape and SHARED_SCRAPE.search(stem):
-            continue
-
-        clean_stem = re.sub(r"\.(?:zh|chs|cht|chi|eng|sc|tc|jpn|default|forced)$", "", stem, flags=re.IGNORECASE)
-
-        matched_deleted = [
-            v for v in to_delete
-            if stem.lower() == re.sub(r"\.[^.]+$", "", v.get("name", "")).lower()
-            or stem.lower() == re.sub(r"\.[^.]+$", "", v.get("name", "")).lower() + "-thumb"
-            or clean_stem.lower() == re.sub(r"\.[^.]+$", "", v.get("name", "")).lower()
-        ]
-        matched_kept = [
-            v for v in to_keep
-            if stem.lower() == re.sub(r"\.[^.]+$", "", v.get("name", "")).lower()
-            or stem.lower() == re.sub(r"\.[^.]+$", "", v.get("name", "")).lower() + "-thumb"
-            or clean_stem.lower() == re.sub(r"\.[^.]+$", "", v.get("name", "")).lower()
-        ]
-
-        if is_scrape:
-            if matched_kept:
-                continue
-            ep_in_scrape = episode_from_any_name(f_name, season_number)
-            # 仅清理属于已淘汰视频的伴生刮削，或明确带集号且该集已有保留视频覆盖的孤儿单集刮削；无关联依据的一律保留
-            if matched_deleted or (ep_in_scrape is not None and ep_in_scrape in kept_video_eps):
-                reason = "对应已淘汰视频的单集刮削文件" if matched_deleted else "无对应视频文件的孤儿残留刮削文件"
-                to_delete.append({
-                    "episode": ep_in_scrape,
-                    "name": f_name,
-                    "path": f.get("path"),
-                    "modified": f.get("modified"),
-                    "size": f.get("size", 0),
-                    "reason": reason,
-                    "replaced_by": matched_deleted[0].get("replaced_by", "") if matched_deleted else "",
-                    "equivalence_basis": "关联已淘汰视频或已有保留单集替代的冗余刮削",
-                })
-        elif is_sub:
-            # 外挂字幕绝对保护不删
-            continue
-
     # ── 终道收敛与绝对安全不变量校验 (P0-2 按内容等价键单调不减) ──
     kept_keys = {(f.get("path") or f.get("name") or "") for f in to_keep if (f.get("path") or f.get("name"))}
     dedup_to_delete: List[Dict[str, Any]] = []
@@ -744,6 +693,57 @@ def generate_review_clean_plan(
         final_to_delete.append(d)
 
     to_delete = final_to_delete
+
+    # 5. 最终视频保留/删除集合确定后，才计算附件依赖；被保护视频的附件同步保留。
+    # 外挂字幕绝对保护 + 伴生刮削级联清理（无关联依据的 NFO/图片保留）
+    kept_video_eps: Set[int] = set()
+    for kv in to_keep:
+        for e in (kv.get("episodes") or []):
+            if isinstance(e, int) and e > 0:
+                kept_video_eps.add(e)
+
+    for f in files:
+        if f.get("isDirectory"):
+            continue
+        f_name = f.get("name", "")
+        is_sub = bool(SUBTITLE_REGEX.search(f_name))
+        is_scrape = bool(SCRAPE_REGEX.search(f_name))
+        if not is_sub and not is_scrape:
+            continue
+
+        stem = re.sub(r"\.[^.]+$", "", f_name)
+        if is_scrape and SHARED_SCRAPE.search(stem):
+            continue
+
+        clean_stem = re.sub(r"\.(?:zh|chs|cht|chi|eng|sc|tc|jpn|default|forced)$", "", stem, flags=re.IGNORECASE)
+
+        matched_deleted = [v for v in to_delete if MEDIA_REGEX.search(v.get("name", "")) and companion_matches_video(f_name, v.get("name", ""))]
+        matched_kept = [v for v in to_keep if companion_matches_video(f_name, v.get("name", ""))]
+        historical_parent = next((v for v in sorted(verified_deleted_video_names or ()) if companion_matches_video(f_name, v)), "")
+
+        if is_scrape:
+            if matched_kept:
+                continue
+            ep_in_scrape = episode_from_any_name(f_name, season_number)
+            # 仅清理属于已淘汰视频的伴生刮削，或明确带集号且该集已有保留视频覆盖的孤儿单集刮削；无关联依据的一律保留
+            if matched_deleted or historical_parent:
+                reason = "对应已淘汰视频的单集刮削文件" if matched_deleted else "无对应视频文件的孤儿残留刮削文件"
+                to_delete.append({
+                    "episode": ep_in_scrape,
+                    "name": f_name,
+                    "path": f.get("path"),
+                    "modified": f.get("modified"),
+                    "size": f.get("size", 0),
+                    "reason": reason,
+                    "replaced_by": matched_deleted[0].get("replaced_by", "") if matched_deleted else "",
+                    "equivalence_basis": "关联本次待删视频或已核验删除的视频回执",
+                    "parent_video_path": matched_deleted[0].get("path", "") if matched_deleted else "",
+                    "historical_parent": historical_parent,
+                })
+        elif is_sub:
+            # 外挂字幕绝对保护不删
+            continue
+
     can_clean = len(to_delete) > 0
     all_missing = [n for n in expected_range if n not in found_episodes]
     missing_desc = format_missing_episodes_text(all_missing) if all_missing else ""

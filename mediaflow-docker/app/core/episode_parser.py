@@ -55,7 +55,8 @@ class ParsedEpisode:
             "pure": "纯享版",
             "pilot": "先导/超前",
             "easter_egg": "彩蛋/花絮",
-            "interview": "采访/陪看",
+            "interview": "采访/专访",
+            "watch": "陪看", "live": "直播", "radio": "电台", "hangout": "连麦",
             "special": "特别篇/衍生",
         }
         edit_labels = {
@@ -108,17 +109,21 @@ _HDR_PATTERN = re.compile(r"(HDR10\+?|Dolby\s*Vision|DV|HLG)", re.IGNORECASE)
 
 # ── 统一内容类别、剪辑版本与分段识别正则（全模块共用） ─────────
 _SEGMENT_PART_PATTERN = re.compile(
-    r"(?:Part[ ._-]*(0?[123]|[ABC])(?=[^a-z0-9]|$)|第\s*\d+\s*[期集][ ._-]*([上中下])|[\s._\-\(\[（]([上中下])(?:集|期|半|段)?[\s._\-\)\]）])",
+    r"(?:Part[ ._-]*(\d{1,2}|[A-Z])(?=[^a-z0-9]|$)|第\s*\d+\s*[期集][ ._-]*([上中下])|[\s._\-\(\[（]([上中下])(?:集|期|半|段)?[\s._\-\)\]）])",
     re.IGNORECASE,
 )
 _CONTENT_KIND_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("vlog", re.compile(r"(?:^|[\s._\-\(\[（])(?:Vlog|Diary)(?:$|[\s._\-\)\]）\d])|(?:日记|VLOG)", re.IGNORECASE)),
-    ("extra_ep", re.compile(r"(?:加更(?:版|期)?|加码(?:版)?|(?<![a-zA-Z])Plus(?![a-zA-Z])|EX\d+|投递|Deliver|饭局|请吃饭)", re.IGNORECASE)),
+    ("extra_ep", re.compile(r"(?:加更(?:版|期)?|加码(?:版)?|(?<![a-zA-Z])Plus(?![a-zA-Z])|(?<![a-zA-Z])EX\d*(?![a-zA-Z])|投递|Deliver|饭局|请吃饭)", re.IGNORECASE)),
     ("pure", re.compile(r"(?:纯享(?:版)?|(?<![a-zA-Z])Pure(?![a-zA-Z]))", re.IGNORECASE)),
     ("pilot", re.compile(r"(?:先导(?:片|期)?|先行片|超前(?:企划|点映|预热)?|前瞻|预热|出发前|(?<![a-zA-Z])Before(?![a-zA-Z]))", re.IGNORECASE)),
-    ("interview", re.compile(r"(?:采访|访谈|陪看|(?<![a-zA-Z])Watch(?![a-zA-Z]))", re.IGNORECASE)),
+    ("watch", re.compile(r"(?:陪看|(?<![a-zA-Z])Watch(?![a-zA-Z]))", re.IGNORECASE)),
+    ("live", re.compile(r"(?:直播|(?<![a-zA-Z])Live(?![a-zA-Z]))", re.IGNORECASE)),
+    ("radio", re.compile(r"(?:电台|(?<![a-zA-Z])Radio(?![a-zA-Z]))", re.IGNORECASE)),
+    ("hangout", re.compile(r"(?:连麦(?:大会)?|(?<![a-zA-Z])Hangout(?![a-zA-Z]))", re.IGNORECASE)),
+    ("interview", re.compile(r"(?:采访|专访|访谈|(?<![a-zA-Z])Interview(?![a-zA-Z]))", re.IGNORECASE)),
     ("easter_egg", re.compile(r"(?:彩蛋|花絮|花活儿|幕后|母带(?:版)?|切片|看点(?:版)?|片段|预告(?:片)?|(?:^|[\s._\-\(\[])(?:Extra|Preview|Behind[._\s-]the[._\s-]Scenes|Making[._\s-]of|Cut|Clip|Tape)(?:$|[\s._\-\)\]\d]))", re.IGNORECASE)),
-    ("special", re.compile(r"(?:特辑|收官(?:特辑)?|特别篇|特别企划|番外|特典|衍生|AI档案|\b(?:SP\d*|OVA\d*|OAD\d*)\b)", re.IGNORECASE)),
+    ("special", re.compile(r"(?:特辑|收官(?:特辑)?|特别篇|特别节目|特别企划|番外|特典|衍生|搜证事件簿|圆桌复盘局|全纪录|候场|陪看|1[Vv]1|AI档案|(?<![a-zA-Z])Special(?:s)?(?![a-zA-Z])|\b(?:SP\d*|OVA\d*|OAD\d*)\b)", re.IGNORECASE)),
 ]
 _EDIT_VERSION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("extended", re.compile(r"(?:加长(?:版)?|完整(?:版)?|未删减(?:版)?|导演剪辑(?:版)?|(?<![a-zA-Z])(?:Extended|Uncut|Director'?s?[._\s-]*Cut)(?![a-zA-Z]))", re.IGNORECASE)),
@@ -130,7 +135,7 @@ _EDIT_VERSION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
 def detect_segment_part(filename: str) -> tuple[int | None, str]:
     """统一提取上下段 / Part 编号与可读标签。"""
     m = re.search(
-        r"(?:Part[ ._-]*(0?[123]|[ABC])(?=[^a-z0-9]|$)|第\s*\d+\s*[期集][ ._-]*([上中下]))",
+        r"(?:Part[ ._-]*(\d{1,2}|[A-Z])(?=[^a-z0-9]|$)|第\s*\d+\s*[期集][ ._-]*([上中下]))",
         filename or "",
         re.IGNORECASE,
     )
@@ -149,6 +154,10 @@ def detect_segment_part(filename: str) -> tuple[int | None, str]:
         "1": (1, "Part1"), "2": (2, "Part2"), "3": (3, "Part3"),
         "上": (1, "上段"), "中": (2, "中段"), "下": (2, "下段"),
     }
+    if raw.isdigit() and int(raw) > 0:
+        return int(raw), f"Part{int(raw)}"
+    if len(raw) == 1 and "A" <= raw <= "Z":
+        return ord(raw) - ord("A") + 1, f"Part{raw}"
     return mapping.get(raw, (None, ""))
 
 
@@ -215,8 +224,15 @@ def parse_episode(filename: str, filepath: str = "", file_size: int = 0) -> Pars
             result.edit_version = ev_name
             break
 
+    # 内容版本说明与独有配音参与等价判断，未知版本标签不降级为普通版。
+    edition_tags = re.findall(r"[\u4e00-\u9fff]{2,10}版", cls_stem)
+    audio_tags = re.findall(r"国语|粤语|台配|港配|日语配音|英语配音|国粤双语|多语配音", cls_stem)
+    extra_tags = sorted(set(audio_tags + [t for t in edition_tags if not any(p.search(t) for _, p in _EDIT_VERSION_PATTERNS)]))
+    if extra_tags:
+        result.edit_version += "|" + "|".join(extra_tags)
+
     # 兼容原有 is_extra 语义（衍生类内容不计入普通正片，但普通正片的“加长版”保留为正片剪辑版本）
-    if result.content_kind in ("vlog", "extra_ep", "pure", "pilot", "interview", "easter_egg"):
+    if result.content_kind != "regular":
         result.is_extra = True
     elif re.search(
         r"(?:^|[\s._\-\(\[])(?:Diary|Extra|Preview|Behind[._\s-]the[._\s-]Scenes|Making[._\s-]of|Cut|Clip|Tape|Vlog)(?:$|[\s._\-\)\]\d])|"
@@ -232,6 +248,8 @@ def parse_episode(filename: str, filepath: str = "", file_size: int = 0) -> Pars
     seg_part, seg_label = detect_segment_part(filename)
     result.segment_part = seg_part
     result.segment_label = seg_label
+    if seg_label == "中段":
+        result.edit_version += "|中段"  # 中/下不可因为数字均为 2 而互删
 
     # 集号提取
     for pattern, ptype in _EPISODE_PATTERNS:
@@ -320,3 +338,11 @@ def is_subtitle_file(filename: str) -> bool:
     if dot_idx <= 0:
         return False
     return filename[dot_idx:].lower() in SUBTITLE_EXTENSIONS
+
+
+def companion_matches_video(attachment_name: str, video_name: str) -> bool:
+    """仅接受明确的词干/缩略图/语言后缀关联，预览与执行共用。"""
+    stem = re.sub(r"\.[^.]+$", "", attachment_name).casefold()
+    video_stem = re.sub(r"\.[^.]+$", "", video_name).casefold()
+    stem = re.sub(r"(?:\.(?:zh|chs|cht|chi|eng|sc|tc|jpn|default|forced))+$", "", stem)
+    return bool(video_stem) and stem in (video_stem, video_stem + "-thumb")

@@ -166,12 +166,13 @@ console.log("===================================================================
     openModal: id => {context.openedModal = id;}};
   vm.createContext(context);
   vm.runInContext(source('cleanSeasonStatusNote') + ';' + source('renderEpisodesList') + ';renderEpisodesList()', context);
-  assert(getNode('episodeItemContainer').innerHTML.includes("markSeasonHandled('record', this)"));
+  assert(!getNode('episodeItemContainer').innerHTML.includes("markSeasonHandled('record', this)"));
+  assert(getNode('episodeItemContainer').innerHTML.includes("holdSeasonForTask('record', this)"));
   context.currentCategory = 'download';
   vm.runInContext('renderEpisodesList()', context);
   const downloadCard = getNode('episodeItemContainer').innerHTML;
   assert(!downloadCard.includes("promptDeleteSourceShow("), "缺集待补分类绝不应包含删除源端整剧删除按钮！");
-  assert(!downloadCard.includes("openDeleteSourceSeasonModal("), "G22: 缺集待补分类绝不应包含删除源端本季按钮！");
+  assert(downloadCard.includes("openDeleteSourceSeasonModal("), "v2.5.52: 缺集待补提供单季主动放弃入口并要求预览确认");
   assert(!downloadCard.includes('markSeasonHandled('));
 
   // 验证异常卡片移除整剧删除入口，并按问题提供人工确认
@@ -215,7 +216,7 @@ console.log("===================================================================
   context.gapFillPreviewState = { itemsByRecordId: {} };
   context.getCategoryBadge = () => '';
   getNode('gapFillDetailDialog').showModal = () => {};
-  vm.runInContext(source('openGapFillDetail') + ";openGapFillDetail('dup-only')", context);
+  vm.runInContext(['seasonDecisionSummary','readableLookupReason','renderDoubanLookup'].map(source).join(';') + ';' + source('openGapFillDetail') + ";openGapFillDetail('dup-only')", context);
   const dupHtml = getNode('gapFillDetailBody').innerHTML;
   assert(dupHtml.includes('作品识别与别名参考（无归属冲突）'), '无冲突项不应显示冲突拦截标题');
   assert(!dupHtml.includes('识别证据与冲突拦截'), '无冲突项不得出现红色识别证据与冲突拦截');
@@ -555,7 +556,7 @@ console.log("===================================================================
 
     // 3. 验证点开连载详情弹窗只读且包含分端覆盖与在途明细，无删源或改绑操作 (L02, L05)
     getDgNode('gapFillDetailDialog').showModal = () => {};
-    vm.runInContext(sourceWithCr('openGapFillDetail') + ";openGapFillDetail('air-l01')", dgContext);
+    vm.runInContext(['seasonDecisionSummary','readableLookupReason','renderDoubanLookup'].map(sourceWithCr).join(';') + ';' + sourceWithCr('openGapFillDetail') + ";openGapFillDetail('air-l01')", dgContext);
     const airingDetailHtml = getDgNode('gapFillDetailBody').innerHTML;
     assert(airingDetailHtml.includes('连载留源 · 季级播期与分端覆盖明细'), '详情必须渲染连载分端覆盖面板');
     assert(airingDetailHtml.includes('源端 6 集'), '详情必须准确显示源端 6 集');
@@ -718,7 +719,7 @@ console.log("===================================================================
     assert(!gapPushedCardsHtml.includes('openDeleteSourceSeasonModal'), '等待页卡片仅提供核对与查看进度，不渲染删除源端（本季）');
 
     // 验证详情弹窗渲染三端实物覆盖与 E09 精确低做种原因
-    vm.runInContext(sourceWithCr('openGapFillDetail') + ";openGapFillDetail('gap-rookie-s3')", dgContext);
+    vm.runInContext(['seasonDecisionSummary','readableLookupReason','renderDoubanLookup'].map(sourceWithCr).join(';') + ';' + sourceWithCr('openGapFillDetail') + ";openGapFillDetail('gap-rookie-s3')", dgContext);
     const gapDetailHtml = getDgNode('gapFillDetailBody').innerHTML;
     assert(gapDetailHtml.includes('三端实物覆盖与缺号核定依据'), '补缺详情弹窗必须包含三端实物覆盖卡片');
     assert(gapDetailHtml.includes('E09'), '补缺详情表格必须正确显示 E09 集号而非 E00');
@@ -898,8 +899,10 @@ console.log("===================================================================
             status: 'completed',
             result: {
               ok: true,
+              fully_resolved: !['partial', 'blocked'].includes(mode),
+              no_progress: mode === 'blocked',
               message: '批量推荐处理完成：目录归并 1 组、副本清理 1 季',
-              outcomes: { to_download: [{ show_name: '剧A', season_number: 1 }], to_airing: [], to_archive: [], source_cleaned: [], remaining_anomalies: [], skipped_items: [] },
+              outcomes: { remaining_review: ['partial', 'blocked'].includes(mode) ? [{show_name:'剩余剧',season_number:1,reason:'缩略图待处理'}] : [], to_download: [{ show_name: '剧A', season_number: 1 }], to_airing: [], to_archive: [], source_cleaned: [], remaining_anomalies: [], skipped_items: [] },
               failed_steps: []
             }
           };
@@ -915,6 +918,7 @@ console.log("===================================================================
     vm.createContext(recCtx);
     vm.runInContext([
       extractFn('escapeHtml'),
+      extractFn('escapeJsAttr'),
       'let _currentRecommendedPlan = recCtx_initPlan;',
     ].join(';\n'), Object.assign(recCtx, { recCtx_initPlan: { plan_id: 'plan-1' } }));
     vm.runInContext([
@@ -937,8 +941,18 @@ console.log("===================================================================
     assert(recEls.recBatchBody.innerHTML.includes('批量推荐处理完成'), '完成后必须展示汇总结果');
     assert(!recEls.recBatchExecBtn.innerHTML.includes('fa-spin'), '完成后按钮不得继续旋转');
     assert(!recEls.recBatchExecBtn.innerHTML.includes('正在分步执行'), '完成后按钮不得残留正在执行文案');
-    assert(recEls.recBatchExecBtn.innerHTML.includes('本轮已执行完成'), '完成后按钮必须清晰标记已完成');
+    assert(recEls.recBatchExecBtn.innerHTML.includes('本批次已全部解决'), '完成后按钮必须清晰标记已完成');
     assert.strictEqual(refreshCount, 2, '完成后必须调用 loadTasks 和 selectTask 刷新列表');
+    mode = 'partial';
+    await recCtx.executeRecommendedBatchPlan();
+    assert(recEls.recBatchBody.innerHTML.includes('缩略图待处理'));
+    assert(recEls.recBatchExecBtn.innerHTML.includes('更新剩余项预览'));
+    assert.strictEqual(recEls.recBatchExecBtn.disabled, false);
+    mode = 'blocked';
+    await recCtx.executeRecommendedBatchPlan();
+    assert(recEls.recBatchExecBtn.innerHTML.includes('本轮无进展'));
+    assert.strictEqual(recEls.recBatchExecBtn.disabled, true);
+    assert.strictEqual(recEls.recBatchExecBtn.onclick, null);
     console.log('✓ 执行推荐处理异步轮询、指纹拦截分支与按钮状态复位测试通过');
   }
 
