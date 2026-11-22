@@ -342,8 +342,8 @@ class TestV2538GapFillModule(unittest.IsolatedAsyncioTestCase):
 
             self.assertTrue(out["ok"])
             clear_mock.assert_awaited_once()
-            self.assertEqual(clear_mock.await_args.kwargs.get("episodes"), {2, 3})
-            self.assertTrue(clear_mock.await_args.kwargs.get("explicit_only"))
+            self.assertIsNone(clear_mock.await_args.kwargs.get("episodes"))
+            self.assertFalse(clear_mock.await_args.kwargs.get("explicit_only"))
             self.assertEqual(out["submitted"][0]["already_owned_count"], 8)
             self.assertTrue(out["submitted"][0]["submitted_unverified"])
 

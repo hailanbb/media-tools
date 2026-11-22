@@ -167,7 +167,8 @@ console.log("===================================================================
   vm.createContext(context);
   vm.runInContext(source('getGapFillLists') + ';' + source('cleanSeasonStatusNote') + ';' + source('renderEpisodesList') + ';renderEpisodesList()', context);
   assert(!getNode('episodeItemContainer').innerHTML.includes("markSeasonHandled('record', this)"));
-  assert(getNode('episodeItemContainer').innerHTML.includes("holdSeasonForTask('record', this)"));
+  assert(!getNode('episodeItemContainer').innerHTML.includes("holdSeasonForTask('record', this)"));
+  assert(getNode('episodeItemContainer').innerHTML.includes("手动复核"));
   context.currentCategory = 'download';
   vm.runInContext('renderEpisodesList()', context);
   const downloadCard = getNode('episodeItemContainer').innerHTML;
@@ -589,11 +590,11 @@ console.log("===================================================================
       evidence: {meta_status: 'fetch_failed'}}];
     vm.runInContext('renderEpisodesList()', dgContext);
     const failedHtml = getDgNode('episodeItemContainer').innerHTML;
-    assert(failedHtml.includes("recheckSeasonEvidence('failed-fetch', this)"), '初检请求失败条目应提供重试失败项');
-    assert(failedHtml.includes('重试失败项'), '按钮文案应为重试失败项');
+    assert(failedHtml.includes("openManualConfirmModal('failed-fetch')"), '失败项统一进入手动复核');
+    assert(failedHtml.includes('手动复核'), '主按钮为手动复核');
     sampleTask.status = 'running';
     vm.runInContext('renderEpisodesList()', dgContext);
-    assert(/recheckSeasonEvidence[^>]+disabled/.test(getDgNode('episodeItemContainer').innerHTML), '初检进行中禁用重试失败项');
+    assert(/openManualConfirmModal[^>]+disabled/.test(getDgNode('episodeItemContainer').innerHTML), '初检进行中禁用重试失败项');
     sampleTask.status = 'completed';
 
     // 候选资料不确定时统一标签为「作品资料不完整」，主入口为「人工确认」，更多菜单提供「本次保留，不再提示」，不引导删源或结案。
@@ -606,7 +607,7 @@ console.log("===================================================================
     assert(candidateHtml.includes('作品资料不完整'), '统一标签必须为「作品资料不完整」');
     assert(!candidateHtml.includes('非文件错配'), '标签不得追加超出证据的「非文件错配」断言');
     assert(candidateHtml.includes("openManualConfirmModal('candidate-reference')"), '资料不完整主入口必须为人工确认');
-    assert(candidateHtml.includes("holdSeasonForTask('candidate-reference', this)"), '更多菜单必须提供本次保留');
+    assert(!candidateHtml.includes("holdSeasonForTask('candidate-reference', this)"), '暂不处理已收进手动复核');
     for (const action of ['markSeasonHandled', 'promptDeleteSourceShow', 'handleSingleAction', 'recheckSeasonEvidence']) {
       assert(!candidateHtml.includes(action), `未核实候选资料不能引导 ${action}`);
     }

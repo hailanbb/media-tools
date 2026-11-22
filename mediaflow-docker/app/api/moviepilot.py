@@ -125,22 +125,43 @@ class BatchUpdateStatusRequest(BaseModel):
 
 class SubscriptionCleanPreviewRequest(BaseModel):
     media_type: str = "all"  # "all" | "tv" | "movie"
-    mode: str = "safe"       # tv: "safe" | "short_tv" | "stalled" | "deep"
-                             # movie: "safe" | "old_zombie" | "douban" | "deep"
+    mode: str = "safe"       # tv: "safe" | "never_downloaded" | "partial_stalled" | "short_tv" | "low_quality" | "stalled" | "deep"
+                             # movie: "safe" | "old_zombie" | "low_quality" | "douban" | "deep"
+
+
+class SubscriptionCd2SyncRequest(BaseModel):
+    scope: str = "all"  # "all" | "tv" | "movie"
+
+
+class BatchResourceAuditRequest(BaseModel):
+    media_type: str = "tv"           # "tv" | "movie"
+    bucket: str = "partial_stalled"  # tv: "partial_stalled" | "never_downloaded" | "all_stalled" ; movie: "old_zombie" | "never_downloaded"
+    sub_ids: list[int] | None = None
+    limit: int = 40
+
+
+class BatchSubscriptionGapFillRequest(BaseModel):
+    audit_id: str
+    sub_ids: list[int]
 
 
 @router.get("/subscriptions")
-async def list_subscriptions(media_type: str | None = None) -> dict:
-    """获取 MP 订阅列表并附加规则引擎智能诊断（支持电影/电视剧分离）。"""
+async def list_subscriptions(
+    media_type: str | None = None,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """获取 MP 订阅列表并叠加 CD2 实盘库存与多维智能诊断（支持电影/电视剧分离）。"""
     _check_mp_configured()
+    from app.services.subscription_cd2_index import enrich_subscriptions_with_cd2_and_cache
     mp = MoviePilotClient()
     try:
-        subs = await mp.list_subscriptions()
-        eval_result = evaluate_subscriptions(subs)
-        
+        raw_subs = await mp.list_subscriptions()
+        enriched_subs, cd2_meta = await enrich_subscriptions_with_cd2_and_cache(db, raw_subs)
+        eval_result = evaluate_subscriptions(enriched_subs)
+
         # 组装标准化输出
         items_out = []
-        for s, diag in zip(subs, eval_result["items"]):
+        for s, diag in zip(enriched_subs, eval_result["items"]):
             if media_type and diag.media_type != media_type:
                 continue
 
@@ -157,7 +178,7 @@ async def list_subscriptions(media_type: str | None = None) -> dict:
                 "username": diag.username,
                 "tmdb_id": s.get("tmdbid") or s.get("tmdb_id"),
                 "poster": s.get("backdrop") or s.get("poster") or "",
-                
+
                 # 智能清理决策字段
                 "clean_eligible": diag.clean_eligible,
                 "clean_confidence": diag.clean_confidence,
@@ -168,10 +189,26 @@ async def list_subscriptions(media_type: str | None = None) -> dict:
                 "created_days_ago": diag.created_days_ago,
                 "is_protected": diag.is_protected,
                 "is_short_tv": diag.is_short_tv,
+                "short_drama_reason": diag.short_drama_reason,
                 "is_douban_sync": diag.is_douban_sync,
                 "release_stage": diag.release_stage,
                 "in_library_status": diag.in_library_status,
                 "version_target_satisfied": diag.version_target_satisfied,
+
+                # v2.5.63 扩展维度：停滞分桶、异常特征、CD2 实盘真相
+                "stalled_kind": diag.stalled_kind,
+                "can_gap_fill": diag.can_gap_fill,
+                "is_low_quality": diag.is_low_quality,
+                "low_quality_flags": diag.low_quality_flags,
+                "low_quality_reasons": diag.low_quality_reasons,
+                "data_source": diag.data_source,
+                "cd2_verified": diag.cd2_verified,
+                "cd2_in_library": diag.cd2_in_library,
+                "cd2_source_episodes": diag.cd2_source_episodes,
+                "cd2_archive_episodes": diag.cd2_archive_episodes,
+                "cd2_total_episodes": diag.cd2_total_episodes,
+                "cd2_paths": diag.cd2_paths,
+                "mp_completed_episodes": diag.mp_completed_episodes,
             })
 
         # 统计汇总
@@ -183,6 +220,7 @@ async def list_subscriptions(media_type: str | None = None) -> dict:
             "overall": overall,
             "tv": tv_stats,
             "movie": movie_stats,
+            "cd2_meta": cd2_meta,
             # 兼容字段
             "total": overall["total"],
             "high_confidence_count": overall["high"],
@@ -193,6 +231,75 @@ async def list_subscriptions(media_type: str | None = None) -> dict:
         }
     finally:
         await mp.close()
+
+
+@router.post("/subscriptions/sync-cd2")
+async def sync_subscriptions_cd2(body: SubscriptionCd2SyncRequest | None = None) -> dict:
+    """触发后台异步 CD2 全盘实盘库存同步（电影入库判定与剧集实存集数均以 CD2 为准）。"""
+    _check_mp_configured()
+    from app.database import async_session
+    from app.services.subscription_cd2_index import trigger_cd2_sync_background
+    scope = (body.scope if body else "all") or "all"
+    return trigger_cd2_sync_background(async_session, scope=scope)
+
+
+@router.get("/subscriptions/sync-cd2/status")
+async def get_subscriptions_cd2_sync_status(db: AsyncSession = Depends(get_db)) -> dict:
+    """查询 CD2 实盘库存同步任务进度与当前持久化快照概要。"""
+    from app.services.subscription_cd2_index import get_cd2_sync_status, load_cd2_snapshot
+    await load_cd2_snapshot(db)
+    return get_cd2_sync_status()
+
+
+@router.post("/subscriptions/batch-resource-audit")
+async def start_subscription_batch_audit(
+    body: BatchResourceAuditRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """启动异步批量资源梳理（复用补缺选种引擎，筛查断更停滞剧集或往年老片死种的可用资源）。"""
+    _check_mp_configured()
+    from app.database import async_session
+    from app.services.subscription_governance_service import start_batch_resource_audit
+    return await start_batch_resource_audit(
+        db,
+        async_session,
+        media_type=body.media_type,
+        bucket=body.bucket,
+        sub_ids=body.sub_ids,
+        limit=body.limit,
+    )
+
+
+@router.get("/subscriptions/batch-resource-audit/{audit_id}")
+async def poll_subscription_batch_audit(audit_id: str) -> dict:
+    """轮询批量资源梳理进度与分组结果（可补缺 vs 无源待退订）。"""
+    from app.services.subscription_governance_service import get_batch_audit_status
+    res = get_batch_audit_status(audit_id)
+    if res is None:
+        raise HTTPException(404, "未找到对应的梳理会话")
+    return res
+
+
+@router.post("/subscriptions/batch-resource-audit/{audit_id}/abort")
+async def abort_subscription_batch_audit_endpoint(audit_id: str) -> dict:
+    """优雅中止进行中的批量资源梳理任务，已扫出结果完整保留。"""
+    from app.services.subscription_governance_service import abort_batch_resource_audit
+    return abort_batch_resource_audit(audit_id)
+
+
+@router.post("/subscriptions/batch-gap-fill-push")
+async def push_subscription_batch_gap_fill(
+    body: BatchSubscriptionGapFillRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """对批量梳理筛出的合格作品，一键批量推送补缺下载至 MoviePilot。"""
+    _check_mp_configured()
+    from app.services.subscription_governance_service import execute_batch_subscription_gap_fill
+    return await execute_batch_subscription_gap_fill(
+        db,
+        audit_id=body.audit_id,
+        sub_ids=body.sub_ids,
+    )
 
 
 @router.post("/subscriptions/{sub_id}/status", response_model=StatusResponse)
@@ -267,16 +374,28 @@ async def batch_update_subscription_status(
 
 
 @router.get("/subscriptions/{sub_id}/mediaserver-check")
-async def check_subscription_mediaserver(sub_id: int) -> dict:
-    """实时核查单个订阅在媒体服务器中的入库实情（区分电视剧季集映射与电影入库）。"""
+async def check_subscription_mediaserver(
+    sub_id: int,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """实时核查单个订阅的入库实情（优先以 CD2 实盘为准，无 CD2 配置时降级至媒体服务器）。"""
     _check_mp_configured()
+    from app.services.subscription_cd2_index import check_single_subscription_cd2
     from app.services.subscription_service import subscription, is_movie_sub
+    settings = get_settings()
     mp = MoviePilotClient()
     try:
         sub = await subscription(mp, sub_id)
         if not sub:
             raise HTTPException(404, "订阅不存在")
 
+        # 优先执行 CD2 实盘核验（2.4 & 3.1：以 CD2 为准）
+        if settings.cd2_url and (settings.source_root or settings.archive_root):
+            cd2_res = await check_single_subscription_cd2(db, sub)
+            if cd2_res.get("checked"):
+                return cd2_res
+
+        # 兜底：无 CD2 配置时查询 MoviePilot 媒体服务器索引
         tid = int(sub.get("tmdbid") or sub.get("tmdb_id") or 0)
         title = str(sub.get("name") or sub.get("title") or "")
         year = str(sub.get("year") or "")
@@ -289,6 +408,7 @@ async def check_subscription_mediaserver(sub_id: int) -> dict:
             chk = await mp.check_mediaserver_movie_exists(tid, title=title, year=year)
             return {
                 "ok": chk.get("checked", False),
+                "source": "mediaserver",
                 "media_type": "movie",
                 "in_library": chk.get("exists", False),
                 "details": chk,
@@ -301,23 +421,29 @@ async def check_subscription_mediaserver(sub_id: int) -> dict:
             season_eps = eps_map.get(season, [])
             return {
                 "ok": chk.get("checked", False),
+                "source": "mediaserver",
                 "media_type": "tv",
                 "season": season,
                 "in_library_episodes": season_eps,
                 "count": len(season_eps),
-                "message": f"S{str(season).padStart if False else str(season).zfill(2)} 已入库 {len(season_eps)} 集" if season_eps else "媒体服务器中未见该季入库集数",
+                "message": f"S{str(season).zfill(2)} 已入库 {len(season_eps)} 集" if season_eps else "媒体服务器中未见该季入库集数",
             }
     finally:
         await mp.close()
 
 
 @router.post("/subscriptions/clean-preview")
-async def preview_subscription_cleanup(body: SubscriptionCleanPreviewRequest) -> dict:
-    """生成订阅清理审计预案，按媒体类型（电视剧 vs 电影）与所选模式精准筛选。"""
+async def preview_subscription_cleanup(
+    body: SubscriptionCleanPreviewRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """生成订阅清理审计预案，按媒体类型（电视剧 vs 电影）与精细化策略模式筛选（叠加 CD2 实盘真相）。"""
     _check_mp_configured()
+    from app.services.subscription_cd2_index import enrich_subscriptions_with_cd2_and_cache
     mp = MoviePilotClient()
     try:
-        subs = await mp.list_subscriptions()
+        raw_subs = await mp.list_subscriptions()
+        subs, cd2_meta = await enrich_subscriptions_with_cd2_and_cache(db, raw_subs)
         eval_result = evaluate_subscriptions(subs)
 
         matched = []
@@ -331,43 +457,53 @@ async def preview_subscription_cleanup(body: SubscriptionCleanPreviewRequest) ->
             # 2. 差异化策略规则匹配
             if body.media_type == "movie":
                 if body.mode == "safe":
-                    # 仅已完成入库电影 (场景 F01, F02, F10)
-                    mode_desc = "电影安全清理 (仅已核实入库完成)"
+                    mode_desc = "电影安全清理 (CD2 核实已入库完成)"
                     if diag.clean_rule == "completed":
                         matched.append(diag)
                 elif body.mode == "old_zombie":
-                    # 仅往年老片长期无源死种 (场景 F03, F14)
-                    mode_desc = "往年下映老片无源清理"
-                    if diag.clean_rule == "zombie":
+                    mode_desc = "往年老片无源死种清理 (建议先筛查可用资源)"
+                    if diag.clean_rule in ("zombie", "douban_stale"):
+                        matched.append(diag)
+                elif body.mode == "low_quality":
+                    mode_desc = "异常特征电影清理 (无封面/繁体/小语种/无中文名)"
+                    if (diag.clean_rule == "low_quality" or (diag.is_low_quality and diag.clean_rule != "completed")) and not diag.is_protected:
                         matched.append(diag)
                 elif body.mode == "douban":
-                    # 豆瓣榜单推选无源
-                    mode_desc = "豆瓣推选长期无源清理"
+                    mode_desc = "榜单同步长期无源清理"
                     if diag.is_douban_sync and diag.clean_rule in ("douban_stale", "zombie", "completed"):
                         matched.append(diag)
-                else:  # deep 电影全量建议清理 (严格排除待映保护与手动收藏意图)
-                    mode_desc = "电影深度清理 (已入库 + 往年死种，锁定待映与收藏)"
-                    if diag.clean_rule in ("completed", "zombie", "douban_stale") and not diag.is_protected:
+                else:  # deep
+                    mode_desc = "电影深度清理 (已入库 + 异常特征 + 往年死种，锁定待映与收藏)"
+                    if diag.clean_rule in ("completed", "zombie", "douban_stale", "low_quality") and not diag.is_protected:
                         matched.append(diag)
 
             elif body.media_type == "tv":
                 if body.mode == "safe":
-                    # 仅全季完结无缺集 (场景 T01, T02)
-                    mode_desc = "电视剧安全清理 (仅全季已齐完结)"
+                    mode_desc = "电视剧安全清理 (CD2 全季已齐完结)"
                     if diag.clean_rule == "completed":
                         matched.append(diag)
+                elif body.mode == "never_downloaded":
+                    mode_desc = "零进度死种清理 (自订阅起实存 0 集)"
+                    if diag.clean_rule == "zombie":
+                        matched.append(diag)
+                elif body.mode == "partial_stalled":
+                    mode_desc = "部分已下·断更停滞 (强烈建议先用补缺模块批量梳理)"
+                    if diag.clean_rule == "stalled":
+                        matched.append(diag)
                 elif body.mode == "short_tv":
-                    # 仅短剧/微短剧虚标停滞 (场景 T06)
-                    mode_desc = "短剧/微短剧停滞清理"
+                    mode_desc = "微短剧/短剧停滞清理"
                     if diag.clean_rule == "short_tv_stalled":
                         matched.append(diag)
+                elif body.mode == "low_quality":
+                    mode_desc = "异常特征剧集清理 (无封面/繁体/小语种/无中文名)"
+                    if (diag.clean_rule == "low_quality" or (diag.is_low_quality and diag.clean_rule != "completed")) and not diag.is_protected:
+                        matched.append(diag)
                 elif body.mode == "stalled":
-                    # 仅正剧中途断更停滞
-                    mode_desc = "剧集中途断更停滞清理"
+                    mode_desc = "剧集断更与零进度死种清理"
                     if diag.clean_rule in ("stalled", "zombie"):
                         matched.append(diag)
-                else:  # deep 电视剧全量建议清理 (排除连载中和洗版保护)
-                    mode_desc = "电视剧深度清理 (全季完结 + 短剧停滞 + 断更停滞)"
+                else:  # deep
+                    mode_desc = "电视剧深度清理 (全季完结 + 异常特征 + 零进度死种 + 短剧停滞)"
                     if diag.clean_confidence in ("high", "medium") and not diag.is_protected:
                         matched.append(diag)
 
@@ -377,7 +513,7 @@ async def preview_subscription_cleanup(body: SubscriptionCleanPreviewRequest) ->
                     if diag.clean_confidence == "high":
                         matched.append(diag)
                 else:
-                    mode_desc = "全局深度清理 (含停滞与往年死种，保护新片与连载)"
+                    mode_desc = "全局深度清理 (含停滞、异常特征与往年死种，保护新片与连载)"
                     if diag.clean_confidence in ("high", "medium") and not diag.is_protected:
                         matched.append(diag)
 
@@ -407,12 +543,24 @@ async def preview_subscription_cleanup(body: SubscriptionCleanPreviewRequest) ->
                 "clean_rule_name": m.clean_rule_name,
                 "clean_reason": m.clean_reason,
                 "is_short_tv": m.is_short_tv,
+                "short_drama_reason": m.short_drama_reason,
                 "username": m.username,
                 "release_stage": m.release_stage,
                 "in_library_status": m.in_library_status,
                 "total_episodes": m.total_episodes,
                 "completed_episodes": m.completed_episodes,
                 "lack_episodes": m.lack_episodes,
+                "stalled_kind": m.stalled_kind,
+                "can_gap_fill": m.can_gap_fill,
+                "is_low_quality": m.is_low_quality,
+                "low_quality_flags": m.low_quality_flags,
+                "low_quality_reasons": m.low_quality_reasons,
+                "data_source": m.data_source,
+                "cd2_verified": m.cd2_verified,
+                "cd2_source_episodes": m.cd2_source_episodes,
+                "cd2_archive_episodes": m.cd2_archive_episodes,
+                "cd2_paths": m.cd2_paths,
+                "mp_completed_episodes": m.mp_completed_episodes,
                 "progress": f"{m.completed_episodes}/{m.total_episodes or '?'}" if m.media_type == "tv" else (m.year or "电影"),
             }
             for m in matched
@@ -424,6 +572,7 @@ async def preview_subscription_cleanup(body: SubscriptionCleanPreviewRequest) ->
             "mode_name": mode_desc,
             "matched_count": len(matched),
             "total_evaluated": len(eval_result["items"]),
+            "cd2_meta": cd2_meta,
             "to_clean": clean_items,
             "subscriptions": clean_items,  # 兼容字段
             "to_delete": clean_items,      # 兼容字段

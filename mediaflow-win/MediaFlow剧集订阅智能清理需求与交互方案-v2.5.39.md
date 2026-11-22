@@ -236,6 +236,6 @@ MoviePilot 已核实的接口能力包括查询订阅、插件配置/表单、�
 本轮读取了当前 MP 版本、订阅、相关插件配置及表单、站点配置摘要、活动下载和整理队列，并对四条候选查了媒体服务器集号。保存的方案不包含连接凭据、站点 Cookie 或私人 RSS 地址。本文为设计交付，自动治理策略、暂停/退订、插件设置修改和资源全量搜索均待实施。
 
 - 本地实现与页面依据：[订阅诊断引擎](app/core/subscription_cleaner.py)、[订阅操作服务](app/services/subscription_service.py)、[MoviePilot 接口](app/api/moviepilot.py)、[MP 客户端](app/clients/moviepilot.py)、[前端页面](frontend/index.html)。
-- 相邻需求及历史设计：[订阅与综艺改进](MediaFlow综艺分段识别与订阅清理改进方案-2026-11-10.md)、[连载留源](MediaFlow连载留源模块需求与交互方案-v2.5.56.md)、[缺集待补](MediaFlow缺集待补模块需求与交互方案-v2.5.56.md)、[异常剧集](MediaFlow异常剧集模块需求与交互方案-v2.5.56.md)。
+- 相邻需求及历史设计：[订阅与综艺改进](MediaFlow综艺分段识别与订阅清理改进方案-2026-11-10.md)、[连载留源](MediaFlow连载留源模块需求与交互方案-v2.5.61.md)、[缺集待补](MediaFlow缺集待补模块需求与交互方案-v2.5.61.md)、[异常剧集](MediaFlow异常剧集模块需求与交互方案-v2.5.61.md)。
 - 上游版本依据：[v2.15.6 订阅模型](https://github.com/jxxghp/MoviePilot/blob/v2.15.6/app/db/models/subscribe.py)、[响应计数与写入字段](https://github.com/jxxghp/MoviePilot/blob/v2.15.6/app/schemas/subscribe.py)、[订阅执行与完成](https://github.com/jxxghp/MoviePilot/blob/v2.15.6/app/chain/subscribe.py)、[订阅 API](https://github.com/jxxghp/MoviePilot/blob/v2.15.6/app/api/endpoints/subscribe.py)。
 - 来源插件参考：[DoubanRank 实现](https://github.com/jxxghp/MoviePilot-Plugins/blob/main/plugins.v2/doubanrank/__init__.py)、[v2 插件清单](https://github.com/jxxghp/MoviePilot-Plugins/blob/main/package.v2.json)。本轮读取的 DoubanRank 文件 blob 为 `a0f6e8fd2a26664218ed64710675369819a29497`；订阅助手的设置含义来自本机已安装 2.24 的表单，具体自动动作效果仍需实施测试。

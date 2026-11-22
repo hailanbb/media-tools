@@ -17,6 +17,7 @@ from app.models.task import Task
 from app.models.season import SeasonRecord
 from app.models.operation import OperationLog
 from app.models.gap_fill import GapFillEpisode
+from app.services.source_presence import source_entry, record_source_absent
 from app.core import batch_journal
 from app.core.directory_merge import _directory_inventory_snapshot
 from app.core.episode_parser import is_video_file, is_subtitle_file
@@ -75,6 +76,10 @@ def reject(message):
 async def check_scope(db, rec):
     if rec is None:
         reject("季记录已不存在")
+    from app.core.season_classifier import get_record_work_context
+    work = await get_record_work_context(db, rec)
+    if (work.get("gap_fill_state") or {}).get("review_pending"):
+        reject("补缺后复核尚未完成，请先核对入库；暂不开放删除源端")
     if await get_record_work_main_category(db, rec) != "download":
         reject("主动放弃补缺仅适用于当前缺集待补的单季")
     task = await db.get(Task, rec.task_id)
@@ -155,27 +160,24 @@ async def preview(body: PreviewRequest, db=Depends(get_db)):
     path = await check_scope(db, rec)
     cd2 = CloudDrive2Client()
     try:
-        parents = await read_listing(cd2, posixpath.dirname(path))
-        target = next((x for x in parents if posixpath.normpath(x.get('path') or '') == path and x.get('isDirectory')), None)
-        if target is None:
-            reject("本季目录不存在，请更新条目结果")
-        snapshot = await inventory(cd2, path)
+        target = await source_entry(cd2, path, get_settings().source_root)
+        snapshot = await inventory(cd2, path) if target is not None else {}
     finally:
         await cd2.close()
     token = 'plan_rec_' + uuid4().hex[:12]
     batch_journal.save(token, {'kind':'discard_source_season', 'task_id':rec.task_id, 'season_record_id':rec.id,
-        'path':path, 'snapshot':snapshot, 'directory_id':str(target.get('id') or ''),
+        'path':path, 'snapshot':snapshot, 'directory_id':str((target or {}).get('id') or ''), 'source_absent':target is None,
         'created_at':datetime.now(timezone.utc).isoformat(), 'state':'previewed'})
     files = [f for items in snapshot.values() for f in items if not f['isDirectory']]
     size = sum(f['size'] for f in files)
     videos = sum(is_video_file(f['name']) for f in files)
     subs = sum(is_subtitle_file(f['name']) for f in files)
     return {'ok':True, 'data':{'preview_token':token, 'season_path':path, 'target_delete_path':path,
-        'will_delete_show_dir':False, 'has_active_mp_downloads':False,
+        'will_delete_show_dir':False, 'has_active_mp_downloads':False, 'source_absent':target is None,
         'file_stats':{'video_count':videos, 'sub_count':subs, 'other_count':len(files)-videos-subs,
                       'total_size_display':f'{size / 1024**3:.2f} GiB'},
-        'warnings':['这是主动放弃本季补缺；将删除此目录内全部视频、不同版本、字幕及附件，不代表这些内容已有归档副本。',
-                    '只删除列出的本季目录；不会扩大到整剧根、其他季或归档目录。'],
+        'warnings':(['原源目录已不存在；确认后仅更新条目，不执行删除，也不代表归档完成。'] if target is None else ['这是主动放弃本季补缺；将删除此目录内全部视频、不同版本、字幕及附件，不代表这些内容已有归档副本。',
+                    '只删除列出的本季目录；不会扩大到整剧根、其他季或归档目录。']),
         'files':[{'path':f['path'],'size':f['size']} for f in files]}}
 
 
@@ -205,8 +207,16 @@ async def execute(body: ExecuteRequest, db=Depends(get_db)):
         cd2 = CloudDrive2Client()
         try:
             parent = posixpath.dirname(path)
-            listing = await read_listing(cd2, parent)
-            target = next((x for x in listing if posixpath.normpath(x.get('path') or '') == path), None)
+            target = await source_entry(cd2, path, get_settings().source_root)
+            if target is None:
+                await record_source_absent(db, rec, show_absent=await source_entry(cd2, rec.show_path, get_settings().source_root) is None)
+                await refresh_task_summary(rec.task_id, db)
+                await db.commit()
+                plan['state'] = 'completed'
+                batch_journal.save(body.preview_token, plan)
+                return {'ok': True, 'message': '已核实源目录不存在并移出待办；未执行删除，不代表归档完成'}
+            if plan.get('source_absent'):
+                reject('源目录重新出现，请重新预览；不能按不存在的快照删除')
             if plan.get('state') == 'deleting' and target is not None:
                 reject("上次删除未完成对账；目录仍存在，请重新预览，不能重复套用旧删除请求")
             if plan.get('state') == 'previewed':

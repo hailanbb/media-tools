@@ -793,6 +793,9 @@ async def enrich_directory_groups_from_db(
 
     enriched: list[dict[str, Any]] = []
     for g in group_dicts:
+        from app.services.source_presence import group_sources_absent
+        if group_sources_absent(g.get('entries') or [], task_season_records):
+            continue
         tid = str(g.get("tmdb_id") or "").strip()
         src_root = settings.source_root or ""
         arc_root = settings.archive_root or ""
@@ -990,7 +993,8 @@ async def find_blocking_group_for_record(
 
     # 若提供 cd2_client 且此前已确认，执行实时网盘快速复核：一旦目标消失或新目录出现，立即自动失效
     if cd2_client is not None and matched_group.status in ("confirmed", "coexist"):
-        drifted = await _check_live_group_drift(cd2_client, matched_group, settings)
+        drifted = await _check_live_group_drift(cd2_client, matched_group, settings,
+            allow_source_removals=operation == "clean_source_redundant")
         if drifted:
             matched_group.status = "pending_confirm"
             matched_group.confirmation_mode = ""
@@ -1001,6 +1005,20 @@ async def find_blocking_group_for_record(
             return matched_group
 
     if matched_group.status == "pending_confirm":
+        # 旧版本因源目录减少而清空组级确认时，只为本季清源恢复既有目标依据。
+        # 不改写组确认、不从建议目标推定授权；新增源目录或任何归档范围变化仍拦截。
+        old = json.loads(rec.evidence_json or "{}").get("directory_group") or {}
+        entries = json.loads(matched_group.paths_json or "[]")
+        target = old.get("confirmed_target_path")
+        if (operation == "clean_source_redundant" and cd2_client is not None
+                and old.get("id") == matched_group.id and old.get("status") == "confirmed"
+                and old.get("confirmation_mode") == "use_archive_target"
+                and target and posixpath.dirname(rec.archive_target_path or "") == target
+                and any(e.get("side") == "archive" and e.get("norm_path") == target for e in entries)
+                and str(matched_group.invalidated_reason or "").startswith("网盘中的同 TMDB 目录数量或路径已变化")
+                and not await _check_live_group_drift(cd2_client, matched_group, settings,
+                    allow_source_removals=True)):
+            return None
         return matched_group
 
     # 对同 ID 异名目录标记"有意共存"时，允许常规查看但禁止把源端并入或当作相同目录误删冗余
@@ -1014,7 +1032,7 @@ async def find_blocking_group_for_record(
     return None
 
 
-async def _check_live_group_drift(cd2_client, group: DirectoryGroup, settings) -> str:
+async def _check_live_group_drift(cd2_client, group: DirectoryGroup, settings, *, allow_source_removals=False) -> str:
     """在执行写入/删除前复核已确认目录组在网盘上是否仍与确认快照一致。"""
     try:
         entries = json.loads(group.paths_json or "[]")
@@ -1038,7 +1056,8 @@ async def _check_live_group_drift(cd2_client, group: DirectoryGroup, settings) -
     live_source_paths: set[str] = set()
     for pdir in source_parents:
         try:
-            items = await cd2_client.list_files(pdir, force_refresh=True)
+            from app.core.source_cleanup_assets import checked_listing
+            items = checked_listing(await cd2_client.list_files(pdir, force_refresh=True), pdir)
         except Exception:
             return "目录读取失败，无法核验原确认，请恢复连接后重试"
         for it in items:
@@ -1048,7 +1067,8 @@ async def _check_live_group_drift(cd2_client, group: DirectoryGroup, settings) -
     live_archive_paths: set[str] = set()
     for pdir in archive_parents:
         try:
-            items = await cd2_client.list_files(pdir, force_refresh=True)
+            from app.core.source_cleanup_assets import checked_listing
+            items = checked_listing(await cd2_client.list_files(pdir, force_refresh=True), pdir)
         except Exception:
             return "目录读取失败，无法核验原确认，请恢复连接后重试"
         for it in items:
@@ -1066,7 +1086,8 @@ async def _check_live_group_drift(cd2_client, group: DirectoryGroup, settings) -
         if isinstance(e, dict) and e.get("side") == "archive"
     }
 
-    if (source_parents and live_source_paths != expected_src) or (
+    source_changed = not live_source_paths <= expected_src if allow_source_removals else live_source_paths != expected_src
+    if (source_parents and source_changed) or (
         archive_parents and live_archive_paths != expected_arc
     ):
         return "网盘中的同 TMDB 目录数量或路径已变化（新增第 3 个目录或目录被移动），原确认已自动失效，请重新确认"

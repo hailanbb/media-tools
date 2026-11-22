@@ -257,9 +257,9 @@ class GapFillOptimizationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(res5["search_sites"]["requested_ids"], [1, 4, 5, 12, 14, 15])
             mp_real.search_resources.assert_awaited_once()
             self.assertEqual(mp_real.search_resources.call_args.kwargs.get("sites"), [1, 4, 5, 12, 14, 15])
-            # 历史清理仅删除 E09(102)，完整保护 E01(101)、整季(103)、空集(104)！
-            self.assertEqual(deleted_ids, [102])
-            self.assertEqual(res5["submitted"][0]["protected_history_count"], 2)
+            # v2.5.62：推送下载后立即清除该剧集本季在 MP「媒体整理」中的转移记录（仅删记录，不删文件），防 MP 跳过整理
+            self.assertEqual(deleted_ids, [101, 102, 103, 104])
+            self.assertEqual(res5["submitted"][0]["protected_history_count"], 0)
 
             # 场景 6：首轮只有错季散集(S02) -> 自动用原名+季号补搜并带上同样六站，返回正确 S03 整季包
             download_service._recently_submitted_tasks.clear()

@@ -21,6 +21,7 @@ const context = {
   },
   findItemByRecordId: id => ({id}),
   openManualConfirmModal: (id, fromQueue) => opened.push([id,fromQueue]),
+  confirm: () => true,
   alert: message => alerts.push(message),
   api: async (url, options) => {calls.push([url,options]); if(url.includes('/b/')) throw Error('fixture failure');},
   loadTasks: async()=>{}, selectTask: async()=>{},

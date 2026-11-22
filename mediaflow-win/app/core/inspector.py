@@ -1977,7 +1977,7 @@ async def run_inspection(
                 "broadcast_evidence": broadcast_evidence_payload,
             }
 
-            if db is not None and not active_mapping:
+            if db is not None:
                 manual_conf = await resolve_active_manual_confirmation(
                     db,
                     tmdb_id=tmdb_id_num,

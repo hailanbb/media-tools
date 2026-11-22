@@ -41,7 +41,9 @@ const partial=item('部分','todo','accepted');partial.gapFillState.pushed_episo
 ctx.taskList=[{id:'t',status:'completed',counts:{total:6},categories:{download:all,download_pushed:[pending]}}];
 assert.equal(ctx.getGapFillLists(ctx.taskList[0]).todo.length,4);
 assert.equal(ctx.getGapFillLists(ctx.taskList[0]).no_resource.length,1);
-assert(ctx.gapFillCountLabel(5,1,1).includes('4 季待搜索 · 1 季无合格资源 · 1 季等待'));
+const countLabel = ctx.gapFillCountLabel(5,1,1);
+const countText = countLabel.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+assert.equal(countText, '4 季待搜索 1 季无合格资源 1 季待回执');
 assert(ctx.gapFillCountLabel(5,1,null).includes('待加载'));
 for(const [tab,filter,want,absent] of [
  ['todo','all','作品未搜','作品无源'],['todo','unsearched','作品中止','作品故障'],
@@ -82,5 +84,18 @@ assert(!ctx.renderBatchDiscardPreview(data).includes('<img>'));
  await ctx.checkAppVersion();assert.equal(node('appVersionBadge').textContent,'v2.5.56');
  ctx.api=async()=>({version:'2.5.57'});await ctx.checkAppVersion();assert(node('appVersionBadge').textContent.includes('请刷新'));
  assert(!html.includes('>v2.5.51</span>'));
+ const reviewing=item('复核中','pushed_pending');
+ reviewing.actionType='inspect_gap_detail';reviewing.statusText='已补齐，复核待完成';
+ reviewing.gapFillState.review_pending=true;
+ reviewing.gapFillState.post_download_review={state:'pending',reason:'目录变化 <img>'};
+ reviewing.gapFillState.actionable_missing_episodes=[];reviewing.gapFillState.pushed_episodes=[];
+ ctx.taskList=[{id:'t',status:'completed',counts:{total:1},categories:{download:[],download_pushed:[reviewing]}}];
+ ctx.currentGapView='pushed_pending';ctx.currentCategory='download';errors=[];ctx.renderEpisodesList();
+ assert.equal(errors.length,0,JSON.stringify(errors));
+ const pendingHtml=node('episodeItemContainer').innerHTML;
+ assert(pendingHtml.includes('补缺后待复核'));
+ assert(pendingHtml.includes('&lt;img&gt;'));
+ assert(!pendingHtml.includes('openDeleteSourceSeasonModal'));
+ assert(!pendingHtml.includes('batchDiscardButton'));
  console.log('PASS: three-tab rendering, all filters, counts, keyboard navigation, per-season delete, batch preview/consent/receipt, refresh failure and version consistency');
 })().catch(e=>{console.error(e);process.exitCode=1;});

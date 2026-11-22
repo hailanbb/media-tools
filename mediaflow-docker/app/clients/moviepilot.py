@@ -345,6 +345,8 @@ class MoviePilotClient:
         season: int | None = None,
         episodes: set[int] | list[int] | None = None,
         explicit_only: bool = False,
+        tmdb_id: int | str | None = None,
+        title_aliases: list[str] | None = None,
     ) -> list[dict]:
         """按剧名、季号和集数查找重叠的转移历史记录。
 
@@ -353,16 +355,41 @@ class MoviePilotClient:
             season: 目标季号（如 1）
             episodes: 目标集数集合（如 {14}）。若为 None 或空，代表整季所有集数。
             explicit_only: 为 True 且提供目标集数时，仅匹配有明确集号且完全落入 target_eps 内的冲突记录，保护已有集或整季历史不被误删。
+            tmdb_id: 可选 TMDB ID，若历史记录自带 tmdbid 且不一致则跳过以防误删同名异剧。
+            title_aliases: 可选附加剧名别名列表，用于覆盖中英文/原名差异。
         """
-        all_items = await self.get_all_transfer_history_for_title(title)
+        queries: list[str] = []
+        for t in [title, *(title_aliases or [])]:
+            t_clean = str(t or "").strip()
+            if t_clean and t_clean not in queries:
+                queries.append(t_clean)
+
+        all_items: list[dict] = []
+        seen_ids: set[Any] = set()
+        for q_title in queries:
+            items = await self.get_all_transfer_history_for_title(q_title)
+            for it in items or []:
+                it_id = it.get("id")
+                if it_id is not None:
+                    if it_id in seen_ids:
+                        continue
+                    seen_ids.add(it_id)
+                all_items.append(it)
         if not all_items:
             return []
 
         target_season = season
         target_eps = set(episodes) if episodes is not None else None
+        target_tmdb = str(tmdb_id).strip() if tmdb_id is not None and str(tmdb_id).strip() else ""
         matched: list[dict] = []
 
         for item in all_items:
+            # 0. TMDB ID 防错配校验
+            if target_tmdb:
+                item_tmdb = item.get("tmdbid") or item.get("tmdb_id")
+                if item_tmdb is not None and str(item_tmdb).strip() and str(item_tmdb).strip() != target_tmdb:
+                    continue
+
             # 1. 季号匹配
             if target_season is not None:
                 item_seasons = parse_season_str(item.get("seasons"))
@@ -387,9 +414,11 @@ class MoviePilotClient:
     async def clear_transfer_history_for_episodes(
         self,
         title: str,
-        season: int,
+        season: int | None = None,
         episodes: set[int] | list[int] | None = None,
         explicit_only: bool = False,
+        tmdb_id: int | str | None = None,
+        title_aliases: list[str] | None = None,
     ) -> dict[str, Any]:
         """针对指定剧集与评估下载的集数，查找并【仅删除转移记录】（绝对不删实体文件）。
 
@@ -402,6 +431,8 @@ class MoviePilotClient:
             season=season,
             episodes=target_eps,
             explicit_only=explicit_only,
+            tmdb_id=tmdb_id,
+            title_aliases=title_aliases,
         )
         protected_count = 0
         if explicit_only and target_eps:
@@ -410,6 +441,8 @@ class MoviePilotClient:
                 season=season,
                 episodes=target_eps,
                 explicit_only=False,
+                tmdb_id=tmdb_id,
+                title_aliases=title_aliases,
             )
             matched_ids = {item.get("id") for item in conflicting if item.get("id") is not None}
             protected_count = sum(1 for item in broad if item.get("id") not in matched_ids)

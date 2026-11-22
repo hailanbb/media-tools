@@ -197,6 +197,8 @@ def classify_single_record(
     )
     if not isinstance(evidence, dict):
         evidence = {}
+    if (evidence.get("post_download_review") or {}).get("state") == "pending":
+        return "download", "inspect_gap_detail"
     conflict = _safe_json(
         get_record_field(rec, "conflict_json", None) or get_record_field(rec, "conflict", None), {}
     )
@@ -423,11 +425,16 @@ def consolidate_seasons_to_work_records(
 
         # 取组内最优先的分类 (priority 数值最小)
         best_cat = min(active_items, key=lambda x: CATEGORY_PRIORITY.get(x[1], 99))[1]
+        pending_review_items = [item for item in active_items if (
+            _safe_json(get_record_field(item[0], "evidence_json") or get_record_field(item[0], "evidence"), {})
+            .get("post_download_review") or {}).get("state") == "pending"]
+        if pending_review_items:
+            best_cat = "download"
 
         # 检查是否为同一已确认目标下的互补多源目录组 (A06)
         is_complementary_group = False
         union_pos_eps: set[int] = set()
-        if len(active_items) > 1 and work_key.startswith("tmdb:") and best_cat not in ("anomaly", "airing"):
+        if not pending_review_items and len(active_items) > 1 and work_key.startswith("tmdb:") and best_cat not in ("anomaly", "airing"):
             tot_vals = {
                 int(get_record_field(it[0], "total_episodes") or 0)
                 for it in active_items
@@ -484,7 +491,7 @@ def consolidate_seasons_to_work_records(
             )
             return len(rec_eps)
 
-        primary_item = max(candidates, key=_rank_candidate)
+        primary_item = max(pending_review_items or candidates, key=_rank_candidate)
         primary_rec, _, primary_act = primary_item
         if is_complementary_group:
             primary_act = "archive"
@@ -604,6 +611,10 @@ def consolidate_seasons_to_work_records(
 
         # 检查是否全部已推送待入库
         gap_state = base_dict.get("gap_fill_state") or {}
+        if pending_review_items:
+            gap_state = {**gap_state, "view_bucket": "pushed_pending", "review_pending": True,
+                         "actionable_missing_episodes": [], "todo_count": 0}
+            base_dict["gap_fill_state"] = gap_state
         if best_cat == "download" and gap_state.get("view_bucket") == "no_resource":
             if any((get_record_field(it[0], "gap_fill_state") or {}).get("view_bucket") != "no_resource"
                    for it in active_items):

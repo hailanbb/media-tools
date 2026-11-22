@@ -529,8 +529,10 @@ def build_manual_correction_plan(
     new_tid = str(target_tmdb_id) if (target_tmdb_id and int(target_tmdb_id) > 0) else cur_tid
     new_sn = int(target_season) if (target_season and int(target_season) > 0) else int(current_season)
 
+    current_names = {sanitize_fs_name(show_name), sanitize_fs_name(show_name.split(" [tmdbid=")[0]),
+                     sanitize_fs_name(show_name.split(" [tmdbid=")[0].split(" (")[0])}
     identity_changed = bool(new_tid and new_tid != cur_tid) or bool(
-        target_title and sanitize_fs_name(target_title) and sanitize_fs_name(target_title) != sanitize_fs_name(show_name.split(" [tmdbid=")[0].split(" (")[0])
+        target_title and sanitize_fs_name(target_title) and sanitize_fs_name(target_title) not in current_names
     )
     season_changed = (new_sn != int(current_season))
     has_ep_mapping = bool(episode_mapping)
@@ -693,6 +695,7 @@ async def execute_manual_correction_plan(
     plan: dict[str, Any],
     *,
     cd2_client: Any = None,
+    progress: Any = None,
 ) -> dict[str, Any]:
     """执行单季人工修正的实物移动、改名、结构化 NFO 更新与核验，部分失败记录剩余步骤支持恢复 (G17, G18, G23)。"""
     import os
@@ -718,9 +721,13 @@ async def execute_manual_correction_plan(
     updated_nfos: list[str] = []
     cleaned_dirs: list[str] = []
     errors: list[str] = []
+    prepared_dirs: dict[str, set[str]] = {}
+    steps = plan.get("file_changes") or []
 
     # 1. 逐文件幂等移动/改名
-    for step in (plan.get("file_changes") or []):
+    for index, step in enumerate(steps):
+        if progress:
+            progress("正在迁移／改名", index, len(steps))
         old_p = step["old_path"]
         new_dir = step["new_dir"]
         new_name = step["new_name"]
@@ -729,11 +736,16 @@ async def execute_manual_correction_plan(
             if os.path.exists(new_p) and not os.path.exists(old_p):
                 completed_steps.append(step)
                 continue
-            await move_and_rename_file_robust(cd2_client, old_p, new_dir, new_name)
+            await move_and_rename_file_robust(cd2_client, old_p, new_dir, new_name, prepared_dirs=prepared_dirs)
             completed_steps.append(step)
         except Exception as e:
+            # 失败可能发生在移动后、改名前，下一步须重新读取目标，不能复用旧快照。
+            prepared_dirs.clear()
             remaining_steps.append({**step, "error": str(e)})
             errors.append(f"{step['old_name']} -> {new_name}: {e}")
+
+    if progress:
+        progress("正在核验文件修正结果", len(completed_steps), len(steps))
 
     if remaining_steps:
         return {

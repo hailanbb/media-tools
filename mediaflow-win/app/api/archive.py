@@ -23,6 +23,11 @@ from app.core.directory_governance import find_blocking_group_for_record, normal
 from app.core.episode_parser import companion_matches_video, classify_content_unit, is_subtitle_file, is_video_file, parse_episode
 from app.core.inspector import _parse_season_number, _verified_video, diagnose_season
 from app.core.segments import segment_number
+from app.core.source_cleanup_assets import (
+    checked_listing, read_auxiliary_tree, preserve_auxiliary_folder, verify_preserved_folder,
+    preserve_source_show_shell,
+)
+from app.services.source_presence import source_entry, record_source_absent
 from app.core import batch_journal
 from app.core.review_engine import _strip_cd2_dup_suffix, compare_plan_fingerprints, generate_review_clean_plan
 from app.database import get_db
@@ -127,6 +132,9 @@ async def _inspect_and_cleanup_source_show_dir(
     cd2: CloudDrive2Client,
     show_path: str,
     target_parent: str | None = None,
+    *,
+    before_move=None,
+    previous_receipt: dict | None = None,
 ) -> dict:
     """检查并尝试回收源剧根目录，区分已知公共资产与未知附件，返回结构化收尾结论。"""
     if not show_path or len(show_path.strip("/").split("/")) < 2:
@@ -141,7 +149,7 @@ async def _inspect_and_cleanup_source_show_dir(
     norm_show = posixpath.normpath(show_path)
     settings = get_settings()
     norm_source_root = posixpath.normpath(settings.source_root.rstrip("/")) if settings.source_root else ""
-    if norm_source_root and (norm_show == norm_source_root or not norm_show.startswith(norm_source_root + "/")):
+    if not norm_source_root or norm_show != show_path or norm_show == norm_source_root or not norm_show.startswith(norm_source_root + "/"):
         log.warning("剧集目录超出或等于源库根目录，严禁删除: %s", show_path)
         return {
             "cleaned": False,
@@ -152,7 +160,20 @@ async def _inspect_and_cleanup_source_show_dir(
         }
 
     try:
-        source_items = await cd2.list_files(show_path, force_refresh=True)
+        parent = posixpath.dirname(norm_show)
+        siblings = checked_listing(await cd2.list_files(parent, force_refresh=True), parent)
+        if not any(f["path"] == norm_show for f in siblings):
+            if previous_receipt:
+                expected_shelf = str(target_parent or "") + "/合并保留/"
+                receipt_target = previous_receipt.get("target_path", "")
+                if (previous_receipt.get("source_path") != norm_show
+                        or not receipt_target.startswith(expected_shelf)
+                        or posixpath.normpath(receipt_target) != receipt_target):
+                    raise ValueError("剧根保全回执与当前路径不一致")
+                await verify_preserved_folder(cd2, previous_receipt)
+            return dict(cleaned=True, status="cleaned", reason="已核实源剧集外层目录不存在",
+                        retained_items=[], migrated_assets=[])
+        source_items = checked_listing(await cd2.list_files(show_path, force_refresh=True), show_path)
     except Exception as e:
         log.warning("检查源剧集目录失败: %s - %s", show_path, e)
         return {
@@ -164,7 +185,7 @@ async def _inspect_and_cleanup_source_show_dir(
         }
 
     subdirs = [f for f in source_items if f.get("isDirectory")]
-    if subdirs:
+    if any(f.get("name") != "合并保留" for f in subdirs):
         subdir_names = ", ".join(f.get("name", "") for f in subdirs[:3])
         all_retained = [f.get("name", "") for f in source_items if f.get("name")]
         log.info("源剧集目录仍有子目录 (%s 等)，安全保留源剧集主目录: %s", subdir_names, show_path)
@@ -193,35 +214,24 @@ async def _inspect_and_cleanup_source_show_dir(
     unknown_attachments = [f for f in non_dir_files if not _is_known_show_public_asset(f.get("name", ""))]
 
     migrated_assets: list[str] = []
-    if known_assets and target_parent and not unknown_attachments:
-        migration_failed = False
-        for asset in known_assets:
-            asset_name = asset.get("name")
-            if not asset_name:
-                continue
-            asset_path = asset.get("path") or f"{show_path}/{asset_name}"
-            try:
-                mv_res = await cd2.move_file(asset_path, target_parent, skip_existing=True)
-                if not mv_res.get("success", True):
-                    log.warning("迁移公共资产 %s 失败，中止源剧集删除", asset_name)
-                    migration_failed = True
-                    break
-                migrated_assets.append(asset_name)
-            except Exception as mv_err:
-                log.warning("迁移公共资产 %s 异常: %s，中止源剧集删除", asset_name, mv_err)
-                migration_failed = True
-                break
-
-        if migration_failed:
-            log.warning("公共资产迁移未完全成功，安全保留源剧集目录: %s", show_path)
-            return {
-                "cleaned": False,
-                "status": "cleanup_failed",
-                "reason": "公共资产迁移未完全成功，安全保留源剧集目录",
-                "retained_items": [f.get("name", "") for f in non_dir_files if f.get("name")],
-                "migrated_assets": migrated_assets,
-            }
-
+    if (subdirs or known_assets) and target_parent and not unknown_attachments:
+        try:
+            norm_archive = posixpath.normpath(settings.archive_root.rstrip("/")) if settings.archive_root else ""
+            if (not norm_source_root or not norm_archive
+                    or norm_show != show_path or posixpath.normpath(target_parent) != target_parent
+                    or not target_parent.startswith(norm_archive + "/")
+                    or norm_show == target_parent or norm_show.startswith(target_parent + "/")
+                    or target_parent.startswith(norm_show + "/")):
+                raise ValueError("剧根保全路径不在隔离的受控源库与归档库内")
+            receipt = await preserve_source_show_shell(
+                cd2, show_path, target_parent,
+                extensions=KNOWN_PUBLIC_ASSET_EXTS | {".txt"}, before_move=before_move)
+            return dict(cleaned=True, status="cleaned", reason="剧根附件已保全，源剧集外层目录已移除",
+                        retained_items=[], migrated_assets=list(receipt["inventory"]),
+                        preserved_root={k: v for k, v in receipt.items() if k != "inventory"})
+        except Exception as e:
+            return dict(cleaned=False, status="cleanup_failed", reason=f"剧根附件保全未完成：{e}",
+                        retained_items=[f["name"] for f in source_items], migrated_assets=[])
     if unknown_attachments:
         unk_names = [u.get("name", "") for u in unknown_attachments if u.get("name")]
         log.info("源剧集目录存在未知附件 (%s)，保留源剧集目录: %s", ", ".join(unk_names[:3]), show_path)
@@ -234,7 +244,7 @@ async def _inspect_and_cleanup_source_show_dir(
         }
 
     try:
-        final_check = await cd2.list_files(show_path, force_refresh=True)
+        final_check = checked_listing(await cd2.list_files(show_path, force_refresh=True), show_path)
         if final_check:
             rem_names = [f.get("name", "") for f in final_check if f.get("name")]
             log.info("源剧集目录尚有残留项目 (%d 个)，保留主目录: %s", len(final_check), show_path)
@@ -246,7 +256,12 @@ async def _inspect_and_cleanup_source_show_dir(
                 "migrated_assets": migrated_assets,
             }
 
-        await cd2.delete_file(show_path)
+        result = await cd2.delete_file(show_path)
+        if not isinstance(result, dict) or result.get("success") is not True:
+            raise ValueError("剧根删除回执未确认成功")
+        siblings = checked_listing(await cd2.list_files(parent, force_refresh=True), parent)
+        if any(f["path"] == norm_show for f in siblings):
+            raise ValueError("剧根删除后仍可见")
         log.info("源端全剧已无其余季度与任何子目录/文件，已彻底安全清理源端空壳目录: %s", show_path)
         return {
             "cleaned": True,
@@ -2807,6 +2822,7 @@ async def _clean_source_redundant_impl(
     success_count = 0
     errors: list[str] = []
     affected_tasks: set[str] = set()
+    cleanup_notes: list[str] = []
 
     try:
         for rec in records:
@@ -2814,7 +2830,7 @@ async def _clean_source_redundant_impl(
             show_path = rec.show_path
 
             # 【P0-1 & P1-1: 物理安全门禁：状态、路径隔离、两端集号与独有附件覆盖核验】
-            if rec.status != "already_archived":
+            if rec.status not in {"already_archived", "cleaned_redundant"}:
                 err_msg = f"{rec.show_name} S{rec.season_number:02d}: 当前状态为 {rec.status}，非已归档状态，安全拦截源端删除！"
                 log.warning(err_msg)
                 errors.append(err_msg)
@@ -2859,6 +2875,25 @@ async def _clean_source_redundant_impl(
                 errors.append(err_msg)
                 continue
 
+            try:
+                source_present = await source_entry(cd2, source_season_path, norm_source_root) is not None
+                show_present = await source_entry(cd2, show_path, norm_source_root) is not None if not source_present else True
+                if not source_present and not show_present:
+                    # 整个源剧根已在外部消失：只结束源端待办，不声称本次删除或已归档。
+                    ev = json.loads(rec.evidence_json or "{}")
+                    if ev.get("source_root_preservation") or ev.get("source_cleanup_auxiliary"):
+                        # 有本应用未完成的保全事务时仍走原后验，不能以源消失掩盖资料丢失。
+                        pass
+                    else:
+                        await record_source_absent(db, rec, show_absent=True)
+                        affected_tasks.add(rec.task_id)
+                        success_count += 1
+                        cleanup_notes.append(f"{rec.show_name}: 源剧集外层已不存在，已对账移出待办；未执行删除，不代表归档完成")
+                        continue
+            except Exception as exc:
+                errors.append(f"{rec.show_name}: 源目录状态未核实（{exc}），保留待办")
+                continue
+
             blocked_group = await find_blocking_group_for_record(
                 db, rec, cd2_client=cd2, operation="clean_source_redundant"
             )
@@ -2896,16 +2931,52 @@ async def _clean_source_redundant_impl(
                              and _parse_season_number(i["name"]) == rec.season_number]
                     if (dst_parent not in matches or paths != [norm_target]) if len(matches) > 1 else (matches != [dst_parent] or paths != [norm_target]):
                         raise ValueError("同作品及季号未匹配到唯一归档目录")
-                src_files = await cd2.list_files(source_season_path, force_refresh=True)
+                cleanup_evidence = json.loads(rec.evidence_json or "{}")
+                deleted_marker = cleanup_evidence.get("source_season_cleanup") or {}
+                season_already_deleted = rec.status == "cleaned_redundant" or (
+                    deleted_marker.get("verified") is True
+                    and deleted_marker.get("source_path") == source_season_path
+                    and deleted_marker.get("archive_target") == archive_target)
+                if season_already_deleted:
+                    category = posixpath.dirname(show_path)
+                    shows = checked_listing(await cd2.list_files(category, force_refresh=True), category)
+                    show_exists = any(f["path"] == show_path for f in shows)
+                    source_children = checked_listing(await cd2.list_files(show_path, force_refresh=True), show_path) if show_exists else []
+                    if any(f["path"] == source_season_path for f in source_children):
+                        raise ValueError("本季曾完成删除但源季重新出现，禁止按旧回执再次删除，请重新核对")
+                    src_files = []
+                elif not source_present:
+                    # 外部已删本季但剧根仍在：跳过重复删除，仍核验归档与外层保全。
+                    season_already_deleted = True
+                    src_files = []
+                else:
+                    src_files = await cd2.list_files(source_season_path, force_refresh=True)
                 target_files = await cd2.list_files(archive_target, force_refresh=True)
+                checked_listing(src_files, source_season_path)
+                checked_listing(target_files, archive_target)
 
                 src_video_eps: set[int] = set()
                 src_subs: list[dict] = []
+                auxiliary_folders = []
+                preserved_auxiliary = []
+                previous_auxiliary = cleanup_evidence.get("source_cleanup_auxiliary")
+                if previous_auxiliary and not any(f["path"] == previous_auxiliary.get("source_path") for f in src_files):
+                    previous_target = previous_auxiliary.get("target_path", "")
+                    if (previous_auxiliary.get("source_path") != norm_src + "/合并保留"
+                            or not (previous_target == norm_target + "/合并保留"
+                                    or previous_target.startswith(norm_target + "/合并保留/"))
+                            or posixpath.normpath(previous_target) != previous_target):
+                        raise ValueError("既有附件保全回执与本季路径不一致")
+                    await verify_preserved_folder(cd2, previous_auxiliary)
+                    preserved_auxiliary.append(previous_auxiliary)
                 src_unique_content_videos: list[tuple[dict, tuple]] = []
                 unrecognized_videos: list[dict] = []
                 for sf in src_files:
                     if sf.get("isDirectory"):
-                        raise ValueError("源季内另有子目录：" + sf["name"])
+                        if sf["name"] != "合并保留":
+                            raise ValueError("源季内另有子目录：" + sf["name"])
+                        auxiliary_folders.append((sf["path"], await read_auxiliary_tree(cd2, sf["path"])))
+                        continue
                     sf_name = sf.get("name", "")
                     if is_video_file(sf_name):
                         p_sf = parse_episode(sf_name, sf.get("path", ""), sf.get("size", 0))
@@ -3004,10 +3075,21 @@ async def _clean_source_redundant_impl(
                         except Exception as sub_mv_err:
                             raise ValueError(f"迁移字幕 {s_name} 失败") from sub_mv_err
                 moved_names = {s["name"] for s in src_subs if s["name"].casefold() not in target_sub_sizes} | preserved_unique_names
+                # 与识别流程同步：已核实纯附件的合并保留目录先保全，再继续同一次清源。
+                # 整体迁入，遇到归档端同名目录使用独立保全位置，绝不覆盖既有附件。
+                async def persist_auxiliary_intent(receipt):
+                    cleanup_evidence["source_cleanup_auxiliary"] = dict(receipt, state="pending")
+                    rec.evidence_json = json.dumps(cleanup_evidence, ensure_ascii=False)
+                    await db.commit()
+                for folder_path, inventory in auxiliary_folders:
+                    preserved_auxiliary.append(await preserve_auxiliary_folder(
+                        cd2, folder_path, archive_target, inventory, before_move=persist_auxiliary_intent))
+                    moved_names.add(posixpath.basename(folder_path))
                 def signature(files):
-                    return sorted((f["path"], f.get("size"), f.get("modified"), f.get("isDirectory"))
+                    return sorted((f["path"], f.get("size"), f.get("modified"), f.get("isDirectory"), str(f.get("id", "")))
                                   for f in files)
-                fresh_source = await cd2.list_files(source_season_path, force_refresh=True)
+                fresh_source = [] if season_already_deleted else await cd2.list_files(source_season_path, force_refresh=True)
+                checked_listing(fresh_source, source_season_path)
                 if signature(fresh_source) != signature([f for f in src_files if f["name"] not in moved_names]):
                     raise ValueError("源季内容已变化，请重新初检")
 
@@ -3019,6 +3101,19 @@ async def _clean_source_redundant_impl(
                     if missing_preserved:
                         raise ValueError(f"归档目标未核验到保全文件: {missing_preserved}")
 
+                if preserved_auxiliary:
+                    # 附件迁移可能耗时：删除前复查归档正片和附件，不能沿用移动前的覆盖快照。
+                    fresh_target = checked_listing(await cd2.list_files(archive_target, force_refresh=True), archive_target)
+                    original_media = [f for f in target_files if not f["isDirectory"] and is_video_file(f["name"])]
+                    original_paths = {f["path"] for f in original_media}
+                    if signature([f for f in fresh_target if f["path"] in original_paths]) != signature(original_media):
+                        raise ValueError("附件保全期间归档正片清单已变化，暂不清源")
+                    for receipt in preserved_auxiliary:
+                        await verify_preserved_folder(cd2, receipt)
+                    final_source = [] if season_already_deleted else checked_listing(await cd2.list_files(source_season_path, force_refresh=True), source_season_path)
+                    if signature(final_source) != signature(fresh_source):
+                        raise ValueError("附件后验期间源季清单已变化，暂不清源")
+
             except Exception as chk_err:
                 err_msg = f"{rec.show_name} S{rec.season_number:02d}: 校验两端文件清单失败 ({chk_err})，安全拦截源端删除！"
                 log.warning(err_msg)
@@ -3028,15 +3123,41 @@ async def _clean_source_redundant_impl(
             try:
                 # 1. 安全回收源端冗余季目录
                 log.info("已通过全部覆盖门禁，正在安全清理源端冗余季目录: %s", source_season_path)
-                await cd2.delete_file(source_season_path)
+                if not season_already_deleted:
+                    delete_receipt = await cd2.delete_file(source_season_path)
+                    if not isinstance(delete_receipt, dict) or delete_receipt.get("success") is not True:
+                        raise ValueError("源季删除回执未确认成功")
+                    remaining_seasons = checked_listing(await cd2.list_files(show_path, force_refresh=True), show_path)
+                    if any(f["path"] == source_season_path for f in remaining_seasons):
+                        raise ValueError("源季删除后仍可见，尚未确认清理完成")
+                cleanup_evidence["source_season_cleanup"] = dict(
+                    verified=True, source_path=source_season_path, archive_target=archive_target)
+                rec.evidence_json = json.dumps(cleanup_evidence, ensure_ascii=False)
+                await db.commit()
 
                 # 2. 空壳检查：仅在剧根仅剩空壳且无其他季/内容时清理剧根
-                shell_cleaned = False
-                if show_path:
-                    try:
-                        shell_cleaned = await _safe_cleanup_source_show_dir(cd2, show_path, posixpath.dirname(archive_target))
-                    except Exception:
-                        shell_cleaned = False
+                async def persist_root_intent(receipt):
+                    cleanup_evidence["source_root_preservation"] = dict(receipt, state="pending")
+                    rec.evidence_json = json.dumps(cleanup_evidence, ensure_ascii=False)
+                    await db.commit()
+                cleanup_info = await _inspect_and_cleanup_source_show_dir(
+                    cd2, show_path, posixpath.dirname(archive_target), before_move=persist_root_intent,
+                    previous_receipt=cleanup_evidence.get("source_root_preservation"))
+                shell_cleaned = bool(cleanup_info.get("cleaned"))
+                cleanup_evidence["source_root_cleanup"] = cleanup_info
+                if shell_cleaned and cleanup_evidence.get("source_root_preservation"):
+                    cleanup_evidence["source_root_preservation"]["state"] = "completed"
+                rec.evidence_json = json.dumps(cleanup_evidence, ensure_ascii=False)
+                if cleanup_info.get("status") in {"cleanup_failed", "retained_unknown_attachments"}:
+                    rec.status = "already_archived"
+                    rec.status_detail = "本季已清理，剧集外层待处理：" + str(cleanup_info.get("reason", ""))
+                    affected_tasks.add(rec.task_id)
+                    errors.append(f"{rec.show_name} S{rec.season_number:02d}: {rec.status_detail}")
+                    db.add(OperationLog(task_id=rec.task_id, season_record_id=rec.id,
+                        action="clean_source_redundant", status="partial",
+                        detail_json=json.dumps(dict(season_deleted=True, shell_cleaned=False,
+                            shell_cleanup=cleanup_info, receipt=rec.status_detail), ensure_ascii=False)))
+                    continue
 
                 # 3. 刷新剧集所在父目录及相关季目录
                 refresh_errors: list[str] = []
@@ -3049,8 +3170,15 @@ async def _clean_source_redundant_impl(
 
                 success_count += 1
                 rec.status = "cleaned_redundant"
+                if preserved_auxiliary:
+                    cleanup_evidence["source_cleanup_auxiliary"]["state"] = "completed"
+                    rec.evidence_json = json.dumps(cleanup_evidence, ensure_ascii=False)
                 preserved_note = f"（已先保全 {len(preserved_unique_names)} 个独有内容至归档）" if preserved_unique_names else ""
-                rec.status_detail = f"源端已清理，归档已保留{preserved_note}"
+                if preserved_auxiliary:
+                    preserved_note += f"（已先保全合并保留目录内 {sum(r['file_count'] for r in preserved_auxiliary)} 个附件）"
+                root_note = "剧集外层已移除" if shell_cleaned else "剧集外层保留：" + str(cleanup_info.get("reason", ""))
+                rec.status_detail = f"本季已清理，{root_note}；归档已保留{preserved_note}"
+                cleanup_notes.append(f"{rec.show_name} S{rec.season_number:02d}: {root_note}")
                 affected_tasks.add(rec.task_id)
 
                 op_log = OperationLog(
@@ -3063,9 +3191,11 @@ async def _clean_source_redundant_impl(
                         "season": rec.season_number,
                         "deleted_path": source_season_path,
                         "preserved_unique_files": sorted(preserved_unique_names),
+                        "preserved_auxiliary_folders": [{k: v for k, v in r.items() if k != "inventory"} for r in preserved_auxiliary],
                         "shell_cleaned": shell_cleaned,
+                        "shell_cleanup": cleanup_info,
                         "refresh_errors": refresh_errors,
-                        "receipt": "源端已清理，归档已保留",
+                        "receipt": rec.status_detail,
                     }, ensure_ascii=False),
                 )
                 db.add(op_log)
@@ -3085,7 +3215,9 @@ async def _clean_source_redundant_impl(
         if owns_cd2:
             await cd2.close()
 
-    msg = f"清源结果：{success_count}/{len(records)} 季完成，其余源端保留"
+    msg = f"清源结果：{success_count}/{len(records)} 季完成，其余未确认完成"
+    if cleanup_notes:
+        msg += "；" + "; ".join(cleanup_notes[:2])
     if errors:
         msg += f"，遇到 {len(errors)} 项提醒: {'; '.join(errors[:2])}"
 

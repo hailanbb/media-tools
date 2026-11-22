@@ -2210,10 +2210,14 @@ async def execute_gap_fill_download(
             except Exception:
                 overwrite_policy = {}
 
-        from app.core.season_classifier import get_record_work_main_category, resolve_record_gap_category
+        from app.core.season_classifier import get_record_work_context, resolve_record_gap_category
 
         for rec in records:
-            work_cat = await get_record_work_main_category(db, rec)
+            work = await get_record_work_context(db, rec)
+            if (work.get("gap_fill_state") or {}).get("review_pending"):
+                skipped.append(f"{rec.show_name}：补缺后复核尚未完成，请先核对入库，暂不重新搜索或推送")
+                continue
+            work_cat = work.get("main_category")
             if work_cat == "airing" or rec.status == "airing":
                 skipped.append(f"{rec.show_name} S{rec.season_number:02d}：当前作品季处于「连载留源」状态，连载期暂不开放补缺推送")
                 continue
@@ -2953,8 +2957,9 @@ async def execute_gap_fill_download(
             season_accepted_eps: list[int] = []
             season_unverified_eps: list[int] = []
             season_failed_eps: dict[str, Any] = {}
+            season_transfer_history_cleared = False
 
-            # 统一提交选定下载计划：严格遵循“先落盘意图 -> 提交 MP -> 回填脱敏回执”
+            # 统一提交选定下载计划：严格遵循“先落盘意图 -> 提交 MP -> 清理 MP 转移记录 -> 回填脱敏回执”
             for ev in selected_evals:
                 cand_t = ev.cand.get("torrent_info") or {}
                 cand_m = ev.cand.get("media_info") or {}
@@ -2999,34 +3004,39 @@ async def execute_gap_fill_download(
                     diag_summary={"plan_desc": plan_desc, "raw_count": raw_count, "max_seeders": max_seeders_seen},
                 )
 
-                # 【关键安全机制】：整季包路径也仅针对真实缺号清理明确冲突的整理记录，绝不传 episodes=None 清空全季历史！
                 cleared_info: dict[str, Any] = {"cleared_count": 0, "records": [], "protected_count": 0}
-                target_eps_for_clean = set(ev.covered_missing if is_mapped else real_missing_covered)
-                if not by_period and not parts and target_eps_for_clean:
+
+                async def _clear_mp_transfer_after_submit() -> None:
+                    nonlocal cleared_info, season_transfer_history_cleared
+                    if season_transfer_history_cleared:
+                        return
+                    season_transfer_history_cleared = True
                     try:
+                        aliases = [t for t in [primary_query_title, clean_name, str(cand_m.get("title") or "").strip()] if t]
                         try:
                             clean_res = await mp.clear_transfer_history_for_episodes(
                                 title=primary_query_title,
                                 season=search_season,
-                                episodes=target_eps_for_clean,
-                                explicit_only=True,
+                                episodes=None,
+                                explicit_only=False,
+                                tmdb_id=search_tmdb_id or tmdb_id_str or None,
+                                title_aliases=aliases,
                             )
                         except TypeError:
                             clean_res = await mp.clear_transfer_history_for_episodes(
                                 title=primary_query_title,
                                 season=search_season,
-                                episodes=target_eps_for_clean,
+                                episodes=None,
                             )
                         if isinstance(clean_res, dict):
                             cleared_info = clean_res
                         if cleared_info.get("cleared_count", 0) > 0:
                             log.info(
-                                "[%s S%02d] 下载前仅针对真实缺号 %s 清理 %d 条冲突整理记录（已保护 %d 条已有集/合集记录）",
-                                clean_name, season_num, sorted(target_eps_for_clean),
-                                cleared_info["cleared_count"], cleared_info.get("protected_count", 0),
+                                "[%s S%02d] 推送下载后已清理 MoviePilot「媒体整理」中 %d 条转移记录（仅删记录，不删实体文件）",
+                                clean_name, season_num, cleared_info["cleared_count"],
                             )
                     except Exception as clean_err:
-                        log.warning("检查/清理 MoviePilot 转移历史记录异常（不阻断下载）: %s", clean_err)
+                        log.warning("推送下载后清理 MoviePilot 转移历史记录异常（不阻断下载）: %s", clean_err)
 
                 log.info(
                     "向 MoviePilot 提交下载 [%s]: [%s] %s (做种:%d, 大小:%s, 同种来源:%s)",
@@ -3049,6 +3059,7 @@ async def execute_gap_fill_download(
                             reply=_sanitize_reply(reply),
                         )
                         season_accepted_eps.extend(real_missing_covered)
+                        await _clear_mp_transfer_after_submit()
                     else:
                         await finalize_submit_outcome(
                             db, intent_rows,
@@ -3086,6 +3097,7 @@ async def execute_gap_fill_download(
                             reason=msg,
                         )
                         season_accepted_eps.extend(real_missing_covered)
+                        await _clear_mp_transfer_after_submit()
                     elif is_timeout:
                         is_unverified = True
                         msg = "提交请求超时且暂未在 MP 队列命中，已转为「已提交待核实」锁定防重，请点击核对入库确认"
@@ -3096,6 +3108,7 @@ async def execute_gap_fill_download(
                             reason=msg,
                         )
                         season_unverified_eps.extend(real_missing_covered)
+                        await _clear_mp_transfer_after_submit()
                         submitted_results.append({
                             "show_name": clean_name,
                             "season": season_num,
@@ -3113,6 +3126,9 @@ async def execute_gap_fill_download(
                             "is_season_pack": is_sp,
                             "plan_desc": plan_desc,
                             "runner_up_diff": plan_summary_note,
+                            "cleared_transfer_records_count": cleared_info.get("cleared_count", 0),
+                            "cleared_transfer_records": cleared_info.get("records", []),
+                            "protected_history_count": cleared_info.get("protected_count", 0),
                             "mp_accepted": False,
                             "submitted_unverified": True,
                             "library_reconciled": False,

@@ -7,6 +7,8 @@ import logging
 import posixpath
 import re
 import uuid
+import time
+import hashlib
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from typing import Any
@@ -18,6 +20,7 @@ from pydantic import BaseModel
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.source_presence import source_entry, record_source_absent
 from app.config import get_settings
 from app.core.directory_governance import (
     build_physical_dir_entry,
@@ -235,13 +238,20 @@ async def get_task_seasons(
 
     stmt = select(SeasonRecord).where(
         SeasonRecord.task_id == task_id,
-        SeasonRecord.status.not_in(terminal_tuple),
+        SeasonRecord.status.not_in(tuple(s for s in terminal_tuple if s != "cleaned_redundant")),
     )
     stmt = stmt.order_by(SeasonRecord.show_name, SeasonRecord.season_number)
     result = await db.execute(stmt)
     records = result.scalars().all()
-
+    from app.services.source_cleanup_state import pending_root_cleanup_ids
+    pending_roots = await pending_root_cleanup_ids(db, records)
+    records = [r for r in records if r.status != "cleaned_redundant" or r.id in pending_roots]
     serialized = [await _serialize_season_record(db, r) for r in records]
+    for item in serialized:
+        if item["id"] in pending_roots:
+            item["status"] = "already_archived"
+            item["status_detail"] = "本季已清理，旧回执显示剧集外层未清完；可继续核验并收尾"
+            item["evidence"]["source_root_followup"] = True
 
     from app.models.directory_group import DirectoryGroup
     from app.core.season_classifier import consolidate_seasons_to_work_records
@@ -382,6 +392,92 @@ async def _apply_in_place_recalculate(
     conflict = _safe_json(getattr(rec, "conflict_json", None), {})
     evidence = _safe_json(getattr(rec, "evidence_json", None), {})
 
+    # 同季有效人工确认优先于映射重算；否则映射分支提前返回会遗留旧异常证据。
+    # 确认仍由 evaluate_confirmation_outcome 检查混放、显式异作品 ID 和集号矛盾。
+    manual_conf = await resolve_active_manual_confirmation(
+        db,
+        tmdb_id=rec.tmdb_id,
+        season_number=rec.season_number,
+        season_path=rec.season_path,
+        show_path=rec.show_path,
+    )
+    if manual_conf:
+        dual_info_mc = (evidence or {}).get("dual_archive_info") or {}
+        arc_eps_mc = [int(x) for x in (dual_info_mc.get("archived_episodes") or []) if str(x).isdigit()]
+        ms_mc = (evidence or {}).get("mediaserver_check") or {}
+        emby_eps_mc = (
+            [int(x) for x in (ms_mc.get("season_episodes") or []) if str(x).isdigit()]
+            if ms_mc.get("trusted_match") is not False
+            else []
+        )
+        eval_recognized = list(recognized)
+        scope_paths_mc = list(manual_conf.get("scope_paths") or [])
+        if len(scope_paths_mc) > 1 and rec.task_id:
+            peer_rows = list(
+                (
+                    await db.scalars(
+                        select(SeasonRecord).where(
+                            SeasonRecord.task_id == rec.task_id,
+                            SeasonRecord.season_path.in_(scope_paths_mc),
+                        )
+                    )
+                ).all()
+            )
+            for pr in peer_rows:
+                eval_recognized.extend(
+                    int(x) for x in _safe_json(pr.recognized_episodes_json, []) if str(x).isdigit()
+                )
+            eval_recognized = sorted(set(eval_recognized))
+        m_outcome = evaluate_confirmation_outcome(
+            conf=manual_conf,
+            tmdb_id=rec.tmdb_id,
+            season_number=rec.season_number,
+            recognized_episodes=eval_recognized,
+            archived_episodes=arc_eps_mc,
+            emby_episodes=emby_eps_mc,
+            duplicate_episodes=duplicates,
+            current_total_episodes=rec.total_episodes,
+            current_season_finished=rec.season_finished,
+            current_status=rec.status,
+            current_status_detail=rec.status_detail or "",
+            evidence=evidence,
+            conflict=conflict if isinstance(conflict, dict) else {},
+            pending_dir_group=bool(((evidence or {}).get("directory_group") or {}).get("requires_confirm")),
+        )
+        rec.status = m_outcome["status"]
+        rec.status_detail = m_outcome["status_detail"]
+        rec.total_episodes = m_outcome["total_episodes"]
+        rec.season_finished = m_outcome["season_finished"]
+        rec.missing_episodes_json = json.dumps(m_outcome["missing_episodes"])
+        evidence = dict(evidence or {})
+        if m_outcome.get("identity_cleared"):
+            if isinstance(conflict, dict) and conflict.get("blocking") and conflict.get("kind") != "mixed_works":
+                rec.conflict_json = json.dumps(
+                    {**conflict, "blocking": False, "resolved_by_manual_confirmation": True},
+                    ensure_ascii=False,
+                )
+            evidence["meta_status"] = "manual_confirmed" if rec.total_episodes else "total_episodes_pending"
+        b_ev_mc = dict(evidence.get("broadcast_evidence") or {})
+        if manual_conf.get("broadcast_status") == "airing":
+            b_ev_mc.update(status="airing", schedule_verified=True, source="manual_confirmation")
+            evidence["broadcast_evidence"] = b_ev_mc
+        elif manual_conf.get("broadcast_status") == "finished" and not m_outcome["contradiction"].get("has_contradiction"):
+            b_ev_mc.update(status="finished", schedule_verified=True, source="manual_confirmation")
+            evidence["broadcast_evidence"] = b_ev_mc
+        evidence["manual_confirmation"] = {
+            **manual_conf,
+            "contradiction": m_outcome["contradiction"],
+        }
+        evidence["last_recalculated_at"] = now_dt.isoformat()
+        rec.evidence_json = json.dumps(evidence, ensure_ascii=False)
+        if rec.last_checked_at is None:
+            rec.last_checked_at = now_dt
+        if active_map:
+            rec.mapping_json = json.dumps(active_map, ensure_ascii=False)
+        active_key = build_identity_key(rec.show_name, rec.tmdb_id, rec.season_number, active_map)
+        await supersede_changed_identity_records(db, rec.task_id, rec.season_path, active_key, rec.id)
+        return True
+
     if active_map:
         target_tid = active_map.get("target_tmdb_id")
         target_sn = int(active_map.get("target_season") or 1)
@@ -476,90 +572,6 @@ async def _apply_in_place_recalculate(
             return True
         rec.conflict_json = "{}"
         conflict_cleared = True
-
-    # 旧版本曾将搜索候选的集数缓存到目录 ID 下；离线重算不能把这类
-    # identity_review 直接升级为可归档。仅新的远程核实/有效映射/有效人工确认可解除。
-    manual_conf = await resolve_active_manual_confirmation(
-        db,
-        tmdb_id=rec.tmdb_id,
-        season_number=rec.season_number,
-        season_path=rec.season_path,
-        show_path=rec.show_path,
-    )
-    if manual_conf:
-        dual_info_mc = (evidence or {}).get("dual_archive_info") or {}
-        arc_eps_mc = [int(x) for x in (dual_info_mc.get("archived_episodes") or []) if str(x).isdigit()]
-        ms_mc = (evidence or {}).get("mediaserver_check") or {}
-        emby_eps_mc = (
-            [int(x) for x in (ms_mc.get("season_episodes") or []) if str(x).isdigit()]
-            if ms_mc.get("trusted_match") is not False
-            else []
-        )
-        eval_recognized = list(recognized)
-        scope_paths_mc = list(manual_conf.get("scope_paths") or [])
-        if len(scope_paths_mc) > 1 and rec.task_id:
-            peer_rows = list(
-                (
-                    await db.scalars(
-                        select(SeasonRecord).where(
-                            SeasonRecord.task_id == rec.task_id,
-                            SeasonRecord.season_path.in_(scope_paths_mc),
-                        )
-                    )
-                ).all()
-            )
-            for pr in peer_rows:
-                eval_recognized.extend(
-                    int(x) for x in _safe_json(pr.recognized_episodes_json, []) if str(x).isdigit()
-                )
-            eval_recognized = sorted(set(eval_recognized))
-        m_outcome = evaluate_confirmation_outcome(
-            conf=manual_conf,
-            tmdb_id=rec.tmdb_id,
-            season_number=rec.season_number,
-            recognized_episodes=eval_recognized,
-            archived_episodes=arc_eps_mc,
-            emby_episodes=emby_eps_mc,
-            duplicate_episodes=duplicates,
-            current_total_episodes=rec.total_episodes,
-            current_season_finished=rec.season_finished,
-            current_status=rec.status,
-            current_status_detail=rec.status_detail or "",
-            evidence=evidence,
-            conflict=conflict if isinstance(conflict, dict) else {},
-            pending_dir_group=bool(((evidence or {}).get("directory_group") or {}).get("requires_confirm")),
-        )
-        rec.status = m_outcome["status"]
-        rec.status_detail = m_outcome["status_detail"]
-        rec.total_episodes = m_outcome["total_episodes"]
-        rec.season_finished = m_outcome["season_finished"]
-        rec.missing_episodes_json = json.dumps(m_outcome["missing_episodes"])
-        evidence = dict(evidence or {})
-        if m_outcome.get("identity_cleared"):
-            if isinstance(conflict, dict) and conflict.get("blocking") and conflict.get("kind") != "mixed_works":
-                rec.conflict_json = json.dumps(
-                    {**conflict, "blocking": False, "resolved_by_manual_confirmation": True},
-                    ensure_ascii=False,
-                )
-            evidence["meta_status"] = "manual_confirmed" if rec.total_episodes else "total_episodes_pending"
-        b_ev_mc = dict(evidence.get("broadcast_evidence") or {})
-        if manual_conf.get("broadcast_status") == "airing":
-            b_ev_mc.update(status="airing", schedule_verified=True, source="manual_confirmation")
-            evidence["broadcast_evidence"] = b_ev_mc
-        elif manual_conf.get("broadcast_status") == "finished" and not m_outcome["contradiction"].get("has_contradiction"):
-            b_ev_mc.update(status="finished", schedule_verified=True, source="manual_confirmation")
-            evidence["broadcast_evidence"] = b_ev_mc
-        evidence["manual_confirmation"] = {
-            **manual_conf,
-            "contradiction": m_outcome["contradiction"],
-        }
-        evidence["last_recalculated_at"] = now_dt.isoformat()
-        rec.evidence_json = json.dumps(evidence, ensure_ascii=False)
-        if rec.last_checked_at is None:
-            rec.last_checked_at = now_dt
-        active_key = build_identity_key(rec.show_name, rec.tmdb_id, rec.season_number, None)
-        await supersede_changed_identity_records(db, rec.task_id, rec.season_path, active_key, rec.id)
-        return True
 
     reference_candidates = unverified_metadata_candidates(evidence, rec.tmdb_id, rec.season_number)
     if reference_candidates:
@@ -1079,6 +1091,17 @@ async def clean_directory_group_source_season(
     if not task or not group or group.task_id != task_id:
         raise HTTPException(status_code=404, detail="多目录确认组不存在")
 
+    rec = await db.get(SeasonRecord, body.season_record_id)
+    if not rec or rec.task_id != task_id or str(rec.tmdb_id or '') != str(group.tmdb_id or ''):
+        raise HTTPException(status_code=404, detail="源季不属于当前目录组")
+    presence = await reconcile_source_presence(task_id, rec.id, db)
+    if presence.get('source_absent'):
+        return dict(presence, success=True)
+    if rec.status in ('already_archived', 'cleaned_redundant'):
+        from app.api.archive import _clean_source_redundant_impl, _ArchiveRequest
+        result = await _clean_source_redundant_impl(_ArchiveRequest(season_record_ids=[rec.id]), db)
+        return dict(ok=result.ok, success=result.ok, message=result.message)
+
     if group.status != "confirmed" or group.confirmation_mode != "use_archive_target" or not group.confirmed_target_path:
         raise HTTPException(status_code=400, detail="该目录组尚未确认唯一的有效归档目标目录，禁止删除源端")
 
@@ -1404,6 +1427,9 @@ async def reconcile_task_gap_fill(
         raise HTTPException(status_code=404, detail="任务不存在")
 
     req = body or ReconcileGapFillRequest()
+    from app.services.task_service import TASK_RUNNING_WORKERS
+    if task.status in ("running", "paused", "stopping") or task_id in TASK_RUNNING_WORKERS:
+        raise HTTPException(status_code=409, detail="请在初检结束后核对入库并复核")
     reconcile_summary = await reconcile_gap_fill_records(
         db=db,
         task_id=task_id,
@@ -1421,9 +1447,115 @@ async def reconcile_task_gap_fill(
             f"核对入库完成：检查 {reconcile_summary['checked_seasons']} 季，"
             f"确认入库 {reconcile_summary['reconciled_in_library']} 集，"
             f"仍在队列/待整理 {reconcile_summary['still_pending']} 集，"
-            f"退回待补 {reconcile_summary['released_to_todo']} 集"
+            f"退回待补 {reconcile_summary['released_to_todo']} 集；"
+            f"完成补缺后复核 {reconcile_summary['post_review_completed']} 季，"
+            f"复核待完成 {reconcile_summary['post_review_pending']} 季（暂不归档或重推）"
         ),
     }
+
+
+_RECONCILE_JOBS: dict[str, dict[str, Any]] = {}
+_RECONCILE_TASK_JOBS: dict[str, str] = {}
+
+
+@router.post("/{task_id}/reconcile-gap-fill-start")
+async def start_reconcile_gap_fill(
+    task_id: str,
+    body: ReconcileGapFillRequest | None = Body(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """异步启动“核对入库”，立即返回 job_id 供前端轮询进度。"""
+    import asyncio
+    from app.database import async_session
+    from app.services.task_service import TASK_RUNNING_WORKERS
+
+    task = await db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.status in ("running", "paused", "stopping") or task_id in TASK_RUNNING_WORKERS:
+        raise HTTPException(status_code=409, detail="请在初检结束后核对入库并复核")
+
+    existing_job_id = _RECONCILE_TASK_JOBS.get(task_id)
+    if existing_job_id and existing_job_id in _RECONCILE_JOBS:
+        existing = _RECONCILE_JOBS[existing_job_id]
+        if existing.get("status") == "running":
+            return {"ok": True, **existing}
+
+    req = body or ReconcileGapFillRequest()
+    job_id = uuid.uuid4().hex[:12]
+    job_state: dict[str, Any] = {
+        "job_id": job_id,
+        "task_id": task_id,
+        "status": "running",
+        "stage": "正在启动核对入库任务...",
+        "current": 0,
+        "total": 0,
+        "current_show": "",
+        "percent": 2,
+        "message": "",
+        "reconcile": None,
+        "summary": None,
+        "error": None,
+    }
+    _RECONCILE_JOBS[job_id] = job_state
+    _RECONCILE_TASK_JOBS[task_id] = job_id
+
+    def _on_progress(prog: dict[str, Any]) -> None:
+        job_state.update({
+            "stage": prog.get("stage") or job_state["stage"],
+            "current": prog.get("current", 0),
+            "total": prog.get("total", 0),
+            "current_show": prog.get("current_show", ""),
+            "percent": prog.get("percent", job_state["percent"]),
+        })
+
+    async def _runner() -> None:
+        try:
+            async with async_session() as bg_db:
+                reconcile_summary = await reconcile_gap_fill_records(
+                    db=bg_db,
+                    task_id=task_id,
+                    season_record_ids=req.season_record_ids or None,
+                    force_release_missing=req.force_release_missing,
+                    progress_cb=_on_progress,
+                )
+                task_summary = await refresh_task_summary(task_id, bg_db)
+                await bg_db.commit()
+                msg = (
+                    f"核对入库完成：检查 {reconcile_summary['checked_seasons']} 季，"
+                    f"确认入库 {reconcile_summary['reconciled_in_library']} 集，"
+                    f"仍在队列/待整理 {reconcile_summary['still_pending']} 集，"
+                    f"退回待补 {reconcile_summary['released_to_todo']} 集；"
+                    f"完成补缺后复核 {reconcile_summary['post_review_completed']} 季，"
+                    f"复核待完成 {reconcile_summary['post_review_pending']} 季（暂不归档或重推）"
+                )
+                job_state.update({
+                    "status": "completed",
+                    "stage": "核对入库完成",
+                    "percent": 100,
+                    "reconcile": reconcile_summary,
+                    "summary": task_summary,
+                    "message": msg,
+                })
+        except Exception as exc:
+            job_state.update({
+                "status": "failed",
+                "stage": f"核对入库失败: {exc}",
+                "error": str(exc),
+                "message": f"核对入库失败: {exc}",
+            })
+
+    asyncio.create_task(_runner())
+    return {"ok": True, **job_state}
+
+
+@router.get("/{task_id}/reconcile-gap-fill-status/{job_id}")
+async def get_reconcile_gap_fill_status(task_id: str, job_id: str) -> dict[str, Any]:
+    """查询“核对入库”后台任务实时进度。"""
+    job = _RECONCILE_JOBS.get(job_id)
+    if not job or job.get("task_id") != task_id:
+        raise HTTPException(status_code=404, detail="核对任务不存在或已过期")
+    return {"ok": True, **job}
 
 
 @router.post("/{task_id}/seasons/{record_id}/handled", response_model=StatusResponse)
@@ -1488,6 +1620,7 @@ class ManualConfirmRequest(BaseModel):
     douban_id: str = ""
     episode_mapping: dict[str, int] | None = None
     apply_file_changes: bool = True
+    correction_fingerprint: str = ""
     total_episodes: int | None = None
     broadcast_status: str = "unknown"  # "finished" | "airing" | "unknown"
     note: str = ""
@@ -1534,53 +1667,54 @@ async def _build_correction_plan_for_record(
 
     douban_sid = extract_douban_subject_id(body.douban_url) or extract_douban_subject_id(body.douban_id)
 
-    # 检测同剧根下的其他季（保留旧剧根与共享 tvshow.nfo · G18）
-    sibling_seasons: list[str] = []
-    if rec.show_path:
-        db_siblings = list((await db.scalars(
-            select(SeasonRecord).where(
-                SeasonRecord.task_id == rec.task_id,
-                SeasonRecord.show_path == rec.show_path,
-                SeasonRecord.season_number != rec.season_number,
-            )
-        )).all())
-        for sib in db_siblings:
-            sibling_seasons.append(f"Season {sib.season_number}")
-        try:
-            root_entries = await list_files_robust(cd2, rec.show_path)
-            for re_it in root_entries:
-                if re_it.get("isDirectory"):
-                    m_s = re.match(r"(?i)^(?:Season\s*|S)(\d{1,2})$", re_it["name"])
-                    if m_s and int(m_s.group(1)) != int(rec.season_number):
-                        lbl = re_it["name"]
-                        if lbl not in sibling_seasons:
-                            sibling_seasons.append(lbl)
-        except Exception:
-            pass
-
-    season_files: list[dict[str, Any]] = []
-    if rec.season_path:
-        try:
-            season_files = await list_files_robust(cd2, rec.season_path)
-        except Exception:
-            season_files = []
-
-    plan = build_manual_correction_plan(
-        show_name=rec.show_name,
-        show_path=rec.show_path or "",
-        season_path=rec.season_path or "",
-        current_tmdb_id=rec.tmdb_id,
-        current_season=rec.season_number,
-        target_tmdb_id=body.target_tmdb_id,
-        target_title=body.target_title,
-        target_first_air_year=body.target_first_air_year,
-        target_season=body.target_season,
-        douban_id=douban_sid,
-        episode_mapping=body.episode_mapping,
-        season_files=season_files,
-        sibling_seasons=sibling_seasons,
+    plan_args = dict(
+        show_name=rec.show_name, show_path=rec.show_path or "", season_path=rec.season_path or "",
+        current_tmdb_id=rec.tmdb_id, current_season=rec.season_number,
+        target_tmdb_id=body.target_tmdb_id, target_title=body.target_title,
+        target_first_air_year=body.target_first_air_year, target_season=body.target_season,
+        douban_id=douban_sid, episode_mapping=body.episode_mapping,
     )
-    return plan, douban_sid
+    draft = build_manual_correction_plan(**plan_args)
+    if not (draft.get("identity_changed") or draft.get("season_changed") or body.episode_mapping):
+        # 纯事实确认不访问云盘，避免把云盘响应延迟混入保存资料。
+        return draft, douban_sid
+
+    from app.clients.clouddrive2 import CloudDrive2Client
+    owned_client = cd2 is None
+    if owned_client:
+        cd2 = CloudDrive2Client()
+    try:
+        # 两处目录都必须读取成功。读取失败不能冒充“无文件变更”。
+        root_entries = await list_files_robust(cd2, rec.show_path)
+        season_files = await list_files_robust(cd2, rec.season_path)
+        db_siblings = list((await db.scalars(select(SeasonRecord).where(
+            SeasonRecord.task_id == rec.task_id, SeasonRecord.show_path == rec.show_path,
+            SeasonRecord.season_number != rec.season_number,
+        ))).all())
+        sibling_seasons = {f"Season {sib.season_number}" for sib in db_siblings}
+        for entry in root_entries:
+            match = re.match(r"(?i)^(?:Season\s*|S)(\d{1,2})$", entry.get("name", ""))
+            if entry.get("isDirectory") and match and int(match.group(1)) != int(rec.season_number):
+                sibling_seasons.add(entry["name"])
+        plan = build_manual_correction_plan(**plan_args, season_files=season_files,
+                                            sibling_seasons=sorted(sibling_seasons))
+        inventory = sorted((
+            {k: entry.get(k) for k in ("path", "name", "isDirectory", "size", "id", "modified")}
+            for entry in season_files
+        ), key=lambda entry: str(entry.get("path") or entry.get("name")))
+        basis = {k: v for k, v in plan.items() if k != "plan_id"}
+        basis["source_inventory"] = inventory
+        plan["correction_fingerprint"] = hashlib.sha256(
+            json.dumps(basis, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+        ).hexdigest()
+        return plan, douban_sid
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="无法读取修正范围，请稍后重新预览；未执行文件修改") from exc
+    finally:
+        if owned_client:
+            await cd2.close()
 
 
 @router.post("/{task_id}/seasons/{record_id}/manual-confirm/preview")
@@ -1664,8 +1798,51 @@ async def preview_manual_season_confirmation(
     }
 
 
+# 单进程内的进行中互斥与只读进度；不充当跨进程锁或断点续做凭证。
+_MANUAL_SAVE_PROGRESS: dict[tuple[str, str], dict[str, Any]] = {}
+
+
+@router.get("/{task_id}/seasons/{record_id}/manual-confirm/progress")
+async def manual_confirmation_progress(task_id: str, record_id: str) -> dict[str, Any]:
+    state = _MANUAL_SAVE_PROGRESS.get((task_id, record_id))
+    if not state:
+        return {"running": False, "known": False}
+    return {**{k: v for k, v in state.items() if k not in ("started", "ended")}, "known": True,
+            "elapsed_seconds": round(state.get("ended", time.monotonic()) - state["started"], 1)}
+
+
 @router.post("/{task_id}/seasons/{record_id}/manual-confirm")
 async def save_manual_season_confirmation(
+    task_id: str, record_id: str, body: ManualConfirmRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    key = (task_id, record_id)
+    if _MANUAL_SAVE_PROGRESS.get(key, {}).get("running"):
+        raise HTTPException(status_code=409, detail="本条目正在保存，请等待回执，不要重复提交")
+    for previous in list(_MANUAL_SAVE_PROGRESS):
+        if len(_MANUAL_SAVE_PROGRESS) < 128:
+            break
+        if not _MANUAL_SAVE_PROGRESS[previous].get("running"):
+            del _MANUAL_SAVE_PROGRESS[previous]
+    state = {"running": True, "started": time.monotonic(), "stage": "正在核对确认范围",
+             "completed": 0, "total": 0}
+    _MANUAL_SAVE_PROGRESS[key] = state
+    try:
+        result = await _save_manual_season_confirmation(task_id, record_id, body, db)
+        state["stage"] = "保存完成" if result.get("ok") else "修正未完成，请核查回执"
+        state["ok"] = bool(result.get("ok"))
+        return result
+    except Exception:
+        state.update(stage="保存未完成，请核查结果后再操作", ok=False)
+        raise
+    finally:
+        state["running"] = False
+        state["ended"] = time.monotonic()
+        log.info("人工确认保存结束：耗时 %.2f 秒，阶段=%s，文件进度=%s/%s",
+                 time.monotonic() - state["started"], state["stage"], state["completed"], state["total"])
+
+
+async def _save_manual_season_confirmation(
     task_id: str,
     record_id: str,
     body: ManualConfirmRequest,
@@ -1718,7 +1895,7 @@ async def save_manual_season_confirmation(
     # 1. 生成并可选执行单季实物修正计划（仅在身份/名称/季号/集号映射变更且 apply_file_changes=True 时写文件 · G17/G18/G19）
     old_season_path = rec.season_path
     old_show_path = rec.show_path
-    old_identity_key = build_identity_key(rec.tmdb_id, rec.show_name, rec.season_number)
+    old_identity_key = build_identity_key(rec.show_name, rec.tmdb_id, rec.season_number)
     correction_receipt: dict[str, Any] = {"has_file_changes": False, "ok": True}
 
     from app.clients.clouddrive2 import CloudDrive2Client
@@ -1736,9 +1913,19 @@ async def save_manual_season_confirmation(
     if needs_fs_check:
         cd2_fix = CloudDrive2Client()
     try:
+        state = _MANUAL_SAVE_PROGRESS.get((task_id, record_id))
+        if state is not None:
+            state["stage"] = "正在核验文件修正范围" if needs_fs_check else "正在保存资料确认"
         correction_plan, _ = await _build_correction_plan_for_record(db, rec, body, cd2=cd2_fix)
         if body.apply_file_changes and correction_plan.get("has_file_changes"):
-            exec_res = await execute_manual_correction_plan(correction_plan, cd2_client=cd2_fix)
+            if not body.correction_fingerprint or body.correction_fingerprint != correction_plan.get("correction_fingerprint"):
+                raise HTTPException(status_code=409, detail="文件修正范围尚未确认或已经变化，请重新预览后确认")
+            def report_progress(stage: str, completed: int, total: int) -> None:
+                state = _MANUAL_SAVE_PROGRESS.get((task_id, record_id))
+                if state is not None:
+                    state.update(stage=stage, completed=completed, total=total)
+            exec_res = await execute_manual_correction_plan(correction_plan, cd2_client=cd2_fix,
+                                                            progress=report_progress)
             correction_receipt = {**correction_plan, **exec_res}
             if not exec_res.get("ok"):
                 # 部分失败：记录已完成与剩余步骤，保持「修正未完成」，绝不假装成功
@@ -1771,7 +1958,7 @@ async def save_manual_season_confirmation(
             if correction_plan.get("new_tmdb_id"):
                 rec.tmdb_id = str(correction_plan["new_tmdb_id"])
 
-            new_identity_key = build_identity_key(rec.tmdb_id, rec.show_name, rec.season_number)
+            new_identity_key = build_identity_key(rec.show_name, rec.tmdb_id, rec.season_number)
             # 迁移补缺分集台账与批次运行记录，保留原身份关联以防重发已受理下载
             if old_season_path:
                 gf_eps = list((await db.scalars(
@@ -1808,6 +1995,10 @@ async def save_manual_season_confirmation(
     finally:
         if cd2_fix is not None:
             await cd2_fix.close()
+
+    state = _MANUAL_SAVE_PROGRESS.get((task_id, record_id))
+    if state is not None:
+        state["stage"] = "正在保存确认并更新分流"
 
     # 若用户在人工确认中修正了目标 TMDB ID 或季号（跨条目映射），同步写入 SeasonMapping
     cur_tid_int = int(rec.tmdb_id) if rec.tmdb_id and str(rec.tmdb_id).isdigit() else None
@@ -2024,7 +2215,7 @@ async def hold_season_for_task(
     body: HoldSeasonRequest | None = Body(default=None),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """本次保留，不再提示：移出本轮五模块待办计数，保留原问题与原状态，已扫描总量不变。"""
+    """暂不处理，不再提示：移出本轮五模块待办计数，保留原问题与原状态，已扫描总量不变。"""
     task = await db.get(Task, task_id)
     rec = await db.get(SeasonRecord, record_id)
     if not task or not rec or rec.task_id != task_id:
@@ -2032,7 +2223,7 @@ async def hold_season_for_task(
 
     from app.services.task_service import TASK_RUNNING_WORKERS
     if task.status in ("running", "paused", "stopping") or task_id in TASK_RUNNING_WORKERS:
-        raise HTTPException(status_code=409, detail="请在初检结束后操作本次保留")
+        raise HTTPException(status_code=409, detail="请在初检结束后操作暂不处理")
 
     part_rows, work = await _collect_work_season_records(db, rec)
     scope_paths = [r.season_path for r in part_rows if r.season_path]
@@ -2062,7 +2253,7 @@ async def hold_season_for_task(
         "ok": True,
         "hold_info": hold_payload,
         "summary": task_summary,
-        "message": f"已将 {rec.show_name} S{rec.season_number:02d} 移入「本次保留」（可随时恢复处理）",
+        "message": f"已将 {rec.show_name} S{rec.season_number:02d} 移入「暂不处理」（可随时恢复处理）",
     }
 
 
@@ -2072,7 +2263,7 @@ async def restore_held_season(
     record_id: str,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """从「本次保留」恢复处理，根据当前证据重新分流且不产生重复主卡。"""
+    """从「暂不处理」恢复处理，根据当前证据重新分流且不产生重复主卡。"""
     task = await db.get(Task, task_id)
     rec = await db.get(SeasonRecord, record_id)
     if not task or not rec or rec.task_id != task_id:
@@ -2149,6 +2340,44 @@ async def retry_task_failed_seasons(
     return res
 
 
+@router.post("/{task_id}/seasons/{record_id}/reconcile-source")
+async def reconcile_source_presence(task_id: str, record_id: str, db: AsyncSession = Depends(get_db)):
+    """五模块共用的外部删除对账；仅强读源目录和更新记录，不删移媒体。"""
+    task = await db.get(Task, task_id)
+    rec = await db.get(SeasonRecord, record_id)
+    if not task or not rec or rec.task_id != task_id:
+        raise HTTPException(status_code=404, detail="剧季记录不存在")
+    from app.services.task_service import TASK_RUNNING_WORKERS
+    from app.api.archive import _RECOMMENDED_TASK_LOCKS
+    lock = _RECOMMENDED_TASK_LOCKS.get(task_id)
+    if task.status in ('running', 'paused', 'stopping') or task_id in TASK_RUNNING_WORKERS or (lock and lock.locked()):
+        raise HTTPException(status_code=409, detail="当前任务正在处理，请完成后核对源目录")
+    from app.clients.clouddrive2 import CloudDrive2Client
+    cd2 = CloudDrive2Client()
+    try:
+        settings = get_settings()
+        root = settings.source_root
+        arc = (settings.archive_root or '').rstrip('/')
+        if arc and (rec.season_path == arc or rec.season_path.startswith(arc + '/')):
+            raise ValueError('记录指向归档库，不能按源目录对账')
+        if await source_entry(cd2, rec.season_path, root) is not None:
+            return dict(ok=True, source_absent=False, message='源目录仍存在；未改变记录或文件')
+        ev = _safe_json(rec.evidence_json, {})
+        if ev.get('source_root_preservation') or ev.get('source_cleanup_auxiliary'):
+            return dict(ok=False, source_absent=False, message='源目录已不存在，但附件保全回执仍须核验；请继续清理剧集外层')
+        if rec.status in ('already_archived', 'cleaned_redundant') and await source_entry(cd2, rec.show_path, root) is not None:
+            return dict(ok=False, source_absent=False, message='本季已不存在，剧集外层仍在；请继续清理剧集外层，不必重新删除本季')
+        if rec.status != 'source_absent':
+            await record_source_absent(db, rec, show_absent=await source_entry(cd2, rec.show_path, settings.source_root) is None)
+            await refresh_task_summary(task_id, db)
+            await db.commit()
+        return dict(ok=True, source_absent=True, message='已核实原源目录不存在并移出待办；未执行删除，不代表归档完成；下载任务保持原状')
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=409, detail=f'源目录状态未核实，保留待办：{exc}') from exc
+    finally:
+        await cd2.close()
+
+
 @router.post("/{task_id}/refresh-modified")
 async def refresh_task_modified_scope(
     task_id: str,
@@ -2201,15 +2430,24 @@ async def refresh_task_modified_scope(
             # 检查原季路径是否仍在；若用户在外部修改了剧名或 [tmdbid=...]，在父目录下定位新目录
             try:
                 cur_files = await cd2.list_files(old_season_path, force_refresh=True)
-            except Exception:
+            except Exception as exc:
+                if not (isinstance(exc, FileNotFoundError) or getattr(exc, 'status', None) == 5):
+                    failed_items.append({'id': rec.id, 'error': str(exc)})
+                    continue
                 cur_files = []
 
+            try:
+                original_exists = await source_entry(cd2, old_season_path, settings.source_root) is not None
+            except Exception as exc:
+                failed_items.append({'id': rec.id, 'error': str(exc)})
+                continue
             if not cur_files and old_show_path:
                 parent_dir = posixpath.dirname(normalize_dir_path(old_show_path))
                 try:
                     siblings = await cd2.list_files(parent_dir, force_refresh=True)
-                except Exception:
-                    siblings = []
+                except Exception as exc:
+                    failed_items.append({'id': rec.id, 'error': str(exc)})
+                    continue
                 old_clean = re.sub(r"\[.*?\]|\(\d{4}\)", "", rec.show_name or "").strip().casefold()
                 for sib in siblings:
                     if not sib.get("isDirectory"):
@@ -2235,6 +2473,18 @@ async def refresh_task_modified_scope(
                                 season_dir_hit.get("path") or f"{spath}/{season_dir_hit.get('name')}"
                             )
                             break
+
+            if not original_exists and inspect_season_path == old_season_path:
+                prior = _safe_json(rec.evidence_json, {})
+                if prior.get('source_root_preservation') or prior.get('source_cleanup_auxiliary'):
+                    failed_items.append({'id': rec.id, 'error': '附件保全回执仍须核验，请继续清理剧集外层'})
+                    continue
+                if rec.status in ('already_archived', 'cleaned_redundant') and await source_entry(cd2, old_show_path, settings.source_root) is not None:
+                    failed_items.append({'id': rec.id, 'error': '本季目录已不存在，剧集外层仍在；请使用继续清理剧集外层完成保全核验'})
+                    continue
+                await record_source_absent(db, rec, show_absent=await source_entry(cd2, rec.show_path, settings.source_root) is None)
+                refreshed_ids.append(rec.id)
+                continue
 
             try:
                 res = await run_inspection(

@@ -32,7 +32,7 @@ class Tree(Disk):
     async def list_files(self, path, **kwargs):
         self.reads.append((path, kwargs.get('force_refresh')))
         if path not in self.tree:
-            raise OSError('missing fixture directory: ' + path)
+            raise FileNotFoundError('missing fixture directory: ' + path)
         return [dict(f) for f in self.tree[path]]
 
     async def delete_file(self, path):

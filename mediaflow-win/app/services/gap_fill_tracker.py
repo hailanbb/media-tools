@@ -9,11 +9,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -424,6 +425,8 @@ async def compute_season_gap_fill_view(
 ) -> dict[str, Any]:
     """计算单季真实待补集 vs 已推送待入库状态（合并新持久化表 + 历史 OperationLog 安全兜底）。"""
     physical_missing = sorted({int(x) for x in _parse_json_safe(rec.missing_episodes_json, []) if str(x).isdigit()})
+    post_review = _parse_json_safe(rec.evidence_json, {}).get("post_download_review") or {}
+    pending_review = post_review.get("state") == "pending"
     mapping = _parse_json_safe(rec.mapping_json, None) or None
     identity_key = build_identity_key(rec.show_name, rec.tmdb_id, rec.season_number, mapping)
     npath = _norm_path(rec.season_path)
@@ -531,7 +534,8 @@ async def compute_season_gap_fill_view(
         row = ep_by_num.get(ep_num)
         if row:
             # 若物理缺集中已不再缺少该集且曾经推送过，直接视为物理已覆盖
-            if ep_num not in phys_set and row.state in IN_FLIGHT_RECONCILE_STATES:
+            if (ep_num not in phys_set and row.state in IN_FLIGHT_RECONCILE_STATES and not pending_review
+                    and (not post_review or post_review.get("coverage_verified"))):
                 eff_state = "in_library"
                 eff_code = "reconciled_in_library"
                 eff_reason = "已核对入库（双库已存在实文件）"
@@ -603,9 +607,11 @@ async def compute_season_gap_fill_view(
                 "updated_at": None,
             })
 
-    actionable_missing = sorted(phys_set - set(blocking_eps))
+    actionable_missing = [] if pending_review else sorted(phys_set - set(blocking_eps))
     is_gap_season = rec.status in ("download_needed", "period_missing")
-    if not is_gap_season:
+    if pending_review:
+        view_bucket = "pushed_pending"
+    elif not is_gap_season:
         view_bucket = "none"
     elif actionable_missing:
         # 仅已搜索且本轮覆盖当前全部可补缺号的确定性无资源结果进入独立页签。
@@ -660,6 +666,8 @@ async def compute_season_gap_fill_view(
         "reconciled_in_library_episodes": sorted(set(reconciled_in_lib_eps)),
         "cancelled_freed_episodes": sorted(set(cancelled_freed_eps)),
         "view_bucket": view_bucket,
+        "post_download_review": post_review,
+        "review_pending": pending_review,
         "episodes": episodes_detail,
         "last_run": last_run_info,
     }
@@ -720,6 +728,7 @@ async def reconcile_gap_fill_records(
     season_record_id: str | None = None,
     season_record_ids: list[str] | None = None,
     force_release_missing: bool = False,
+    progress_cb: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """对账「已推送待入库」集：联合 MP 下载队列 + 整理队列 + 历史 + 双库实体状态更新收口。"""
     from app.clients.clouddrive2 import CloudDrive2Client
@@ -728,6 +737,8 @@ async def reconcile_gap_fill_records(
     from app.core.episode_parser import is_video_file, parse_episode
     from app.core.inspector import _verified_video, compute_archive_target, _find_archive_season
 
+    from app.services.post_download_review import (review_after_download, review_pending, set_pending,
+                                                   inventory_fingerprint, evidence_of, read_archive_listing, ReviewReader)
     settings = get_settings()
     close_mp = False
     close_cd2 = False
@@ -738,6 +749,20 @@ async def reconcile_gap_fill_records(
         cd2_client = CloudDrive2Client()
         close_cd2 = True
 
+    def _emit(stage: str, *, current: int = 0, total: int = 0, show_name: str = "", percent: int = 0) -> None:
+        if progress_cb is None:
+            return
+        try:
+            progress_cb({
+                "stage": stage,
+                "current": current,
+                "total": total,
+                "current_show": show_name,
+                "percent": max(0, min(100, int(percent))),
+            })
+        except Exception:
+            pass
+
     summary = {
         "ok": True,
         "checked_seasons": 0,
@@ -745,8 +770,20 @@ async def reconcile_gap_fill_records(
         "released_to_todo": 0,
         "still_pending": 0,
         "mp_query_ok": False,
+        "post_review_completed": 0,
+        "post_review_pending": 0,
+        "post_review_results": [],
         "warnings": [],
     }
+
+    def _has_running_loop() -> bool:
+        try:
+            asyncio.get_running_loop()
+            return True
+        except RuntimeError:
+            return False
+
+    use_concurrency = _has_running_loop()
 
     try:
         active_downloads: list[dict[str, Any]] = []
@@ -754,39 +791,69 @@ async def reconcile_gap_fill_records(
         download_history: list[dict[str, Any]] = []
         transfer_history: list[dict[str, Any]] = []
         mp_query_ok = False
+        transfer_query_ok = False
 
+        _emit("正在并发查询 MoviePilot 队列与转移历史...", percent=5)
         if mp_client is not None:
-            try:
-                dl_res = await mp_client.get_active_downloads()
-                if isinstance(dl_res, list):
-                    active_downloads = dl_res
-                    mp_query_ok = True
-            except Exception as exc:
-                summary["warnings"].append(f"读取 MP 活跃下载队列失败: {type(exc).__name__}")
-            try:
-                tq_res = await mp_client.get_transfer_queue()
+            async def _safe_dl():
+                try:
+                    return await mp_client.get_active_downloads()
+                except Exception as exc:
+                    return exc
+
+            async def _safe_tq():
+                try:
+                    return await mp_client.get_transfer_queue()
+                except Exception as exc:
+                    return exc
+
+            async def _safe_dh():
+                try:
+                    if hasattr(mp_client, "get_download_history"):
+                        return await mp_client.get_download_history(page=1, count=100)
+                    return None
+                except Exception as exc:
+                    return exc
+
+            async def _safe_th():
+                try:
+                    return await mp_client.get_transfer_history(page=1, count=100)
+                except Exception as exc:
+                    return exc
+
+            if use_concurrency:
+                dl_res, tq_res, dh_res, th_res = await asyncio.gather(
+                    _safe_dl(), _safe_tq(), _safe_dh(), _safe_th()
+                )
+            else:
+                dl_res = await _safe_dl()
+                tq_res = await _safe_tq()
+                dh_res = await _safe_dh()
+                th_res = await _safe_th()
+            if isinstance(dl_res, Exception):
+                summary["warnings"].append(f"读取 MP 活跃下载队列失败: {type(dl_res).__name__}")
+            elif isinstance(dl_res, list):
+                active_downloads = dl_res
+                mp_query_ok = True
+
+            if not isinstance(tq_res, Exception):
                 if isinstance(tq_res, list):
                     transfer_queue = tq_res
+                    transfer_query_ok = True
                 elif isinstance(tq_res, dict):
-                    transfer_queue = list(tq_res.get("data") or tq_res.get("items") or [])
-            except Exception:
-                pass
-            try:
-                if hasattr(mp_client, "get_download_history"):
-                    dh_res = await mp_client.get_download_history(page=1, count=100)
-                    if isinstance(dh_res, list):
-                        download_history = dh_res
-            except Exception:
-                pass
-            try:
-                th_res = await mp_client.get_transfer_history(page=1, count=100)
-                if isinstance(th_res, list):
-                    transfer_history = th_res
-            except Exception:
-                pass
+                    payload = tq_res.get("data", tq_res.get("items"))
+                    if isinstance(payload, list):
+                        transfer_queue = payload
+                        transfer_query_ok = True
+
+            if isinstance(dh_res, list):
+                download_history = dh_res
+            if isinstance(th_res, list):
+                transfer_history = th_res
 
         summary["mp_query_ok"] = mp_query_ok
 
+        _emit("正在筛选需核对剧季...", percent=10)
         stmt = select(SeasonRecord).where(SeasonRecord.task_id == task_id)
         if season_record_ids:
             stmt = stmt.where(SeasonRecord.id.in_(season_record_ids))
@@ -794,7 +861,35 @@ async def reconcile_gap_fill_records(
             stmt = stmt.where(SeasonRecord.id == season_record_id)
         seasons = list((await db.execute(stmt)).scalars().all())
 
-        archive_cache: dict[str, list[dict]] = {}
+        # 批量预取所有在途 / 已入库 GapFillEpisode 及历史 download_gap_fill 日志，避免对无关季逐条查询 DB
+        all_tracked = list(
+            (
+                await db.execute(
+                    select(GapFillEpisode).where(
+                        GapFillEpisode.task_id == task_id,
+                        GapFillEpisode.state.in_(list(IN_FLIGHT_RECONCILE_STATES) + ["in_library"]),
+                    )
+                )
+            ).scalars().all()
+        )
+        tracked_by_key: dict[tuple[str, str], list[GapFillEpisode]] = {}
+        for row in all_tracked:
+            tracked_by_key.setdefault((row.season_path, row.identity_key), []).append(row)
+
+        legacy_log_record_ids = set(
+            (
+                await db.execute(
+                    select(OperationLog.season_record_id).where(
+                        OperationLog.task_id == task_id,
+                        OperationLog.action == "download_gap_fill",
+                        OperationLog.status == "completed",
+                        OperationLog.season_record_id.isnot(None),
+                    )
+                )
+            ).scalars().all()
+        )
+
+        candidates: list[dict[str, Any]] = []
         now_dt = datetime.now(timezone.utc)
 
         for rec in seasons:
@@ -805,20 +900,12 @@ async def reconcile_gap_fill_records(
             identity_key = build_identity_key(rec.show_name, rec.tmdb_id, rec.season_number, mapping)
             npath = _norm_path(rec.season_path)
 
-            in_flight_rows = list(
-                (
-                    await db.execute(
-                        select(GapFillEpisode).where(
-                            GapFillEpisode.task_id == task_id,
-                            GapFillEpisode.season_path == npath,
-                            GapFillEpisode.identity_key == identity_key,
-                            GapFillEpisode.state.in_(list(IN_FLIGHT_RECONCILE_STATES)),
-                        )
-                    )
-                ).scalars().all()
-            )
+            tracked_rows = tracked_by_key.get((npath, identity_key), [])
+            in_flight_rows = [row for row in tracked_rows if row.state in IN_FLIGHT_RECONCILE_STATES]
+            previous_review = evidence_of(rec).get("post_download_review") or {}
+            retry_review = review_pending(rec) or bool(any(row.state == "in_library" for row in tracked_rows) and not previous_review)
             # 若尚无新版 DB 记录但存在历史 OperationLog 推断，先物化进 GapFillEpisode 以便完成对账闭环
-            if not in_flight_rows:
+            if not in_flight_rows and rec.id in legacy_log_record_ids:
                 view_snap = await compute_season_gap_fill_view(db, rec)
                 if view_snap.get("unverified_episodes"):
                     tid_int = int(rec.tmdb_id) if rec.tmdb_id and str(rec.tmdb_id).isdigit() else None
@@ -851,66 +938,161 @@ async def reconcile_gap_fill_records(
                             in_flight_rows.append(row)
                     if in_flight_rows:
                         await db.flush()
-            if not in_flight_rows:
+            if not in_flight_rows and not retry_review:
                 continue
 
-            summary["checked_seasons"] += 1
+            candidates.append({
+                "rec": rec,
+                "mapping": mapping,
+                "in_flight_rows": in_flight_rows,
+                "tracked_rows": tracked_rows,
+                "retry_review": retry_review,
+            })
 
-            # 1. 强读双库最新物理已覆盖集号（源季目录 + 归档季目录）
-            present_eps: set[int] = set(_parse_json_safe(rec.recognized_episodes_json, []))
-            cd2_checked = False
-            if cd2_client is not None:
+        total_candidates = len(candidates)
+        # 1. 并发强读双库最新物理已覆盖集号（源季目录 + 归档季目录）
+        prefetched_cd2: list[tuple[set[int], bool, bool, str | None]] = [
+            (set(), False, True, None) for _ in candidates
+        ]
+        if cd2_client is not None and total_candidates > 0:
+            sem = asyncio.Semaphore(5) if use_concurrency else None
+            completed_cd2 = 0
+            _emit(f"正在并发强读网盘源库与归档库 (0/{total_candidates})...", current=0, total=total_candidates, percent=15)
+
+            async def _fetch_cd2_body(idx: int, cand: dict[str, Any]) -> None:
+                nonlocal completed_cd2
+                c_rec = cand["rec"]
+                c_map = cand["mapping"]
+                present: set[int] = set()
+                c_checked = False
+                a_checked = True
+                err_name: str | None = None
                 try:
-                    src_files = await cd2_client.list_files(rec.season_path, force_refresh=True)
+                    src_files = await cd2_client.list_files(c_rec.season_path, force_refresh=True)
+                    inventory_fingerprint(src_files)
                     src_eps: set[int] = set()
                     for item in src_files:
                         if item.get("isDirectory") or not is_video_file(item["name"]):
                             continue
                         ep = parse_episode(item["name"], item.get("path", ""), item.get("size", 0))
-                        if _verified_video(ep, rec.season_number):
+                        if _verified_video(ep, c_rec.season_number):
                             src_eps.update(ep.episode_numbers)
-                    present_eps = set(src_eps)
-                    cd2_checked = True
+                    present = set(src_eps)
+                    c_checked = True
 
-                    if rec.archive_target_path:
+                    if c_rec.archive_target_path:
                         try:
-                            arch_files = await cd2_client.list_files(rec.archive_target_path, force_refresh=True)
-                            arch_sn = int((mapping or {}).get("target_season") or rec.season_number)
+                            arch_files = await read_archive_listing(cd2_client, c_rec.archive_target_path)
+                            inventory_fingerprint(arch_files)
+                            arch_sn = int((c_map or {}).get("target_season") or c_rec.season_number)
                             for item in arch_files:
                                 if item.get("isDirectory") or not is_video_file(item["name"]):
                                     continue
                                 ep = parse_episode(item["name"], item.get("path", ""), item.get("size", 0))
-                                if mapping and _verified_video(ep, arch_sn):
-                                    present_eps.update(translate_search_to_local_episodes(ep.episode_numbers, mapping))
-                                elif _verified_video(ep, rec.season_number):
-                                    present_eps.update(ep.episode_numbers)
+                                if c_map and _verified_video(ep, arch_sn):
+                                    present.update(translate_search_to_local_episodes(ep.episode_numbers, c_map))
+                                elif _verified_video(ep, c_rec.season_number):
+                                    present.update(ep.episode_numbers)
                         except Exception:
-                            pass
+                            a_checked = False
                     elif settings.archive_root:
-                        expected_arc = compute_archive_target(rec.show_path, rec.season_path, settings.archive_root, settings.source_root)
-                        tmdb_m = re.search(r"\[tmdbid[=:](\d+)\]", rec.show_name, re.I)
+                        expected_arc = compute_archive_target(c_rec.show_path, c_rec.season_path, settings.archive_root, settings.source_root)
+                        tmdb_m = re.search(r"\[tmdbid[=:](\d+)\]", c_rec.show_name, re.I)
                         try:
-                            actual, _ = await _find_archive_season(cd2_client, archive_cache, expected_arc, rec.season_number, tmdb_m)
+                            probe = ReviewReader(cd2_client, settings.archive_root)
+                            actual, _ = await _find_archive_season(probe, {}, expected_arc, c_rec.season_number, tmdb_m)
+                            if probe.failed:
+                                raise ValueError("归档目录查询不完整")
                             if actual:
-                                for item in await cd2_client.list_files(actual, force_refresh=True):
+                                archive_files = await cd2_client.list_files(actual, force_refresh=True)
+                                inventory_fingerprint(archive_files)
+                                for item in archive_files:
                                     if item.get("isDirectory") or not is_video_file(item["name"]):
                                         continue
                                     ep = parse_episode(item["name"], item.get("path", ""), item.get("size", 0))
-                                    if _verified_video(ep, rec.season_number):
-                                        present_eps.update(ep.episode_numbers)
+                                    if _verified_video(ep, c_rec.season_number):
+                                        present.update(ep.episode_numbers)
                         except Exception:
-                            pass
+                            a_checked = False
                 except Exception as cd2_err:
-                    summary["warnings"].append(f"核对 {rec.show_name} 网盘文件失败: {type(cd2_err).__name__}")
+                    err_name = type(cd2_err).__name__
+                prefetched_cd2[idx] = (present, c_checked, a_checked, err_name)
+                completed_cd2 += 1
+                _emit(
+                    f"正在并发强读网盘源库与归档库 ({completed_cd2}/{total_candidates}): {c_rec.show_name}",
+                    current=completed_cd2,
+                    total=total_candidates,
+                    show_name=c_rec.show_name,
+                    percent=15 + int(45 * completed_cd2 / total_candidates),
+                )
 
-            if cd2_checked and rec.total_episodes and rec.total_episodes > 0:
-                new_missing = [ep for ep in range(1, rec.total_episodes + 1) if ep not in present_eps]
-                rec.recognized_episodes_json = json.dumps(sorted(present_eps))
-                rec.missing_episodes_json = json.dumps(new_missing)
-                if not new_missing and rec.status in ("download_needed", "period_missing"):
-                    dups = _parse_json_safe(rec.duplicate_episodes_json, [])
-                    rec.status = "review_needed" if dups else "archive_ready"
-                    rec.status_detail = f"经核对入库，全 {rec.total_episodes} 集已齐全{'（含重复集待复核）' if dups else '，可归档'}"
+            async def _fetch_cd2(idx: int, cand: dict[str, Any]) -> None:
+                if sem is not None:
+                    async with sem:
+                        await _fetch_cd2_body(idx, cand)
+                else:
+                    await _fetch_cd2_body(idx, cand)
+
+            if use_concurrency:
+                await asyncio.gather(*[_fetch_cd2(i, c) for i, c in enumerate(candidates)])
+            else:
+                for i, c in enumerate(candidates):
+                    await _fetch_cd2(i, c)
+
+        for idx, cand in enumerate(candidates):
+            rec = cand["rec"]
+            in_flight_rows = cand["in_flight_rows"]
+            tracked_rows = cand["tracked_rows"]
+            retry_review = cand["retry_review"]
+
+            summary["checked_seasons"] += 1
+            _emit(
+                f"正在核验与复核入库状态 ({idx + 1}/{total_candidates}): {rec.show_name}",
+                current=idx + 1,
+                total=total_candidates,
+                show_name=rec.show_name,
+                percent=60 + int(35 * (idx + 1) / max(1, total_candidates)),
+            )
+
+            present_eps, cd2_checked, archive_checked, cd2_err_name = prefetched_cd2[idx]
+            if cd2_err_name:
+                summary["warnings"].append(f"核对 {rec.show_name} 网盘文件失败: {cd2_err_name}")
+
+            allow_release = cd2_checked and archive_checked
+            arrived = bool(present_eps & {row.episode_number for row in in_flight_rows})
+            needs_review = arrived or retry_review
+            review_result = None
+            if not allow_release:
+                set_pending(rec, "源端或归档目录未完整读取，保留下载回执等待核实")
+                review_result = {"ok": False, "reason": "目录读取未完成"}
+            elif needs_review:
+                # MP 的下载列表可能包含做种，明确完成/做种不视为仍在写入。
+                matched_downloads = [_match_torrent_in_items(row, active_downloads) for row in tracked_rows or in_flight_rows]
+                writing = any(item and str(item.get("state") or item.get("status") or "").casefold()
+                              not in {"seeding", "uploading", "stalledup", "pausedup", "completed", "finished"}
+                              for item in matched_downloads)
+                transferring = any(_match_torrent_in_items(row, transfer_queue) for row in tracked_rows or in_flight_rows)
+                if mp_client is not None and (not mp_query_ok or not transfer_query_ok or writing or transferring):
+                    set_pending(rec, "下载／整理仍在进行或队列未完整核实")
+                    review_result = {"ok": False, "reason": "等待下载整理结束并核实队列"}
+                else:
+                    set_pending(rec, "正在按最新实物核对身份、重复版本及额外内容")
+                    await db.commit()  # 先持久化门禁，网络复核期间不持有之前的写事务
+                    review_result = await review_after_download(db, rec, cd2_client=cd2_client, mp_client=mp_client)
+            if review_result is not None:
+                if review_result.get("ok"):
+                    present_eps = set(review_result.get("present_episodes") or [])
+                    allow_release = bool(review_result.get("coverage_verified"))
+                    summary["post_review_completed"] += 1
+                    from app.core.season_classifier import classify_single_record
+                    category, _ = classify_single_record(rec)
+                    summary["post_review_results"].append({"record_id": rec.id, "category": category,
+                                                           "message": rec.status_detail})
+                else:
+                    present_eps = set()
+                    allow_release = False
+                    summary["post_review_pending"] += 1
+                    summary["warnings"].append(f"{rec.show_name}：{review_result.get('reason') or '补缺后复核待完成'}")
 
             # 2. 对每条在途集做队列 / 历史 / 实物状态裁决
             for row in in_flight_rows:
@@ -922,7 +1104,7 @@ async def reconcile_gap_fill_records(
                     summary["reconciled_in_library"] += 1
                     continue
 
-                if not mp_query_ok:
+                if not allow_release or not mp_query_ok:
                     summary["still_pending"] += 1
                     continue
 
@@ -1000,7 +1182,10 @@ async def reconcile_gap_fill_records(
                 else:
                     summary["still_pending"] += 1
 
+            await db.commit()
+        _emit("正在汇总任务统计...", current=total_candidates, total=total_candidates, percent=98)
         await db.commit()
+        _emit("核对入库完成", current=total_candidates, total=total_candidates, percent=100)
     finally:
         if close_mp and mp_client is not None:
             await mp_client.close()
@@ -1015,10 +1200,13 @@ async def refresh_task_summary(task_id: str, db: AsyncSession) -> dict[str, Any]
     task = await db.get(Task, task_id)
     stmt = select(SeasonRecord).where(SeasonRecord.task_id == task_id)
     res = await db.execute(stmt)
+    from app.services.source_cleanup_state import pending_root_cleanup_ids
+    summary_records = list(res.scalars().all())
+    pending_roots = await pending_root_cleanup_ids(db, summary_records)
     all_seasons = [
         s
-        for s in res.scalars().all()
-        if s.status not in ("manually_handled", "verified_complete", "cleaned_redundant", "source_absent", "archived")
+        for s in summary_records
+        if s.id in pending_roots or s.status not in ("manually_handled", "verified_complete", "cleaned_redundant", "source_absent", "archived")
     ]
 
     import inspect as _inspect
@@ -1040,8 +1228,14 @@ async def refresh_task_summary(task_id: str, db: AsyncSession) -> dict[str, Any]
         set((await dg_call).all()) if _inspect.isawaitable(dg_call) else set()
     )
 
+    if pending_dir_group_ids:
+        from app.services.source_presence import group_sources_absent
+        groups = list((await db.scalars(select(DirectoryGroup).where(DirectoryGroup.id.in_(pending_dir_group_ids)))).all())
+        pending_dir_group_ids -= {g.id for g in groups if group_sources_absent(_parse_json_safe(g.paths_json, []), summary_records)}
+
     # 单次汇总只读取一次三类台账；分集查询保留跨任务防重语义。
-    gap_seasons = [s for s in all_seasons if s.status in ("download_needed", "period_missing", "airing") or _parse_json_safe(s.missing_episodes_json, [])]
+    gap_seasons = [s for s in all_seasons if s.status in ("download_needed", "period_missing", "airing") or _parse_json_safe(s.missing_episodes_json, [])
+                   or (_parse_json_safe(s.evidence_json, {}).get("post_download_review") or {}).get("state") == "pending"]
     prefetched = {"episodes": {}, "runs": {}, "legacy": []}
     paths = sorted({_norm_path(s.season_path) for s in gap_seasons})
     if paths:
@@ -1076,7 +1270,7 @@ async def refresh_task_summary(task_id: str, db: AsyncSession) -> dict[str, Any]
             "recognized_episodes": _parse_json_safe(s.recognized_episodes_json, []),
             "missing_episodes": _parse_json_safe(s.missing_episodes_json, []),
             "duplicate_episodes": _parse_json_safe(s.duplicate_episodes_json, []),
-            "status": s.status,
+            "status": "already_archived" if s.id in pending_roots else s.status,
             "status_detail": s.status_detail,
             "archive_target_path": s.archive_target_path,
             "season_finished": s.season_finished,
