@@ -84,7 +84,30 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 await db.commit()
     except Exception as e:
         logging.getLogger("mediaflow.startup").error("启动自愈孤儿任务异常: %s", e)
-    yield
+
+    # 启动媒体整理智能修复后台调度（仅在非测试进程下启用，支持自动扫描与核验恢复）
+    import asyncio
+    import sys
+
+    repair_scheduler_task = None
+    _cmd_str = " ".join(sys.argv).lower()
+    _is_test = ("pytest" in sys.modules or "pytest" in _cmd_str or "unittest" in _cmd_str)
+    if not _is_test:
+        try:
+            from app.services.transfer_repair_service import transfer_repair_scheduler_loop
+            repair_scheduler_task = asyncio.create_task(transfer_repair_scheduler_loop(poll_seconds=60))
+        except Exception as e:
+            logging.getLogger("mediaflow.startup").warning("启动媒体整理修复后台调度失败: %s", e)
+
+    try:
+        yield
+    finally:
+        if repair_scheduler_task is not None:
+            repair_scheduler_task.cancel()
+            try:
+                await repair_scheduler_task
+            except asyncio.CancelledError:
+                pass
 
 
 app = FastAPI(

@@ -1,8 +1,8 @@
 """订阅资源核查、状态管理与已确认源文件的可恢复清理。
 
 严格遵循：
-- 《MediaFlow剧集订阅智能清理需求与交互方案-v2.5.39.md》
-- 《MediaFlow电影订阅智能清理需求与交互方案-v2.5.40.md》
+- 《MediaFlow剧集订阅智能清理需求与交互方案-v2.5.65.md》
+- 《MediaFlow电影订阅智能清理需求与交互方案-v2.5.65.md》
 """
 
 from __future__ import annotations

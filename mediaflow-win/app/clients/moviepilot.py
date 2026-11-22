@@ -238,6 +238,96 @@ class MoviePilotClient:
             return res["data"]
         return []
 
+    @staticmethod
+    def flatten_transfer_queue(queue: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """将 MoviePilot v2 嵌套的 media + season + tasks[] 整理队列展开为扁平任务列表。"""
+        flat: list[dict[str, Any]] = []
+        if not isinstance(queue, list):
+            return flat
+        for group in queue:
+            if not isinstance(group, dict):
+                continue
+            tasks = group.get("tasks")
+            if isinstance(tasks, list) and tasks:
+                media = group.get("media") or {}
+                season = group.get("season")
+                for t in tasks:
+                    if not isinstance(t, dict):
+                        continue
+                    fi = t.get("fileitem") or {}
+                    flat.append({
+                        "title": media.get("title") or t.get("title") or fi.get("name") or "",
+                        "season": season,
+                        "state": t.get("state") or group.get("state") or "running",
+                        "source_path": fi.get("path") or t.get("source_path") or t.get("src") or "",
+                        "storage": fi.get("storage") or "local",
+                        "size": fi.get("size") or 0,
+                        "downloader": t.get("downloader") or "",
+                        "download_hash": t.get("download_hash") or "",
+                    })
+            else:
+                flat.append(group)
+        return flat
+
+    async def get_system_version(self) -> str:
+        """读取 MoviePilot 运行版本号（只读，用于能力与版本展示）。"""
+        for ep in ("/api/v1/system/version", "/api/v1/system/env"):
+            try:
+                res = await self._get(ep)
+                if isinstance(res, dict):
+                    data = res.get("data")
+                    if isinstance(data, str) and data.strip():
+                        return data.strip()
+                    if isinstance(data, dict):
+                        for key in ("VERSION", "version", "APP_VERSION", "app_version"):
+                            if data.get(key):
+                                return str(data[key]).strip()
+                    if res.get("version"):
+                        return str(res["version"]).strip()
+            except Exception:
+                continue
+        return ""
+
+    async def list_storage_dir(
+        self,
+        storage: str,
+        dir_path: str,
+    ) -> tuple[bool, list[dict[str, Any]], str]:
+        """调用 MoviePilot 原生 POST /api/v1/storage/list 列举远程存储目录（支持 local/u115/smb 等）。
+
+        返回 (ok, entries, error_message)：
+        - ok=False 代表网络/超时/鉴权/5xx 等存储异常，绝不能解释为“文件不存在”；
+        - ok=True 代表存储健康且正常返回目录清单（空目录或不存在的目录返回 []）。
+        """
+        import posixpath
+
+        norm_dir = str(dir_path or "").replace("\\", "/").strip()
+        if not norm_dir:
+            return False, [], "空目录路径"
+        if not norm_dir.endswith("/"):
+            norm_dir += "/"
+        name = posixpath.basename(norm_dir.rstrip("/")) or "/"
+        payload = {
+            "storage": storage or "local",
+            "type": "dir",
+            "path": norm_dir,
+            "name": name,
+        }
+        try:
+            res = await self._post("/api/v1/storage/list", json=payload)
+            if isinstance(res, list):
+                return True, [x for x in res if isinstance(x, dict)], ""
+            if isinstance(res, dict):
+                if res.get("success") is False:
+                    return False, [], str(res.get("message") or "storage/list 返回失败")
+                data = res.get("data")
+                if isinstance(data, list):
+                    return True, [x for x in data if isinstance(x, dict)], ""
+                return True, [], ""
+            return False, [], f"storage/list 未知返回结构: {type(res).__name__}"
+        except Exception as exc:
+            return False, [], f"{type(exc).__name__}: {exc}"
+
     # ── 转移历史管理 ──────────────────────────────────────
     async def get_transfer_history(
         self,
@@ -282,18 +372,65 @@ class MoviePilotClient:
             records = res
         return {"total": total, "list": records}
 
-    async def get_manual_target_path(self, in_path: str) -> dict[str, Any]:
-        """根据源文件路径调用 MoviePilot 匹配目标配置与推荐目标路径。"""
+    async def get_manual_target_path(
+        self,
+        fileitem: dict[str, Any] | str,
+        storage: str = "local",
+    ) -> dict[str, Any]:
+        """根据源 FileItem 调用 MoviePilot v2.15.6 POST /api/v1/transfer/manual/target-path 匹配目标目录配置。"""
+        import posixpath
+
+        if isinstance(fileitem, str):
+            norm = str(fileitem).replace("\\", "/").strip()
+            name = posixpath.basename(norm)
+            stem, ext = posixpath.splitext(name)
+            fi_obj: dict[str, Any] = {
+                "storage": storage or "local",
+                "type": "file",
+                "path": norm,
+                "name": name,
+                "basename": stem,
+                "extension": ext.lstrip("."),
+            }
+        else:
+            fi_obj = dict(fileitem)
         try:
-            return await self._post("/api/v1/transfer/manual/target-path", json={"in_path": in_path})
+            return await self._post("/api/v1/transfer/manual/target-path", json={"fileitem": fi_obj})
         except Exception as e:
             log.warning("MoviePilot target-path 匹配失败: %s", e)
             return {"success": False, "message": str(e)}
 
-    async def recommend_episode_format(self, in_path: str) -> dict[str, Any]:
-        """请求 MoviePilot 推荐集号格式。"""
+    async def get_manual_transfer_history(self, logid: int) -> dict[str, Any]:
+        """查询手动整理命中的已有成功历史（评估重整与冲突风险）。"""
         try:
-            return await self._post("/api/v1/transfer/episode-format/recommend", json={"in_path": in_path})
+            return await self._post("/api/v1/transfer/manual/history", json={"logid": int(logid)})
+        except Exception as e:
+            log.warning("MoviePilot manual/history 查询失败: %s", e)
+            return {"success": False, "message": str(e)}
+
+    async def recommend_episode_format(
+        self,
+        fileitem_or_path: dict[str, Any] | str,
+        storage: str = "local",
+    ) -> dict[str, Any]:
+        """请求 MoviePilot 推荐集号格式。"""
+        import posixpath
+
+        if isinstance(fileitem_or_path, str):
+            norm = str(fileitem_or_path).replace("\\", "/").strip()
+            name = posixpath.basename(norm)
+            payload: dict[str, Any] = {
+                "fileitem": {
+                    "storage": storage or "local",
+                    "type": "file",
+                    "path": norm,
+                    "name": name,
+                }
+            }
+        else:
+            payload = {"fileitem": dict(fileitem_or_path)}
+        try:
+            return await self._post("/api/v1/transfer/episode-format/recommend", json=payload)
         except Exception as e:
             log.warning("MoviePilot episode-format/recommend 失败: %s", e)
             return {"success": False, "message": str(e)}

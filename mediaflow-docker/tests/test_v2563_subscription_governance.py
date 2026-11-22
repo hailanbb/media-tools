@@ -56,7 +56,10 @@ class TestV2563SubscriptionGovernance(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         import app.services.subscription_cd2_index as cd2_idx
+        import app.services.subscription_governance_service as sub_gov
         cd2_idx._memory_snapshot = None
+        sub_gov._memory_resource_cache = None
+        sub_gov._memory_unified_snapshot = None
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.drop_all)
         await init_db()
@@ -379,7 +382,7 @@ class TestV2563SubscriptionGovernance(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(push_res["pushed_count"], 1)
                 mp_inst.submit_download.assert_awaited_once()
 
-    # ── 1: 验证前端已移除多余「豆瓣推选」过滤 Tab ────────────────────
+    # ── 1: 验证前端已移除多余「豆瓣推选」过滤 Tab 并落地统一查询与按类操作闭环 ──
     def test_06_frontend_removed_redundant_douban_filter_tab(self):
         html = (Path(__file__).resolve().parent.parent / "frontend" / "index.html").read_text(encoding="utf-8")
         self.assertNotIn("btn-mov-douban", html)
@@ -390,6 +393,80 @@ class TestV2563SubscriptionGovernance(unittest.IsolatedAsyncioTestCase):
         self.assertIn("btn-tv-never_downloaded", html)
         self.assertIn("btn-tv-low_quality", html)
         self.assertIn("btn-mov-low_quality", html)
+        self.assertIn("查询最新订阅数据", html)
+        self.assertIn("批量一键取消订阅", html)
+        self.assertIn("批量补缺下载", html)
+        self.assertIn("批量取消订阅", html)
+        self.assertIn("loadSubscriptions({ cachedOnly: true })", html)
+
+    async def test_07_unified_query_pipeline_and_cached_only_mode(self):
+        from app.api.moviepilot import list_subscriptions
+        import app.services.subscription_governance_service as sub_gov
+
+        async with async_session() as db:
+            # 1. 进入视图默认 cached_only=True：未查询过时返回空快照，绝不发起外部请求
+            initial = await list_subscriptions(cached_only=True, db=db)
+            self.assertFalse(initial["has_snapshot"])
+            self.assertEqual(initial["total"], 0)
+
+        fake_subs = [
+            {
+                "id": 8001, "name": "统一查询可补剧", "year": "2024", "type": "电视剧",
+                "tmdbid": 88001, "season": 1, "total_episode": 4, "lack_episode": 2,
+                "state": "R", "username": "豆瓣榜单",
+                "date": "2025-10-01 10:00:00", "last_update": "2025-10-15 10:00:00",
+                "poster": "http://img/8001.jpg",
+            }
+        ]
+
+        async def fake_search(*, tmdb_id=None, **kwargs):
+            if tmdb_id == 88001:
+                return [
+                    {
+                        "media_info": {"tmdb_id": 88001, "title": "统一查询可补剧"},
+                        "meta_info": {"begin_season": 1, "season_list": [1], "begin_episode": 3, "end_episode": 4, "episode_list": [3, 4]},
+                        "torrent_info": {"title": "统一查询可补剧 S01E03-E04 1080p", "site": 1, "site_name": "天空", "seeders": 9, "size": 2 * 1024**3},
+                    }
+                ]
+            return []
+
+        with patch("app.services.subscription_governance_service.MoviePilotClient") as MockMP, \
+             patch("app.services.subscription_governance_service.build_cd2_subscription_inventory", new=AsyncMock(return_value={})), \
+             patch("app.services.subscription_governance_service.resolve_category_gap_fill_sites", new=AsyncMock(return_value={
+                 "ready": True, "sites_param": "1", "active_ordered_ids": [1], "site_priority_map": {1: 0}
+             })):
+            mp_inst = MockMP.return_value
+            mp_inst.list_subscriptions = AsyncMock(return_value=fake_subs)
+            mp_inst.get_active_downloads = AsyncMock(return_value=[])
+            mp_inst.search_resources = AsyncMock(side_effect=fake_search)
+            mp_inst.submit_download = AsyncMock(return_value={"success": True, "message": "已加入队列"})
+            mp_inst.close = AsyncMock()
+
+            st = sub_gov.start_unified_subscription_query(async_session, search_resources=True, reuse_resource_cache=False)
+            self.assertEqual(st["status"], "running")
+            if sub_gov._unified_query_task:
+                await sub_gov._unified_query_task
+
+            final_st = sub_gov.get_unified_query_status()
+            self.assertEqual(final_st["status"], "completed")
+            self.assertEqual(final_st["resource_downloadable"], 1)
+
+            async with async_session() as db:
+                cached = await list_subscriptions(cached_only=True, db=db)
+                self.assertTrue(cached["has_snapshot"])
+                self.assertEqual(cached["tv"]["partial_stalled"], 1)
+                self.assertEqual(cached["tv"]["partial_stalled_downloadable"], 1)
+                item = cached["subscriptions"][0]
+                self.assertEqual(item["resource_status"], "downloadable")
+
+                # 直接从统一查询缓存执行一键补缺下载（无需额外梳理会话）并验证批量进度状态
+                push_res = await execute_batch_subscription_gap_fill(db, audit_id="unified", sub_ids=[8001])
+                self.assertTrue(push_res["ok"])
+                self.assertEqual(push_res["pushed_count"], 1)
+                ba_st = sub_gov.get_batch_action_status()
+                self.assertEqual(ba_st["action_type"], "gap_fill_push")
+                self.assertEqual(ba_st["status"], "completed")
+                self.assertEqual(ba_st["progress_pct"], 100)
 
 
 if __name__ == "__main__":

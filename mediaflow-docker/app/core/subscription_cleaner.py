@@ -1,8 +1,8 @@
 """MoviePilot 订阅清理决策引擎 — 基于媒体类型（电影 vs 电视剧）分离的差异化退订、CD2 实盘对账与安全保护算法。
 
 严格对齐：
-- 《MediaFlow剧集订阅智能清理需求与交互方案-v2.5.39.md》
-- 《MediaFlow电影订阅智能清理需求与交互方案-v2.5.40.md》
+- 《MediaFlow剧集订阅智能清理需求与交互方案-v2.5.65.md》
+- 《MediaFlow电影订阅智能清理需求与交互方案-v2.5.65.md》
 - v2.5.63 升级：CD2 实盘准星、多维微短剧识别、断更停滞双分桶（零进度死种 vs 部分已下可补缺）、低质/异常特征识别（无封面/繁体/小语种/无中文名）。
 """
 
@@ -525,8 +525,13 @@ def diagnose_tv_subscription(sub: Dict[str, Any], now: Optional[datetime] = None
     else:
         total_ep = int(raw_total_ep) if raw_total_ep is not None else None
 
-    mp_comp_ep = int(sub.get("completed_episode") or sub.get("current_episode") or 0)
     mp_lack_ep = sub.get("lack_episode")
+    if sub.get("completed_episode") is not None or sub.get("current_episode") is not None:
+        mp_comp_ep = int(sub.get("completed_episode") or sub.get("current_episode") or 0)
+    elif raw_total_ep is not None and mp_lack_ep is not None:
+        mp_comp_ep = max(0, int(raw_total_ep) - int(mp_lack_ep))
+    else:
+        mp_comp_ep = 0
 
     # CD2 实盘集数优先（2.4：以 CD2 为准）
     cd2_verified = bool(sub.get("cd2_verified"))

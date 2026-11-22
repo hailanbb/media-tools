@@ -266,6 +266,8 @@ async def build_cd2_subscription_inventory(
     *,
     scope: str = "all",  # "all" | "tv" | "movie"
     job_id: str = "",
+    raw_subs: list[dict[str, Any]] | None = None,
+    progress_cb=None,
 ) -> dict[str, Any]:
     """执行 CD2 全盘实盘库存扫描并与当前 MoviePilot 订阅对齐，结果持久化到 SQLite。"""
     global _sync_job
@@ -282,23 +284,42 @@ async def build_cd2_subscription_inventory(
     if not roots:
         raise RuntimeError("未配置 CD2 源目录或归档目录 (MF_SOURCE_ROOT / MF_ARCHIVE_ROOT)")
 
+    def _notify_progress() -> None:
+        if callable(progress_cb):
+            try:
+                progress_cb(
+                    int(_sync_job.get("progress_pct") or 0),
+                    str(_sync_job.get("stage") or ""),
+                    str(_sync_job.get("message") or ""),
+                    int(_sync_job.get("scanned_categories") or 0),
+                    int(_sync_job.get("total_categories") or 0),
+                    int(_sync_job.get("matched_tv") or 0),
+                    int(_sync_job.get("matched_movies") or 0),
+                )
+            except Exception:
+                pass
+
     _sync_job.update(
         job_id=job_id or uuid.uuid4().hex[:12],
         status="running",
         progress_pct=5,
         stage="fetch_subscriptions",
-        message="正在拉取 MoviePilot 订阅清单...",
+        message="正在准备 CD2 实盘目录扫描目标...",
         errors=[],
     )
+    _notify_progress()
 
-    mp = MoviePilotClient()
     cd2 = CloudDrive2Client()
     sem = asyncio.Semaphore(4)
 
-    try:
-        subs = await mp.list_subscriptions()
-    finally:
-        await mp.close()
+    if raw_subs is not None:
+        subs = raw_subs
+    else:
+        mp = MoviePilotClient()
+        try:
+            subs = await mp.list_subscriptions()
+        finally:
+            await mp.close()
 
     # 汇总当前订阅需要重点钻取的 TMDB ID 集合
     tv_sub_targets: dict[str, set[int]] = {}  # tmdb_id -> {season1, season2}
@@ -373,6 +394,7 @@ async def build_cd2_subscription_inventory(
             scanned_categories=0,
             message=f"正在扫描 CD2 共 {total_cats} 个分类目录...",
         )
+        _notify_progress()
 
         # 2. 并发扫描所有分类目录（获得作品文件夹列表）
         tv_show_index_tid: dict[str, list[tuple[str, str]]] = {}     # tid -> [(side, show_path)]
@@ -388,8 +410,9 @@ async def build_cd2_subscription_inventory(
                 items, err = await _safe_list_files(cd2, cpath, timeout=60.0)
             scanned_cats += 1
             _sync_job["scanned_categories"] = scanned_cats
-            _sync_job["progress_pct"] = 15 + int(45 * scanned_cats / max(1, total_cats))
-            _sync_job["message"] = f"已扫描 CD2 分类 {scanned_cats}/{total_cats} ({cpath.rsplit('/', 1)[-1]})"
+            _sync_job["progress_pct"] = 15 + int(40 * scanned_cats / max(1, total_cats))
+            _sync_job["message"] = f"已扫描 CD2 分类目录 {scanned_cats}/{total_cats} ({cpath.rsplit('/', 1)[-1]})"
+            _notify_progress()
             if err:
                 category_errors.append(err)
                 if kind == "tv":
@@ -437,13 +460,17 @@ async def build_cd2_subscription_inventory(
                     for sn in seasons:
                         tv_drill_jobs.append(("title", nt, sn, dirs))
 
+            total_tv_jobs = len(tv_drill_jobs)
+            drilled_tv_count = 0
             _sync_job.update(
-                progress_pct=65,
+                progress_pct=58,
                 stage="drill_tv_seasons",
-                message=f"正在核验 {len(tv_drill_jobs)} 个命中剧季的 CD2 实存集数...",
+                message=f"正在核验 {total_tv_jobs} 个命中剧季的 CD2 实存集数 (0/{total_tv_jobs})...",
             )
+            _notify_progress()
 
             async def _drill_one_tv(key_kind: str, ident: str, sn: int, dirs: list[tuple[str, str]]):
+                nonlocal drilled_tv_count
                 src_eps: set[int] = set()
                 arch_eps: set[int] = set()
                 all_paths: list[str] = []
@@ -471,6 +498,11 @@ async def build_cd2_subscription_inventory(
                     tv_by_key[f"{ident}:{sn}"] = entry
                 else:
                     tv_by_title[f"{ident}:{sn}"] = entry
+                drilled_tv_count += 1
+                _sync_job["matched_tv"] = len(tv_by_key)
+                _sync_job["progress_pct"] = 58 + int(25 * drilled_tv_count / max(1, total_tv_jobs))
+                _sync_job["message"] = f"正在核验剧季 CD2 实存集数 ({drilled_tv_count}/{total_tv_jobs})"
+                _notify_progress()
 
             if tv_drill_jobs:
                 await asyncio.gather(*(_drill_one_tv(*job) for job in tv_drill_jobs))
@@ -488,13 +520,17 @@ async def build_cd2_subscription_inventory(
                 if dirs:
                     mov_check_jobs.append(("title", tk, dirs))
 
+            total_mov_jobs = len(mov_check_jobs)
+            verified_mov_count = 0
             _sync_job.update(
                 progress_pct=85,
                 stage="verify_movies",
-                message=f"正在核验 {len(mov_check_jobs)} 部命中电影的 CD2 实存视频文件...",
+                message=f"正在核验 {total_mov_jobs} 部命中电影的 CD2 实存视频文件 (0/{total_mov_jobs})...",
             )
+            _notify_progress()
 
             async def _verify_one_movie(key_kind: str, ident: str, dirs: list[tuple[str, str]]):
+                nonlocal verified_mov_count
                 valid_paths: list[str] = []
                 video_count = 0
                 max_mb = 0.0
@@ -521,6 +557,11 @@ async def build_cd2_subscription_inventory(
                     movie_by_tmdb[ident] = entry
                 else:
                     movie_by_title[ident] = entry
+                verified_mov_count += 1
+                _sync_job["matched_movies"] = sum(1 for v in movie_by_tmdb.values() if v.get("in_library"))
+                _sync_job["progress_pct"] = 85 + int(14 * verified_mov_count / max(1, total_mov_jobs))
+                _sync_job["message"] = f"正在核验电影 CD2 实存视频文件 ({verified_mov_count}/{total_mov_jobs})"
+                _notify_progress()
 
             if mov_check_jobs:
                 await asyncio.gather(*(_verify_one_movie(*job) for job in mov_check_jobs))
@@ -558,6 +599,7 @@ async def build_cd2_subscription_inventory(
                 + (f"（{len(category_errors)} 个目录读取超时）" if category_errors else "")
             ),
         )
+        _notify_progress()
         return snapshot
     except Exception as exc:
         log.exception("CD2 实盘库存同步异常")

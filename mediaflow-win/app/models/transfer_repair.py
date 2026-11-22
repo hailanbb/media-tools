@@ -1,4 +1,4 @@
-"""媒体整理修复数据模型 — 持久化接管基线、文件修复项、执行计划与复用规则。"""
+"""媒体整理修复数据模型 — 持久化接管基线、文件修复项、证据快照、核验记录与复用规则。"""
 
 from __future__ import annotations
 
@@ -18,10 +18,20 @@ class TransferRepairBaseline(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     instance_id: Mapped[str] = mapped_column(String(128), default="default", index=True)
+    mp_origin: Mapped[str] = mapped_column(String(256), default="", comment="关联 MP 实例地址指纹")
+    mp_version: Mapped[str] = mapped_column(String(64), default="", comment="最近探测的 MP 版本号")
+    baseline_status: Mapped[str] = mapped_column(
+        String(32),
+        default="pending_confirm",
+        comment="active / pending_confirm / reset_required",
+    )
     takeover_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     baseline_history_id: Mapped[int] = mapped_column(Integer, default=0, comment="首次启用时的最大历史失败 ID")
+    baseline_date: Mapped[str] = mapped_column(String(64), default="", comment="基线起点对应的 MP 记录时间")
     last_scanned_history_id: Mapped[int] = mapped_column(Integer, default=0, comment="最近一次扫描到的最大历史 ID")
     last_scanned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_scan_truncated: Mapped[bool] = mapped_column(Boolean, default=False, comment="最近一次扫描是否触达页数上限")
+    last_scan_summary_json: Mapped[str] = mapped_column(Text, default="{}", comment="最近一次扫描摘要统计")
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, comment="是否启用新失败自动发现")
     auto_repair_enabled: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否开启高确定性自动修复")
     max_concurrency: Mapped[int] = mapped_column(Integer, default=1, comment="执行并发限制")
@@ -46,7 +56,9 @@ class TransferRepairItem(Base):
     file_basename: Mapped[str] = mapped_column(String(512), default="", index=True)
     file_size: Mapped[int] = mapped_column(BigInteger, default=0)
     file_mtime: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    storage: Mapped[str] = mapped_column(String(64), default="")
+    storage: Mapped[str] = mapped_column(String(64), default="local")
+    src_storage: Mapped[str] = mapped_column(String(64), default="local")
+    dest_storage: Mapped[str] = mapped_column(String(64), default="")
     file_id: Mapped[str] = mapped_column(String(128), default="")
 
     # 关联 MP 历史与原始错误
@@ -55,8 +67,18 @@ class TransferRepairItem(Base):
     raw_error: Mapped[str] = mapped_column(Text, default="")
     error_category: Mapped[str] = mapped_column(String(64), default="unknown", index=True)
     main_block_reason: Mapped[str] = mapped_column(Text, default="", comment="主阻塞原因")
+    failure_group_key: Mapped[str] = mapped_column(String(256), default="", index=True, comment="故障组/发布包聚合键")
 
-    # 识别与参数推导事实
+    # MP 原始识别快照（原识别）
+    mp_title: Mapped[str] = mapped_column(String(512), default="")
+    mp_seasons: Mapped[str] = mapped_column(String(64), default="")
+    mp_episodes: Mapped[str] = mapped_column(String(128), default="")
+    mp_mode: Mapped[str] = mapped_column(String(32), default="")
+    mp_date: Mapped[str] = mapped_column(String(64), default="")
+    src_fileitem_json: Mapped[str] = mapped_column(Text, default="{}")
+    dest_fileitem_json: Mapped[str] = mapped_column(Text, default="{}")
+
+    # 识别与参数推导事实（新识别）
     title: Mapped[str] = mapped_column(String(512), default="", index=True, comment="推导或确认的作品标题")
     media_type: Mapped[str] = mapped_column(String(32), default="tv", index=True, comment="tv / movie")
     tmdb_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
@@ -66,18 +88,25 @@ class TransferRepairItem(Base):
     is_special: Mapped[bool] = mapped_column(Boolean, default=False)
     special_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
-    # 目标与执行方案
+    # 目标、证据快照、预览与执行方案
     target_storage: Mapped[str | None] = mapped_column(String(64), nullable=True)
     target_path: Mapped[str | None] = mapped_column(Text, nullable=True, comment="预期落地目标路径")
+    evidence_json: Mapped[str] = mapped_column(Text, default="{}", comment="存储/目标/字幕/历史核查证据快照")
+    target_verify_json: Mapped[str] = mapped_column(Text, default="{}", comment="目标文件对比核验结果")
+    preview_json: Mapped[str] = mapped_column(Text, default="{}", comment="MP preview=true 返回与比对结果")
     plan_json: Mapped[str] = mapped_column(Text, default="{}", comment="完整执行计划 JSON")
     plan_hash: Mapped[str] = mapped_column(String(64), default="", index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128), default="", index=True)
 
     # 状态生命周期
     # discovered / diagnosing / ready / needs_confirmation / waiting_source /
-    # waiting_environment / conflict / protected / submitted / verifying / resolved / skipped
+    # waiting_environment / conflict / protected / submitted / verifying / resolved / skipped / exhausted
     status: Mapped[str] = mapped_column(String(32), default="discovered", index=True)
     resolution_code: Mapped[str | None] = mapped_column(
-        String(48), nullable=True, index=True, comment="repaired / already_present_verified / superseded_by_success / user_disposition"
+        String(48),
+        nullable=True,
+        index=True,
+        comment="repaired / already_present_verified / superseded_by_success / user_disposition",
     )
     skip_reason: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="source_missing 等")
 
@@ -86,6 +115,8 @@ class TransferRepairItem(Base):
     verification_json: Mapped[str] = mapped_column(Text, default="{}")
     retry_count: Mapped[int] = mapped_column(Integer, default=0)
     next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # 保护状态
     is_protected: Mapped[bool] = mapped_column(Boolean, default=False, index=True)

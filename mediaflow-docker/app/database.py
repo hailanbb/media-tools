@@ -70,6 +70,32 @@ def _migrate_legacy_columns(sync_conn) -> None:
             ("mapping_json", "TEXT"),
             ("last_checked_at", "DATETIME"),
         ],
+        "transfer_repair_baselines": [
+            ("mp_origin", "VARCHAR(256) DEFAULT ''"),
+            ("mp_version", "VARCHAR(64) DEFAULT ''"),
+            ("baseline_status", "VARCHAR(32) DEFAULT 'pending_confirm'"),
+            ("baseline_date", "VARCHAR(64) DEFAULT ''"),
+            ("last_scan_truncated", "BOOLEAN DEFAULT 0"),
+            ("last_scan_summary_json", "TEXT DEFAULT '{}'"),
+        ],
+        "transfer_repair_items": [
+            ("src_storage", "VARCHAR(64) DEFAULT 'local'"),
+            ("dest_storage", "VARCHAR(64) DEFAULT ''"),
+            ("failure_group_key", "VARCHAR(256) DEFAULT ''"),
+            ("mp_title", "VARCHAR(512) DEFAULT ''"),
+            ("mp_seasons", "VARCHAR(64) DEFAULT ''"),
+            ("mp_episodes", "VARCHAR(128) DEFAULT ''"),
+            ("mp_mode", "VARCHAR(32) DEFAULT ''"),
+            ("mp_date", "VARCHAR(64) DEFAULT ''"),
+            ("src_fileitem_json", "TEXT DEFAULT '{}'"),
+            ("dest_fileitem_json", "TEXT DEFAULT '{}'"),
+            ("evidence_json", "TEXT DEFAULT '{}'"),
+            ("target_verify_json", "TEXT DEFAULT '{}'"),
+            ("preview_json", "TEXT DEFAULT '{}'"),
+            ("idempotency_key", "VARCHAR(128) DEFAULT ''"),
+            ("submitted_at", "DATETIME"),
+            ("resolved_at", "DATETIME"),
+        ],
     }
     for table_name, columns in migrations.items():
         rows = sync_conn.exec_driver_sql(f"PRAGMA table_info({table_name})").fetchall()

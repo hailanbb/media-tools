@@ -133,6 +133,11 @@ class SubscriptionCd2SyncRequest(BaseModel):
     scope: str = "all"  # "all" | "tv" | "movie"
 
 
+class UnifiedSubscriptionQueryRequest(BaseModel):
+    search_resources: bool = True
+    reuse_resource_cache: bool = True
+
+
 class BatchResourceAuditRequest(BaseModel):
     media_type: str = "tv"           # "tv" | "movie"
     bucket: str = "partial_stalled"  # tv: "partial_stalled" | "never_downloaded" | "all_stalled" ; movie: "old_zombie" | "never_downloaded"
@@ -141,96 +146,81 @@ class BatchResourceAuditRequest(BaseModel):
 
 
 class BatchSubscriptionGapFillRequest(BaseModel):
-    audit_id: str
+    audit_id: str | None = "unified"
     sub_ids: list[int]
 
 
 @router.get("/subscriptions")
 async def list_subscriptions(
     media_type: str | None = None,
+    cached_only: bool = False,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """获取 MP 订阅列表并叠加 CD2 实盘库存与多维智能诊断（支持电影/电视剧分离）。"""
+    """获取订阅治理数据（支持 cached_only=True 秒读上次统一查询快照，绝不自动触发耗时远程请求）。"""
+    from app.services.subscription_governance_service import (
+        assemble_subscriptions_payload,
+        get_cached_or_empty_subscriptions_payload,
+    )
+    if cached_only:
+        return await get_cached_or_empty_subscriptions_payload(db, media_type=media_type)
+
     _check_mp_configured()
-    from app.services.subscription_cd2_index import enrich_subscriptions_with_cd2_and_cache
     mp = MoviePilotClient()
     try:
         raw_subs = await mp.list_subscriptions()
-        enriched_subs, cd2_meta = await enrich_subscriptions_with_cd2_and_cache(db, raw_subs)
-        eval_result = evaluate_subscriptions(enriched_subs)
-
-        # 组装标准化输出
-        items_out = []
-        for s, diag in zip(enriched_subs, eval_result["items"]):
-            if media_type and diag.media_type != media_type:
-                continue
-
-            items_out.append({
-                "id": diag.sub_id,
-                "name": diag.name,
-                "year": diag.year,
-                "media_type": diag.media_type,
-                "season": diag.season,
-                "total_episodes": diag.total_episodes,
-                "current_episodes": diag.completed_episodes,
-                "lack_episodes": diag.lack_episodes,
-                "state": diag.state,
-                "username": diag.username,
-                "tmdb_id": s.get("tmdbid") or s.get("tmdb_id"),
-                "poster": s.get("backdrop") or s.get("poster") or "",
-
-                # 智能清理决策字段
-                "clean_eligible": diag.clean_eligible,
-                "clean_confidence": diag.clean_confidence,
-                "clean_rule": diag.clean_rule,
-                "clean_rule_name": diag.clean_rule_name,
-                "clean_reason": diag.clean_reason,
-                "days_inactive": diag.days_inactive,
-                "created_days_ago": diag.created_days_ago,
-                "is_protected": diag.is_protected,
-                "is_short_tv": diag.is_short_tv,
-                "short_drama_reason": diag.short_drama_reason,
-                "is_douban_sync": diag.is_douban_sync,
-                "release_stage": diag.release_stage,
-                "in_library_status": diag.in_library_status,
-                "version_target_satisfied": diag.version_target_satisfied,
-
-                # v2.5.63 扩展维度：停滞分桶、异常特征、CD2 实盘真相
-                "stalled_kind": diag.stalled_kind,
-                "can_gap_fill": diag.can_gap_fill,
-                "is_low_quality": diag.is_low_quality,
-                "low_quality_flags": diag.low_quality_flags,
-                "low_quality_reasons": diag.low_quality_reasons,
-                "data_source": diag.data_source,
-                "cd2_verified": diag.cd2_verified,
-                "cd2_in_library": diag.cd2_in_library,
-                "cd2_source_episodes": diag.cd2_source_episodes,
-                "cd2_archive_episodes": diag.cd2_archive_episodes,
-                "cd2_total_episodes": diag.cd2_total_episodes,
-                "cd2_paths": diag.cd2_paths,
-                "mp_completed_episodes": diag.mp_completed_episodes,
-            })
-
-        # 统计汇总
-        overall = eval_result["overall"]
-        tv_stats = eval_result["tv"]
-        movie_stats = eval_result["movie"]
-
-        return {
-            "overall": overall,
-            "tv": tv_stats,
-            "movie": movie_stats,
-            "cd2_meta": cd2_meta,
-            # 兼容字段
-            "total": overall["total"],
-            "high_confidence_count": overall["high"],
-            "medium_confidence_count": overall["medium"],
-            "protected_count": overall["protected"],
-            "clean_eligible_total": overall["clean_eligible"],
-            "subscriptions": items_out,
-        }
+        payload = await assemble_subscriptions_payload(db, raw_subs, save_as_snapshot=True)
+        if media_type:
+            payload = dict(payload)
+            payload["subscriptions"] = [
+                x for x in payload["subscriptions"] if x.get("media_type") == media_type
+            ]
+        return payload
     finally:
         await mp.close()
+
+
+@router.post("/subscriptions/unified-query")
+async def trigger_unified_subscriptions_query(
+    body: UnifiedSubscriptionQueryRequest | None = None,
+) -> dict:
+    """启动统一三阶段订阅数据采集流水线（MoviePilot 订阅 + CD2 实盘库存 + 断更/老片站点补缺资源）。"""
+    _check_mp_configured()
+    from app.database import async_session
+    from app.services.subscription_governance_service import start_unified_subscription_query
+    search_res = True if body is None else bool(body.search_resources)
+    reuse_cache = True if body is None else bool(body.reuse_resource_cache)
+    return start_unified_subscription_query(
+        async_session,
+        search_resources=search_res,
+        reuse_resource_cache=reuse_cache,
+    )
+
+
+@router.get("/subscriptions/unified-query/status")
+async def get_unified_subscriptions_query_status(
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """查询统一三阶段订阅数据采集进度与快照版本号。"""
+    from app.services.subscription_governance_service import (
+        get_unified_query_status,
+        load_unified_snapshot,
+    )
+    await load_unified_snapshot(db)
+    return get_unified_query_status()
+
+
+@router.post("/subscriptions/unified-query/abort")
+async def abort_unified_subscriptions_query() -> dict:
+    """停止进行中的统一查询（保留已采集的 MoviePilot、CD2 与站点资源数据）。"""
+    from app.services.subscription_governance_service import abort_unified_subscription_query
+    return abort_unified_subscription_query()
+
+
+@router.get("/subscriptions/batch-action/status")
+async def get_subscription_batch_action_status() -> dict:
+    """查询当前批量操作（批量取消订阅 / 批量补缺下载 / 批量变更状态）的实时进度。"""
+    from app.services.subscription_governance_service import get_batch_action_status
+    return get_batch_action_status()
 
 
 @router.post("/subscriptions/sync-cd2")
@@ -323,6 +313,8 @@ async def update_single_subscription_status(
         )
         db.add(op_log)
         await db.commit()
+        from app.services.subscription_governance_service import mutate_unified_snapshot_on_state_change
+        await mutate_unified_snapshot_on_state_change(db, [sub_id], body.state)
         return StatusResponse(ok=True, message=f"已成功将订阅 #{sub_id} 变更为 {state_name}")
     except Exception as exc:
         return StatusResponse(ok=False, message=f"变更订阅状态失败: {exc}")
@@ -342,20 +334,51 @@ async def batch_update_subscription_status(
     _check_mp_configured()
     mp = MoviePilotClient()
     from app.models.operation import OperationLog
+    from app.services.subscription_governance_service import (
+        mutate_unified_snapshot_on_state_change,
+        update_batch_action_progress,
+    )
     success_count = 0
     fail_count = 0
     errors: list[str] = []
+    total_count = len(body.sub_ids)
+    state_name = "暂停观察 (S)" if body.state == "S" else ("活跃追更 (R)" if body.state == "R" else f"待定 ({body.state})")
+
+    update_batch_action_progress(
+        action_type="status_update",
+        action_label=f"批量设为{state_name}",
+        status="running",
+        total=total_count,
+        processed=0,
+        success_count=0,
+        fail_count=0,
+        progress_pct=5,
+        current_title="",
+        message=f"正在批量更新 {total_count} 项订阅状态为 {state_name}...",
+    )
 
     try:
-        for sid in body.sub_ids:
+        for idx, sid in enumerate(body.sub_ids):
+            update_batch_action_progress(
+                processed=idx,
+                current_title=f"订阅 #{sid}",
+                progress_pct=8 + int(88 * idx / max(1, total_count)),
+                message=f"正在变更状态 ({idx + 1}/{total_count})：订阅 #{sid}...",
+            )
             try:
                 await mp.update_subscription_status(sid, body.state)
                 success_count += 1
             except Exception as e:
                 fail_count += 1
                 errors.append(f"订阅 #{sid}: {e}")
+            update_batch_action_progress(
+                processed=idx + 1,
+                success_count=success_count,
+                fail_count=fail_count,
+                progress_pct=10 + int(88 * (idx + 1) / max(1, total_count)),
+                message=f"已变更状态 ({idx + 1}/{total_count}) · 成功 {success_count} / 失败 {fail_count}",
+            )
 
-        state_name = "暂停观察 (S)" if body.state == "S" else ("活跃追更 (R)" if body.state == "R" else f"待定 ({body.state})")
         if success_count > 0:
             op_log = OperationLog(
                 action="batch_update_subscription_status",
@@ -364,10 +387,19 @@ async def batch_update_subscription_status(
             )
             db.add(op_log)
             await db.commit()
+            await mutate_unified_snapshot_on_state_change(db, body.sub_ids, body.state)
 
         msg = f"批量变更状态完成：成功 {success_count} 项设置为 {state_name}"
         if fail_count > 0:
             msg += f"，失败 {fail_count} 项"
+        update_batch_action_progress(
+            status="completed",
+            processed=total_count,
+            success_count=success_count,
+            fail_count=fail_count,
+            progress_pct=100,
+            message=msg,
+        )
         return StatusResponse(ok=success_count > 0, message=msg)
     finally:
         await mp.close()
@@ -593,20 +625,41 @@ async def batch_delete_subscriptions(
 
     _check_mp_configured()
     from app.models.operation import OperationLog
+    from app.services.subscription_governance_service import (
+        mutate_unified_snapshot_on_delete,
+        update_batch_action_progress,
+    )
     mp = MoviePilotClient()
     success_count = 0
     fail_count = 0
     errors: list[str] = []
+    total_count = len(body.sub_ids)
+
+    update_batch_action_progress(
+        action_type="unsubscribe",
+        action_label="批量取消订阅",
+        status="running",
+        total=total_count,
+        processed=0,
+        success_count=0,
+        fail_count=0,
+        progress_pct=5,
+        current_title="",
+        message=f"正在准备批量取消 {total_count} 项订阅，正在同步校验订阅状态...",
+    )
 
     try:
-        # 获取当前订阅列表建立 id -> name 映射
+        # 一次性获取当前订阅列表建立 id -> sub_dict 映射（避免在循环中重复请求 N 次 list_subscriptions）
         sub_name_map: dict[int, str] = {}
+        sub_obj_map: dict[int, dict] = {}
         try:
             current_subs = await mp.list_subscriptions()
             for cs in current_subs:
-                cs_id = cs.get("id")
+                cs_id = cs.get("id") or cs.get("sub_id")
                 if cs_id is not None:
-                    sub_name_map[int(cs_id)] = cs.get("name") or cs.get("title") or ""
+                    cid = int(cs_id)
+                    sub_obj_map[cid] = cs
+                    sub_name_map[cid] = cs.get("name") or cs.get("title") or ""
         except Exception as map_err:
             log.warning("获取订阅列表映射失败: %s", map_err)
 
@@ -615,10 +668,16 @@ async def batch_delete_subscriptions(
                 sub_name_map.get(sid)
                 or (body.titles[idx] if body.titles and idx < len(body.titles) else f"订阅#{sid}")
             )
+            update_batch_action_progress(
+                processed=idx,
+                current_title=title,
+                progress_pct=10 + int(86 * idx / max(1, total_count)),
+                message=f"正在取消订阅 ({idx + 1}/{total_count})：《{title}》...",
+            )
             mp_deleted = False
             try:
                 from app.services.subscription_service import subscription
-                current_sub = await subscription(mp, sid)
+                current_sub = sub_obj_map.get(int(sid)) if sub_obj_map else await subscription(mp, sid)
                 if not current_sub or (not getattr(body, "force", False) and diagnose_subscription(current_sub).is_protected):
                     raise ValueError("订阅已不存在或处于保护状态，请重新核查")
                 await mp.delete_subscription(sid)
@@ -632,32 +691,53 @@ async def batch_delete_subscriptions(
                 success_count += 1
             except Exception as e:
                 if mp_deleted:
-                    # MP 已成功退订，但本地数据库审计写入异常，避免用户误判未完成而重复提交
                     success_count += 1
                     errors.append(f"退订 {title} 在 MP 已生效，但本地审计日志写入失败: {e}")
                 else:
                     fail_count += 1
                     errors.append(f"退订 {title} 失败: {e}")
 
+            update_batch_action_progress(
+                processed=idx + 1,
+                success_count=success_count,
+                fail_count=fail_count,
+                progress_pct=12 + int(86 * (idx + 1) / max(1, total_count)),
+                message=f"已取消订阅 ({idx + 1}/{total_count})：《{title}》 (成功 {success_count} · 失败 {fail_count})",
+            )
+
         if success_count > 0:
             await db.commit()
+            await mutate_unified_snapshot_on_delete(db, body.sub_ids)
 
         msg = f"批量清理完成：成功退订 {success_count} 项"
         if fail_count > 0:
             msg += f"，失败 {fail_count} 项"
 
+        update_batch_action_progress(
+            status="completed",
+            processed=total_count,
+            success_count=success_count,
+            fail_count=fail_count,
+            progress_pct=100,
+            message=msg,
+        )
         return StatusResponse(ok=success_count > 0, message=msg)
     finally:
         await mp.close()
 
 
 @router.delete("/subscriptions/{sub_id}", response_model=StatusResponse)
-async def delete_subscription(sub_id: int) -> StatusResponse:
+async def delete_subscription(
+    sub_id: int,
+    db: AsyncSession = Depends(get_db),
+) -> StatusResponse:
     """取消指定订阅。"""
     _check_mp_configured()
     mp = MoviePilotClient()
     try:
         await mp.delete_subscription(sub_id)
+        from app.services.subscription_governance_service import mutate_unified_snapshot_on_delete
+        await mutate_unified_snapshot_on_delete(db, [sub_id])
         return StatusResponse(ok=True, message=f"订阅 {sub_id} 已取消")
     except Exception as e:
         return StatusResponse(ok=False, message=str(e))
@@ -692,18 +772,26 @@ class TransferRepairScanRequest(BaseModel):
     page_size: int = 50
 
 
+class TransferRepairBaselineResetRequest(BaseModel):
+    clear_existing_items: bool = True
+    custom_baseline_id: int | None = None
+
+
 class TransferRepairExecuteRequest(BaseModel):
     item_ids: list[str]
+    skip_preview: bool = False
 
 
 class TransferRepairPlanUpdateRequest(BaseModel):
     title: str | None = None
     media_type: str | None = None
+    tmdb_id: int | None = None
     season_number: int | None = None
     episode_numbers: list[int] | None = None
     part: str | None = None
     is_special: bool | None = None
     special_type: str | None = None
+    special_handling: str | None = "standard"
     remember_scope: str | None = None
     numbering_mode: str | None = "standard"
     episode_offset: int | None = 0
@@ -735,7 +823,7 @@ async def scan_transfer_repair(
     req: TransferRepairScanRequest | None = None,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """启动 MoviePilot 整理失败扫描并执行智能诊断 (R01, R02, R29)。"""
+    """启动 MoviePilot 整理失败扫描并执行真实存储核查与智能诊断 (R01, R02, R29)。"""
     from app.services.transfer_repair_service import scan_new_failures
     _check_mp_configured()
     mp = MoviePilotClient()
@@ -747,11 +835,31 @@ async def scan_transfer_repair(
         await mp.close()
 
 
+@router.post("/transfer-repair/baseline/reset")
+async def reset_transfer_repair_baseline_endpoint(
+    req: TransferRepairBaselineResetRequest | None = None,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """重新锚定接管基线至 MoviePilot 最新失败 ID（可同步清理误导入旧记录）。"""
+    from app.services.transfer_repair_service import reset_baseline
+    _check_mp_configured()
+    mp = MoviePilotClient()
+    try:
+        clear_items = req.clear_existing_items if req else True
+        custom_id = req.custom_baseline_id if req else None
+        res = await reset_baseline(db, mp, clear_existing_items=clear_items, custom_baseline_id=custom_id)
+        if not res.get("ok"):
+            raise HTTPException(502, res.get("message") or "基线重设失败")
+        return res
+    finally:
+        await mp.close()
+
+
 @router.get("/transfer-repair/summary")
 async def get_transfer_repair_summary_endpoint(
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """获取整理修复仪表盘统计数据 (R01, R29)。"""
+    """获取整理修复仪表盘统计数据与基线健康度 (R01, R29)。"""
     from app.services.transfer_repair_service import get_repair_summary
     mp = MoviePilotClient() if get_settings().mp_url else None
     try:
@@ -766,13 +874,22 @@ async def list_transfer_repair_items(
     tab: str = "pending",
     category: str | None = None,
     keyword: str | None = None,
-    limit: int = 50,
+    group_by: str = "work",
+    limit: int = 100,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """获取整理修复项列表。"""
+    """获取整理修复项列表与作品/故障组聚合视图。"""
     from app.services.transfer_repair_service import get_repair_items
-    return await get_repair_items(db, tab=tab, category=category, keyword=keyword, limit=limit, offset=offset)
+    return await get_repair_items(
+        db,
+        tab=tab,
+        category=category,
+        keyword=keyword,
+        group_by=group_by,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/transfer-repair/items/{item_id}")
@@ -780,7 +897,7 @@ async def get_transfer_repair_item_detail(
     item_id: str,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """获取单个修复项详情、证据快照与计划预览。"""
+    """获取单个修复项完整详情、原识别与新识别对比、真实证据快照与核验进度。"""
     from app.models.transfer_repair import TransferRepairItem
     item = await db.get(TransferRepairItem, item_id)
     if not item:
@@ -790,6 +907,15 @@ async def get_transfer_repair_item_detail(
         "source_path": item.source_path,
         "file_basename": item.file_basename,
         "file_size": item.file_size,
+        "src_storage": item.src_storage or item.storage or "local",
+        "dest_storage": item.dest_storage or item.target_storage or "",
+        "latest_history_id": item.latest_history_id,
+        "history_ids": json.loads(item.mp_history_ids_json or "[]"),
+        "mp_title": item.mp_title,
+        "mp_seasons": item.mp_seasons,
+        "mp_episodes": item.mp_episodes,
+        "mp_mode": item.mp_mode,
+        "mp_date": item.mp_date,
         "title": item.title,
         "media_type": item.media_type,
         "tmdb_id": item.tmdb_id,
@@ -798,19 +924,76 @@ async def get_transfer_repair_item_detail(
         "part": item.part,
         "is_special": item.is_special,
         "special_type": item.special_type,
+        "target_path": item.target_path,
         "status": item.status,
         "error_category": item.error_category,
         "main_block_reason": item.main_block_reason,
+        "failure_group_key": item.failure_group_key,
         "raw_error": item.raw_error,
         "resolution_code": item.resolution_code,
         "skip_reason": item.skip_reason,
         "plan": json.loads(item.plan_json or "{}"),
         "plan_hash": item.plan_hash,
+        "evidence": json.loads(item.evidence_json or "{}"),
+        "target_verify": json.loads(item.target_verify_json or "{}"),
+        "preview": json.loads(item.preview_json or "{}"),
+        "last_execution": json.loads(item.last_execution_json or "{}"),
+        "verification": json.loads(item.verification_json or "{}"),
         "is_protected": item.is_protected,
         "retry_count": item.retry_count,
+        "submitted_at": item.submitted_at.isoformat() if item.submitted_at else None,
+        "resolved_at": item.resolved_at.isoformat() if item.resolved_at else None,
         "created_at": item.created_at.isoformat() if item.created_at else None,
         "updated_at": item.updated_at.isoformat() if item.updated_at else None,
     }
+
+
+@router.post("/transfer-repair/items/{item_id}/recheck")
+async def recheck_transfer_repair_item_endpoint(
+    item_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """对单条修复项执行只读重诊断（不等同重新整理，第 10.3 节）。"""
+    from app.services.transfer_repair_service import recheck_single_item
+    _check_mp_configured()
+    mp = MoviePilotClient()
+    try:
+        res = await recheck_single_item(db, mp, item_id)
+        if not res.get("ok"):
+            raise HTTPException(400, res.get("message"))
+        return res
+    finally:
+        await mp.close()
+
+
+@router.post("/transfer-repair/items/{item_id}/preview")
+async def preview_transfer_repair_item_endpoint(
+    item_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """实时调用 MoviePilot preview=true 生成逐文件差异预览（R17）。"""
+    from app.services.transfer_repair_service import preview_repair_item
+    _check_mp_configured()
+    mp = MoviePilotClient()
+    try:
+        return await preview_repair_item(db, mp, item_id)
+    finally:
+        await mp.close()
+
+
+@router.post("/transfer-repair/items/{item_id}/verify")
+async def verify_transfer_repair_item_endpoint(
+    item_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """手动触发已提交任务的落地核验（检查 MP 历史与目标存储实物，第 7.3 节）。"""
+    from app.services.transfer_repair_service import verify_repair_item
+    _check_mp_configured()
+    mp = MoviePilotClient()
+    try:
+        return await verify_repair_item(db, mp, item_id)
+    finally:
+        await mp.close()
 
 
 @router.post("/transfer-repair/items/{item_id}/plan")
@@ -832,12 +1015,12 @@ async def execute_transfer_repairs(
     req: TransferRepairExecuteRequest,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """批量提交明确计划执行整理并验证 (R03, R16)。"""
+    """批量提交明确计划执行预览校验、整理并进入落地核验 (R03, R16, R17)。"""
     from app.services.transfer_repair_service import execute_repair_plans
     _check_mp_configured()
     mp = MoviePilotClient()
     try:
-        return await execute_repair_plans(db, mp, req.item_ids)
+        return await execute_repair_plans(db, mp, req.item_ids, skip_preview=req.skip_preview)
     finally:
         await mp.close()
 
@@ -857,7 +1040,8 @@ async def toggle_item_protect(
         item.status = "protected"
         item.main_block_reason = "用户已手动设置保护，暂停自动修复"
     else:
-        item.status = "ready" if item.plan_hash else "diagnosing"
+        plan = json.loads(item.plan_json or "{}")
+        item.status = "ready" if plan.get("safe_to_execute") else "diagnosing"
     item.updated_at = datetime.now(timezone.utc)
     await db.commit()
     return {"ok": True, "is_protected": item.is_protected, "status": item.status}
@@ -867,12 +1051,20 @@ async def toggle_item_protect(
 async def get_transfer_repair_settings(
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """获取媒体整理自动化设置与基线。"""
+    """获取媒体整理自动化设置与基线（始终携带 mp_client 防止 0 基线固化）。"""
     from app.services.transfer_repair_service import get_or_create_baseline
-    baseline = await get_or_create_baseline(db)
+    mp = MoviePilotClient() if get_settings().mp_url else None
+    try:
+        baseline = await get_or_create_baseline(db, mp)
+    finally:
+        if mp:
+            await mp.close()
     return {
         "instance_id": baseline.instance_id,
+        "baseline_status": baseline.baseline_status,
         "baseline_history_id": baseline.baseline_history_id,
+        "baseline_date": baseline.baseline_date,
+        "mp_version": baseline.mp_version,
         "takeover_at": baseline.takeover_at.isoformat() if baseline.takeover_at else None,
         "is_enabled": baseline.is_enabled,
         "auto_repair_enabled": baseline.auto_repair_enabled,
@@ -890,19 +1082,24 @@ async def update_transfer_repair_settings(
 ) -> dict[str, Any]:
     """更新媒体整理自动化设置。"""
     from app.services.transfer_repair_service import get_or_create_baseline
-    baseline = await get_or_create_baseline(db)
+    mp = MoviePilotClient() if get_settings().mp_url else None
+    try:
+        baseline = await get_or_create_baseline(db, mp)
+    finally:
+        if mp:
+            await mp.close()
     if req.is_enabled is not None:
         baseline.is_enabled = req.is_enabled
     if req.auto_repair_enabled is not None:
         baseline.auto_repair_enabled = req.auto_repair_enabled
     if req.max_concurrency is not None:
-        baseline.max_concurrency = req.max_concurrency
+        baseline.max_concurrency = max(1, min(int(req.max_concurrency), 5))
     if req.batch_quota is not None:
-        baseline.batch_quota = req.batch_quota
+        baseline.batch_quota = max(1, min(int(req.batch_quota), 50))
     if req.retry_budget is not None:
-        baseline.retry_budget = req.retry_budget
+        baseline.retry_budget = max(1, min(int(req.retry_budget), 5))
     if req.scan_interval_minutes is not None:
-        baseline.scan_interval_minutes = req.scan_interval_minutes
+        baseline.scan_interval_minutes = max(1, min(int(req.scan_interval_minutes), 1440))
     baseline.updated_at = datetime.now(timezone.utc)
     await db.commit()
     return {"ok": True, "message": "设置已保存"}
