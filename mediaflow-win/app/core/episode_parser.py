@@ -130,6 +130,12 @@ _EDIT_VERSION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("vip", re.compile(r"(?:会员(?:版|专享|加长)?|专享(?:版)?|(?<![a-zA-Z])(?:SVIP|VIP)(?![a-zA-Z]))", re.IGNORECASE)),
     ("cut", re.compile(r"(?:删减(?:版)?|精简(?:版)?|精华(?:版)?|速看(?:版)?)", re.IGNORECASE)),
 ]
+_STANDALONE_EXTRA_PREFIX_RE = re.compile(
+    r"^[\s._\-\(\[\u3010]*(?:Clip|Extra|Preview|Cut|Tape|Vlog|Diary|Specials?|Bonus|Trailer|Teaser|"
+    r"Making[._\s-]of|Behind[._\s-]the[._\s-]Scenes|SP\d*|OVA\d*|OAD\d*|"
+    r"花絮|彩蛋|特辑|番外|特别篇|先导片?|预告片?|纯享版?|加更版?|幕后|切片|母带版?)[\s._\-\)\]\u3011]*$",
+    re.IGNORECASE,
+)
 
 
 def detect_segment_part(filename: str) -> tuple[int | None, str]:
@@ -201,13 +207,25 @@ def parse_episode(filename: str, filepath: str = "", file_size: int = 0) -> Pars
         result.is_special = True
 
     classification_name = filename
-    episode_tag = re.search(r"[Ss]\d{1,2}[Ee]\d+", filename)
-    if episode_tag and " - " in filename[:episode_tag.start()]:
-        classification_name = filename[episode_tag.start():]
-        title_tokens = re.findall(r"\w+", filename[:episode_tag.start()].rstrip(" -._"))
-        if title_tokens:
-            title_pattern = r"[\W_]*".join(re.escape(t) for t in title_tokens)
-            classification_name = re.sub(title_pattern, "", classification_name, flags=re.I)
+    se_matches = list(re.finditer(r"[Ss]\d{1,2}[Ee]\d+", filename))
+    if se_matches:
+        prefix_before_first = filename[:se_matches[0].start()]
+        if not (len(se_matches) == 1 and _STANDALONE_EXTRA_PREFIX_RE.match(prefix_before_first)):
+            last_se = se_matches[-1]
+            classification_name = filename[last_se.start():]
+            if len(se_matches) == 1 and " - " in filename[:last_se.start()]:
+                title_tokens = re.findall(r"\w+", filename[:last_se.start()].rstrip(" -._"))
+                if title_tokens:
+                    title_pattern = r"[\W_]*".join(re.escape(t) for t in title_tokens)
+                    classification_name = re.sub(title_pattern, "", classification_name, flags=re.I)
+    else:
+        season_only_matches = list(
+            re.finditer(r"(?:^|[\s._\-\(\[])([Ss]\d{1,2})(?:$|[\s._\-\)\]])", filename)
+        )
+        if season_only_matches:
+            prefix_before_season = filename[:season_only_matches[0].start(1)]
+            if not _STANDALONE_EXTRA_PREFIX_RE.match(prefix_before_season):
+                classification_name = filename[season_only_matches[-1].start(1):]
 
     # 剥离扩展名避免误匹配
     cls_stem = re.sub(r"\.[^.]+$", "", classification_name)

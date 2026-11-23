@@ -358,6 +358,37 @@ class TestV2563SubscriptionGovernance(unittest.IsolatedAsyncioTestCase):
             mp_inst.close = AsyncMock()
 
             async with async_session() as db:
+                # 在严格 CD2-only 策略下，先行写入测试集 CD2 实盘快照
+                await save_cd2_snapshot(
+                    db,
+                    {
+                        "version": 1,
+                        "synced_at": "2026-11-22 12:00:00",
+                        "tv_scanned_ok": True,
+                        "movie_scanned_ok": True,
+                        "tv_by_key": {
+                            "90001:1": {
+                                "season": 1,
+                                "source_count": 2,
+                                "archive_count": 0,
+                                "total_count": 2,
+                                "merged_episodes": [1, 2],
+                                "paths": ["/nas/电视剧/可补停滞剧/Season 1"],
+                            },
+                            "90002:1": {
+                                "season": 1,
+                                "source_count": 2,
+                                "archive_count": 0,
+                                "total_count": 2,
+                                "merged_episodes": [1, 2],
+                                "paths": ["/nas/电视剧/真无源停滞剧/Season 1"],
+                            },
+                        },
+                        "tv_by_title": {},
+                        "movie_by_tmdb": {},
+                        "movie_by_title": {},
+                    },
+                )
                 # 先启动梳理
                 started = await start_batch_resource_audit(
                     db, async_session, media_type="tv", bucket="partial_stalled", limit=10
@@ -430,8 +461,34 @@ class TestV2563SubscriptionGovernance(unittest.IsolatedAsyncioTestCase):
                 ]
             return []
 
+        async def fake_build_cd2_inventory(db_session_factory, **kwargs):
+            async with db_session_factory() as db:
+                await save_cd2_snapshot(
+                    db,
+                    {
+                        "version": 1,
+                        "synced_at": "2026-11-23 10:00:00",
+                        "tv_scanned_ok": True,
+                        "movie_scanned_ok": True,
+                        "tv_by_key": {
+                            "88001:1": {
+                                "season": 1,
+                                "source_count": 2,
+                                "archive_count": 0,
+                                "total_count": 2,
+                                "merged_episodes": [1, 2],
+                                "paths": ["/nas/电视剧/统一查询可补剧/Season 1"],
+                            }
+                        },
+                        "tv_by_title": {},
+                        "movie_by_tmdb": {},
+                        "movie_by_title": {},
+                    },
+                )
+            return {"ok": True}
+
         with patch("app.services.subscription_governance_service.MoviePilotClient") as MockMP, \
-             patch("app.services.subscription_governance_service.build_cd2_subscription_inventory", new=AsyncMock(return_value={})), \
+             patch("app.services.subscription_governance_service.build_cd2_subscription_inventory", side_effect=fake_build_cd2_inventory), \
              patch("app.services.subscription_governance_service.resolve_category_gap_fill_sites", new=AsyncMock(return_value={
                  "ready": True, "sites_param": "1", "active_ordered_ids": [1], "site_priority_map": {1: 0}
              })):
@@ -458,6 +515,8 @@ class TestV2563SubscriptionGovernance(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(cached["tv"]["partial_stalled_downloadable"], 1)
                 item = cached["subscriptions"][0]
                 self.assertEqual(item["resource_status"], "downloadable")
+                self.assertTrue(item["cd2_verified"])
+                self.assertEqual(item["data_source"], "cd2")
 
                 # 直接从统一查询缓存执行一键补缺下载（无需额外梳理会话）并验证批量进度状态
                 push_res = await execute_batch_subscription_gap_fill(db, audit_id="unified", sub_ids=[8001])
@@ -467,6 +526,435 @@ class TestV2563SubscriptionGovernance(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(ba_st["action_type"], "gap_fill_push")
                 self.assertEqual(ba_st["status"], "completed")
                 self.assertEqual(ba_st["progress_pct"], 100)
+
+    # ── v2.5.67 专项回归：修复 5 大用户实测问题 ─────────────────────────
+    async def test_08_cd2_scan_season_episodes_parses_real_filenames(self):
+        import asyncio
+        from types import SimpleNamespace
+        from app.services.subscription_cd2_index import _scan_season_episodes
+
+        show_dir = "/src/电视剧/日本剧集/雾中之犬 (2025) [tmdbid=294254]"
+        files_s1 = [
+            {"name": "season.nfo", "path": f"{show_dir}/Season 1/season.nfo", "size": 100, "isDirectory": False},
+            {"name": "雾中之犬 - S01E01 - FOGDOG.S01E01.2025.1080p.mkv", "path": f"{show_dir}/Season 1/e1.mkv", "size": 500_000_000, "isDirectory": False},
+            {"name": "朝雪录 - S01E15 - 朝雪录.Coroner's.Diary.S01E15.2025.1080p.mkv", "path": f"{show_dir}/Season 1/e15.mkv", "size": 600_000_000, "isDirectory": False},
+            {"name": "Show.S01E20.4k.Tape.01.2160p.mp4", "path": f"{show_dir}/Season 1/tape.mp4", "size": 100_000_000, "isDirectory": False},
+            {"name": "Clip.S01E04.mkv", "path": f"{show_dir}/Season 1/clip.mkv", "size": 50_000_000, "isDirectory": False},
+        ]
+        fake_cd2 = AsyncMock()
+        async def list_files(p, **kw):
+            if p == show_dir:
+                return [{"name": "Season 1", "path": f"{show_dir}/Season 1", "isDirectory": True}]
+            if p == f"{show_dir}/Season 1":
+                return files_s1
+            return []
+        fake_cd2.list_files.side_effect = list_files
+
+        eps, paths, sizes = await _scan_season_episodes(fake_cd2, show_dir, 1, asyncio.Semaphore(2))
+        self.assertEqual(sorted(eps), [1, 15])
+        self.assertEqual(paths, [f"{show_dir}/Season 1"])
+        self.assertEqual(len(sizes), 2)
+
+    def test_09_movie_qiaofu6_p_state_never_marked_completed(self):
+        # 案例：《潜伏6》(2026) TMDB 1291595，MP 状态为 P，但 CD2 中没有
+        base = {
+            "id": 7087, "name": "潜伏6", "year": "2026", "type": "电影",
+            "tmdbid": 1291595, "state": "P", "username": "豆瓣榜单",
+            "date": "2026-08-23 00:00:00", "poster": "http://img/7087.jpg",
+        }
+        # 1. strict_cd2_only=True & cd2_verified=False（CD2 尚未核验）
+        d1 = diagnose_movie_subscription({**base, "strict_cd2_only": True, "cd2_verified": False}, now=self.now)
+        self.assertNotEqual(d1.clean_rule, "completed")
+        self.assertEqual(d1.clean_rule, "upcoming_protect")
+        self.assertFalse(d1.clean_eligible)
+
+        # 2. cd2_verified=True & cd2_in_library=False（CD2 已核验不存在）
+        d2 = diagnose_movie_subscription({**base, "strict_cd2_only": True, "cd2_verified": True, "cd2_in_library": False}, now=self.now)
+        self.assertNotEqual(d2.clean_rule, "completed")
+        self.assertEqual(d2.clean_rule, "upcoming_protect")
+
+        # 3. 仅当 cd2_verified=True & cd2_in_library=True 时才允许进入 completed
+        d3 = diagnose_movie_subscription(
+            {**base, "strict_cd2_only": True, "cd2_verified": True, "cd2_in_library": True, "cd2_paths": ["/nas.finish/电影/外语电影/潜伏6 (2026) [tmdbid=1291595]"]},
+            now=self.now,
+        )
+        self.assertEqual(d3.clean_rule, "completed")
+        self.assertTrue(d3.clean_eligible)
+
+    def test_10_episode_parser_title_before_diary_and_gap_fill_selection(self):
+        from app.core.episode_parser import parse_episode
+        from app.services.download_service import _evaluate_raw_candidates
+
+        # 1. 多词剧名中的 Before / Diary 绝不能被误判为 is_extra
+        p1 = parse_episode("10 Things I Want to Do Before I Turn 40 S01E11 1080p friDay WEB-DL AAC2.0 H.264-")
+        self.assertFalse(p1.is_extra)
+        self.assertEqual(p1.season_number, 1)
+        self.assertEqual(p1.episode_numbers, [11])
+
+        p2 = parse_episode("朝雪录 - S01E15 - 朝雪录.Coroner's.Diary.S01E15.2025.1080p.WEB-DL.H264.AAC-HHWEB.mkv")
+        self.assertFalse(p2.is_extra)
+        self.assertEqual(p2.episode_numbers, [15])
+
+        # 2. 真正的独立衍生/花絮必须继续保持 is_extra=True
+        for extra_name in (
+            "Clip.S01E04.mkv",
+            "Sister.Take.Over.S01E20.4k.Tape.01.2160p.WEB-DL.H265.AAC-OurTV.mp4",
+            "Show.S01E11.加更版.mp4",
+            "Show.S01.特辑.花絮.mkv",
+        ):
+            self.assertTrue(parse_episode(extra_name).is_extra, f"应继续判定为花絮: {extra_name}")
+
+        # 3. 验证 TMDB 292544 缺 E11/E12 时，站点候选能通过单集选种验证
+        raw_cands = [
+            {
+                "media_info": {"tmdb_id": 292544, "title": "40岁前想要达成的10件事"},
+                "meta_info": {"begin_season": 1, "season_list": [1], "episode_list": [11]},
+                "torrent_info": {"title": "10 Things I Want to Do Before I Turn 40 S01E11 1080p friDay WEB-DL", "site": 14, "site_name": "馒头", "seeders": 5, "size": 900 * 1024**2},
+            },
+            {
+                "media_info": {"tmdb_id": 292544, "title": "40岁前想要达成的10件事"},
+                "meta_info": {"begin_season": 1, "season_list": [1], "episode_list": [12]},
+                "torrent_info": {"title": "10 Things I Want to Do Before I Turn 40 S01E12 1080p friDay WEB-DL", "site": 14, "site_name": "馒头", "seeders": 6, "size": 910 * 1024**2},
+            },
+        ]
+        st_evals, _, rej = _evaluate_raw_candidates(
+            raw_cands, tmdb_id_num=292544, season_num=1, total_eps=12, missing_eps=[11, 12],
+            by_period=False, parts_mode=False, part_episode_mapping=None, keyword_fallback=False,
+            min_seeders=2, min_resolution="", require_chinese=False, allowed_site_ids={14}, site_priority_map={14: 1},
+        )
+        self.assertEqual(len(st_evals), 2, f"unexpected rejections: {rej}")
+        self.assertEqual(sorted(ep for ev in st_evals for ep in ev.covered_missing), [11, 12])
+
+    async def test_11_strict_cd2_truth_no_mp_or_stale_record_fallback(self):
+        from app.models.metadata_cache import MetadataCache
+        from app.models.season import SeasonRecord
+
+        # strict_cd2_only=True 且 cd2_verified=False 时，绝不回退 MP 的 completed_episode
+        d_pending = diagnose_tv_subscription(
+            {
+                "id": 9101, "name": "未核验剧", "type": "电视剧", "season": 1,
+                "total_episode": 12, "completed_episode": 12, "lack_episode": 0,
+                "state": "P", "username": "豆瓣榜单", "poster": "http://ok",
+                "strict_cd2_only": True, "cd2_verified": False,
+            },
+            now=self.now,
+        )
+        self.assertEqual(d_pending.data_source, "cd2_pending")
+        self.assertEqual(d_pending.completed_episodes, 0)
+        self.assertEqual(d_pending.clean_rule_name, "待 CD2 实盘核验")
+        self.assertFalse(d_pending.clean_eligible)
+
+        # 验证 TMDB 1 集占位符 (<2 或 < cd2_total_episodes) 不会误覆盖 MP 99 占位符为 completed
+        for sid, title, cd2_cnt in [
+            (4617, "落尽霜花满地伤", 75),
+            (7597, "食贫道充电纪录片", 1),
+        ]:
+            d_stub = diagnose_tv_subscription(
+                {
+                    "id": sid, "name": title, "type": "电视剧", "season": 1,
+                    "total_episode": 99, "completed_episode": cd2_cnt, "lack_episode": 99 - cd2_cnt,
+                    "state": "R", "username": "豆瓣榜单", "poster": "http://ok",
+                    "cd2_verified": True, "cd2_total_episodes": cd2_cnt,
+                    "tmdb_season_episodes": 1, "season_finished": False,
+                    "date": "2025-01-01", "last_update": "2026-11-22",
+                },
+                now=self.now,
+            )
+            self.assertEqual(d_stub.total_episodes, 99)
+            self.assertNotEqual(d_stub.clean_rule, "completed")
+
+        # tv_scanned_ok=True 且 CD2 快照中无某剧 -> 绝不回退历史 SeasonRecord；同时验证 TMDB 99 集纠偏缓存
+        async with async_session() as db:
+            db.add(
+                SeasonRecord(
+                    id="stale-rec-1", task_id="old-task", show_name="旧记录剧", show_path="/src/旧记录剧",
+                    tmdb_id="77777", season_number=1, season_path="/src/旧记录剧/Season 1",
+                    total_episodes=10, local_episode_count=10, recognized_episodes_json="[1,2,3,4,5,6,7,8,9,10]",
+                    status="archive_ready",
+                )
+            )
+            db.add(
+                MetadataCache(
+                    cache_key="tmdb_tv_season:294254:1",
+                    source="tmdb_tv_season",
+                    media_id="294254",
+                    season_number=1,
+                    payload_json='{"tmdb_id": 294254, "season_number": 1, "episode_count": 10, "aired_count": 10, "season_finished": true}',
+                    verified=True,
+                    status="ok",
+                )
+            )
+            db.add(
+                MetadataCache(
+                    cache_key="tmdb_tv_season:313356:1",
+                    source="tmdb_tv_season",
+                    media_id="313356",
+                    season_number=1,
+                    payload_json='{"tmdb_id": 313356, "season_number": 1, "episode_count": 1, "aired_count": 1, "season_finished": true}',
+                    verified=True,
+                    status="ok",
+                )
+            )
+            db.add(
+                MetadataCache(
+                    cache_key="tmdb_tv_season:284720:12",
+                    source="tmdb_tv_season",
+                    media_id="284720",
+                    season_number=12,
+                    payload_json='{"tmdb_id": 284720, "season_number": 12, "episode_count": 1, "aired_count": 1, "season_finished": true}',
+                    verified=True,
+                    status="ok",
+                )
+            )
+            await db.commit()
+
+            await save_cd2_snapshot(
+                db,
+                {
+                    "version": 1, "synced_at": "2026-11-23 10:00:00",
+                    "tv_scanned_ok": True, "movie_scanned_ok": True,
+                    "tv_by_key": {
+                        "294254:1": {
+                            "season": 1, "source_count": 0, "archive_count": 10, "total_count": 10,
+                            "merged_episodes": list(range(1, 11)),
+                            "paths": ["/nas.finish/电视剧/日本剧集/雾中之犬 (2025) [tmdbid=294254]/Season 1"],
+                        },
+                        "313356:1": {
+                            "season": 1, "source_count": 75, "archive_count": 0, "total_count": 75,
+                            "merged_episodes": list(range(1, 76)),
+                            "paths": ["/nas/电视剧/短剧/落尽霜花满地伤 [tmdbid=313356]/Season 1"],
+                        },
+                        "284720:12": {
+                            "season": 12, "source_count": 1, "archive_count": 0, "total_count": 1,
+                            "merged_episodes": [1],
+                            "paths": ["/nas/电视剧/纪录片/食贫道 [tmdbid=284720]/Season 12"],
+                        },
+                    },
+                    "tv_by_title": {}, "movie_by_tmdb": {}, "movie_by_title": {},
+                },
+            )
+            subs = [
+                {"id": 101, "name": "旧记录剧", "type": "电视剧", "season": 1, "tmdbid": 77777, "total_episode": 10, "completed_episode": 10, "lack_episode": 0, "state": "P"},
+                {"id": 2113, "name": "雾中之犬", "year": "2025", "type": "电视剧", "season": 1, "tmdbid": 294254, "total_episode": 99, "completed_episode": 10, "lack_episode": 89, "state": "R"},
+                {"id": 4617, "name": "落尽霜花满地伤", "year": "2026", "type": "电视剧", "season": 1, "tmdbid": 313356, "total_episode": 99, "completed_episode": 75, "lack_episode": 24, "state": "R", "date": "2026-01-01", "last_update": "2026-11-22"},
+                {"id": 7597, "name": "食贫道充电纪录片", "year": "2025", "type": "电视剧", "season": 12, "tmdbid": 284720, "total_episode": 99, "completed_episode": 1, "lack_episode": 98, "state": "R", "date": "2026-01-01", "last_update": "2026-11-22"},
+            ]
+            enriched, _ = await enrich_subscriptions_with_cd2_and_cache(db, subs)
+            ev = evaluate_subscriptions(enriched)
+            by_id = {d.sub_id: d for d in ev["items"]}
+            # tv_scanned_ok=True 时，旧 SeasonRecord 被严格忽略，CD2 已收录为 0 集
+            self.assertEqual(by_id[101].completed_episodes, 0)
+            self.assertTrue(by_id[101].cd2_verified)
+            # 《雾中之犬》通过 tmdb_tv_season 纠偏 99 -> 10 集，且 CD2 已收录 10/10 完结
+            self.assertEqual(by_id[2113].total_episodes, 10)
+            self.assertEqual(by_id[2113].completed_episodes, 10)
+            self.assertEqual(by_id[2113].clean_rule, "completed")
+            self.assertIn("CD2 已收录", by_id[2113].clean_reason)
+            # 单集 TMDB 占位符绝不误标 completed
+            self.assertEqual(by_id[4617].total_episodes, 99)
+            self.assertNotEqual(by_id[4617].clean_rule, "completed")
+            self.assertEqual(by_id[7597].total_episodes, 99)
+            self.assertNotEqual(by_id[7597].clean_rule, "completed")
+
+    async def test_12_cd2_source_discovery_cleanup_and_snapshot_removal(self):
+        from fastapi import HTTPException
+        from app.api.moviepilot import list_subscriptions
+        from app.services.subscription_governance_service import save_unified_snapshot
+        from app.services.subscription_service import discover_source_season_entries, execute, preview
+
+        # 无 SeasonRecord 时通过 CD2 源目录安全定位「侦讯实境 S4」，并拒绝归档目录/整剧根目录
+        src_season = "/src/电视剧/纪录片/侦讯实境 (2022) [tmdbid=203453]/Season 4"
+        arch_season = "/dst/电视剧/纪录片/侦讯实境 (2022) [tmdbid=203453]/Season 4"
+        show_root = "/src/电视剧/纪录片/侦讯实境 (2022) [tmdbid=203453]"
+        vid_file = {"name": "侦讯实境.S04E01.mkv", "path": f"{src_season}/侦讯实境.S04E01.mkv", "size": 500_000_000, "id": "f1", "modified": "2026-11-20", "isDirectory": False}
+
+        sub_rec = {
+            "id": 2558, "name": "侦讯实境", "year": "2022", "type": "电视剧",
+            "tmdbid": 203453, "season": 4, "total_episode": 15, "completed_episode": 6, "lack_episode": 9,
+            "state": "R", "username": "豆瓣榜单", "date": "2025-09-01 00:00:00", "last_update": "2025-11-01 00:00:00",
+        }
+        fake_settings = type("S", (), {
+            "source_root": "/src", "archive_root": "/dst", "library_root": "/dst",
+            "cd2_url": "http://cd2:19798", "mp_url": "http://127.0.0.1:3000", "mp_token": "tok",
+            "enable_multi_dir_governance": True,
+        })()
+
+        mp = AsyncMock()
+        mp.list_subscriptions = AsyncMock(return_value=[sub_rec])
+        mp.search_resources = AsyncMock(return_value=[])
+        mp.get_active_downloads = AsyncMock(return_value=[])
+        mp.get_transfer_queue = AsyncMock(return_value=[])
+        mp.delete_subscription = AsyncMock(return_value={})
+
+        disk = AsyncMock()
+        disk.list_files = AsyncMock(return_value=[vid_file])
+        disk.get_file_info = AsyncMock(side_effect=[vid_file, None])
+        disk.delete_file = AsyncMock(return_value={"success": True})
+
+        with patch("app.services.subscription_service.get_settings", return_value=fake_settings):
+            async with async_session() as db:
+                await save_cd2_snapshot(
+                    db,
+                    {
+                        "version": 1, "synced_at": "2026-11-23 10:00:00",
+                        "tv_scanned_ok": True, "movie_scanned_ok": True,
+                        "tv_by_key": {
+                            "203453:4": {
+                                "season": 4, "source_count": 1, "archive_count": 1, "total_count": 2,
+                                "merged_episodes": [1, 2],
+                                "paths": [arch_season, show_root, src_season],
+                            }
+                        },
+                        "tv_by_title": {}, "movie_by_tmdb": {}, "movie_by_title": {},
+                    },
+                )
+                await save_unified_snapshot(
+                    db,
+                    {
+                        "has_snapshot": True, "queried_at": "2026-11-23 10:00:00",
+                        "overall": {"total": 1, "high": 0, "medium": 1, "protected": 0, "clean_eligible": 1},
+                        "tv": {"total": 1, "high": 0, "medium": 1, "protected": 0, "clean_eligible": 1},
+                        "movie": {"total": 0, "high": 0, "medium": 0, "protected": 0, "clean_eligible": 0},
+                        "subscriptions": [{"id": 2558, "name": "侦讯实境", "media_type": "tv", "season": 4, "clean_confidence": "medium", "clean_eligible": True, "clean_rule": "stalled"}],
+                    },
+                )
+
+                entries = await discover_source_season_entries(db, disk, sub_rec)
+                # 只允许定位到受控源季目录，绝不含归档目录或整剧根目录
+                self.assertEqual([e["path"] for e in entries], [src_season])
+
+                # 拒绝显式传入归档目录或整剧根目录
+                with self.assertRaises(HTTPException):
+                    await preview(db, mp, disk, 2558, True, f"cd2:{arch_season}")
+                with self.assertRaises(HTTPException):
+                    await preview(db, mp, disk, 2558, True, f"cd2:{show_root}")
+
+                plan = await preview(db, mp, disk, 2558, True, entries[0]["id"])
+                self.assertEqual(len(plan["files"]), 1)
+                self.assertEqual(plan["path"], src_season)
+
+                out = await execute(db, mp, disk, plan["operation_id"])
+                self.assertTrue(out["ok"])
+                mp.delete_subscription.assert_awaited_once_with(2558)
+                self.assertIn(vid_file["path"], [c.args[0] for c in disk.delete_file.await_args_list])
+
+                # 执行后快照立即移除 2558，list_subscriptions(cached_only=True) 不再返回它
+                after = await list_subscriptions(cached_only=True, db=db)
+                self.assertEqual(after["total"], 0)
+                self.assertEqual(after["subscriptions"], [])
+
+    def test_13_frontend_text_unsubscribe_button_and_failed_banner(self):
+        html = (Path(__file__).resolve().parent.parent / "frontend" / "index.html").read_text(encoding="utf-8")
+        # 单条退订按钮改为文字按钮「取消订阅」，不再使用垃圾桶图标
+        self.assertIn('title="取消此条订阅（绝不删除本地媒体文件）">取消订阅</button>', html)
+        self.assertNotIn('title="取消此条订阅">\n                  <i class="fa-solid fa-trash-can"></i>', html)
+        # 不再展示 MP 计数
+        self.assertNotIn("MP 记录", html)
+        self.assertNotIn("(MP记", html)
+        # 统一查询异常状态显式提示
+        self.assertIn("st.status === 'failed'", html)
+        self.assertIn("查询最新订阅数据失败", html)
+        # 智能动态切换：电视剧与电影分开独立查询按钮
+        self.assertIn("查询最新电视剧订阅", html)
+        self.assertIn("查询最新电影订阅", html)
+        self.assertIn("switchMediaTab", html)
+
+    async def test_14_separated_tv_and_movie_query_and_deep_clean_show_dir(self):
+        from unittest.mock import AsyncMock, patch
+        from app.database import async_session
+        from app.services.subscription_service import preview, execute
+        from app.services.subscription_cd2_index import save_cd2_snapshot
+        from app.services.subscription_governance_service import (
+            start_unified_subscription_query,
+            get_unified_query_status,
+        )
+
+        # 1. 验证 unified-query API 接收 media_type="tv" 并正确反映在状态中
+        st_tv = start_unified_subscription_query(
+            async_session,
+            media_type="tv",
+            search_resources=False,
+            reuse_resource_cache=True,
+        )
+        self.assertEqual(st_tv.get("media_type"), "tv")
+        self.assertIn("电视剧", st_tv.get("stage_label", ""))
+
+        # 2. 验证退订+彻底删源：删除文件 + 删除季目录 + 自动删除剧集空目录
+        src_season = "/nas/电视剧/纪录片/测试剧 (2025) [tmdbid=99999]/Season 1"
+        show_dir = "/nas/电视剧/纪录片/测试剧 (2025) [tmdbid=99999]"
+        cat_dir = "/nas/电视剧/纪录片"
+        sub_rec = {
+            "id": 9999, "name": "测试剧", "type": "电视剧", "season": 1, "tmdbid": 99999,
+            "total_episode": 1, "completed_episode": 1, "lack_episode": 0, "state": "R",
+        }
+        vid_file = {
+            "name": "测试剧 - S01E01.mkv", "path": f"{src_season}/测试剧 - S01E01.mkv",
+            "size": 1000, "modified": "2026-11-23T10:00:00Z", "id": "f1", "isDirectory": False,
+        }
+        nfo_file = {
+            "name": "season.nfo", "path": f"{src_season}/season.nfo",
+            "size": 200, "modified": "2026-11-23T10:00:00Z", "id": "f2", "isDirectory": False,
+        }
+
+        fake_settings = type("Settings", (), {
+            "source_root": "/nas", "archive_root": "/nas.finish", "library_root": "/nas.media",
+            "enable_multi_dir_governance": False,
+        })()
+
+        mp = AsyncMock()
+        mp.list_subscriptions = AsyncMock(return_value=[sub_rec])
+        mp.search_resources = AsyncMock(return_value=[])
+        mp.get_active_downloads = AsyncMock(return_value=[])
+        mp.get_transfer_queue = AsyncMock(return_value=[])
+        mp.delete_subscription = AsyncMock(return_value={})
+
+        deleted_paths = []
+        async def mock_delete_file(p):
+            deleted_paths.append(p)
+            return {"success": True}
+
+        # 模拟列出文件：季目录下有视频和 nfo；第一次列出剧目录时返回 Season 1，删除季目录后返回空列表
+        disk = AsyncMock()
+        disk.list_files = AsyncMock(side_effect=[
+            [vid_file, nfo_file],          # preview 时读取季目录
+            [vid_file, nfo_file],          # execute 校验季目录
+            [],                            # 检查季目录残留文件（已删）
+            [],                            # 检查剧集父目录（无其它季，为空）
+            [],                            # 刷新分类目录
+        ])
+        disk.get_file_info = AsyncMock(side_effect=[vid_file, None, nfo_file, None])
+        disk.delete_file = AsyncMock(side_effect=mock_delete_file)
+
+        with patch("app.services.subscription_service.get_settings", return_value=fake_settings):
+            async with async_session() as db:
+                await save_cd2_snapshot(
+                    db,
+                    {
+                        "version": 1, "synced_at": "2026-11-23 10:00:00",
+                        "tv_scanned_ok": True, "movie_scanned_ok": True,
+                        "tv_by_key": {
+                            "99999:1": {
+                                "season": 1, "source_count": 1, "archive_count": 0, "total_count": 1,
+                                "merged_episodes": [1], "paths": [src_season],
+                            }
+                        },
+                        "tv_by_title": {}, "movie_by_tmdb": {}, "movie_by_title": {},
+                    },
+                )
+                plan = await preview(db, mp, disk, 9999, True, f"cd2:{src_season}")
+                # 季内所有文件均纳入清理范围
+                self.assertEqual(len(plan["files"]), 2)
+                self.assertIn("彻底删除", plan["notice"])
+
+                out = await execute(db, mp, disk, plan["operation_id"])
+                self.assertTrue(out["ok"])
+                self.assertTrue(out.get("show_dir_deleted"))
+                self.assertIn("一并清理剧集空目录并刷新 CD2", out["message"])
+                # 校验删除序列：删文件 -> 删季目录 -> 删剧目录
+                self.assertIn(vid_file["path"], deleted_paths)
+                self.assertIn(nfo_file["path"], deleted_paths)
+                self.assertIn(src_season, deleted_paths)
+                self.assertIn(show_dir, deleted_paths)
 
 
 if __name__ == "__main__":

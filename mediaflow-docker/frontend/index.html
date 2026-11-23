@@ -499,9 +499,9 @@
                 <input type="checkbox" id="subQueryReuseCacheChk" checked class="w-3.5 h-3.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500">
                 <span>复用已查站点缓存</span>
               </label>
-              <button onclick="startUnifiedSubscriptionQuery()" id="subUnifiedQueryBtn" class="px-4 py-2 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 text-white font-bold transition flex items-center gap-2 shadow-sm shadow-indigo-600/20 text-xs">
+              <button onclick="startUnifiedSubscriptionQuery()" id="subUnifiedQueryBtn" class="px-4 py-2 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 text-white font-bold transition flex items-center gap-2 shadow-sm shadow-indigo-600/20 text-xs" title="独立查询电视剧最新订阅、扫描 CD2 剧集实盘并搜寻断更补缺资源（保留电影数据）">
                 <i class="fa-solid fa-satellite-dish text-xs"></i>
-                <span id="subUnifiedQueryBtnText">查询最新订阅数据</span>
+                <span id="subUnifiedQueryBtnText">查询最新电视剧订阅</span>
               </button>
               <button onclick="abortUnifiedSubscriptionQuery()" id="subUnifiedAbortBtn" class="hidden px-3 py-2 rounded-xl bg-rose-100 dark:bg-rose-950/70 text-rose-700 dark:text-rose-300 hover:bg-rose-200 font-bold transition flex items-center gap-1.5 text-xs">
                 <i class="fa-solid fa-stop text-xs"></i>
@@ -1365,7 +1365,7 @@
         <div class="flex justify-end gap-2">
           <button onclick="closeModal('subCleanModal')" class="px-4 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 text-xs font-medium hover:bg-slate-200 dark:hover:bg-slate-700 transition">关闭</button>
           <button onclick="confirmBatchCleanSubs()" id="modalConfirmCleanBtn" class="px-4 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition">
-            <i class="fa-solid fa-trash-can text-xs"></i>
+            <i class="fa-solid fa-ban text-xs"></i>
             <span id="modalConfirmBtnText">确认执行退订 (0项)</span>
           </button>
         </div>
@@ -1463,7 +1463,7 @@
             <span id="subAuditPushBtnText">一键批量补缺下载 (0部)</span>
           </button>
           <button onclick="executeAuditBatchUnsubscribe()" id="subAuditBatchUnsubBtn" class="hidden px-4 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition">
-            <i class="fa-solid fa-trash-can text-xs"></i>
+            <i class="fa-solid fa-ban text-xs"></i>
             <span id="subAuditUnsubBtnText">一键批量退订无源项 (0部)</span>
           </button>
         </div>
@@ -8019,19 +8019,27 @@
       if (queryBtnTxt) queryBtnTxt.textContent = '查询最新订阅数据';
       if (abortBtn) abortBtn.classList.add('hidden');
 
-      if (hasSubSnapshot && allSubscriptions.length > 0) {
+      if (st.status === 'failed') {
+        textEl.innerHTML = `<span class="text-rose-600 dark:text-rose-400 font-bold">❌ 查询最新订阅数据失败：${escapeHtml(st.message || '请检查 MoviePilot / CD2 连接状态后重试')}</span> <span class="text-slate-500 dark:text-slate-400 ml-1">（请重新点击右上角「查询最新订阅数据」）</span>`;
+      } else if (st.status === 'stopped') {
         const qTime = subQueriedAt || st.queried_at || (cd2Meta && cd2Meta.cd2_synced_at) || '最近';
+        textEl.innerHTML = `<span class="text-amber-700 dark:text-amber-400 font-bold">⏹️ 统一查询已停止</span> <span class="text-slate-500 dark:text-slate-400 ml-1">（${escapeHtml(st.message || `已保留截至 ${qTime} 获取的数据`)}）</span>`;
+      } else if (hasSubSnapshot && allSubscriptions.length > 0 && cd2Meta && cd2Meta.cd2_synced) {
+        const qTime = subQueriedAt || st.queried_at || cd2Meta.cd2_synced_at || '最近';
         const tvDl = subStatsData.tv.partial_stalled_downloadable || 0;
         const movDl = subStatsData.movie.old_zombie_downloadable || 0;
         const tvChecked = subStatsData.tv.partial_stalled_checked || 0;
         const tvTotalStalled = subStatsData.tv.partial_stalled || 0;
         textEl.innerHTML = `<span class="text-emerald-700 dark:text-emerald-400 font-bold">✅ 最新订阅数据已就绪</span> <span class="text-slate-500 dark:text-slate-400 ml-1">（查询时间：${escapeHtml(qTime)} · 已融合 MoviePilot 订阅、CD2 实盘库存与站点补缺资源 [剧集已查 ${tvChecked}/${tvTotalStalled} 部，可补缺 ${tvDl + movDl} 部]）</span>`;
+      } else if (hasSubSnapshot && allSubscriptions.length > 0) {
+        textEl.innerHTML = `<span class="text-amber-700 dark:text-amber-400 font-bold">⚠️ CD2 实盘尚未完成同步</span> <span class="text-slate-500 dark:text-slate-400 ml-1">（当前快照尚未完成 CD2 实盘核验，为严格保证「已收录」以 CD2 为唯一依据，请点击「查询最新订阅数据」）</span>`;
       } else {
         textEl.innerHTML = `<span class="text-amber-700 dark:text-amber-400 font-semibold">⚪ 尚未查询最新订阅数据</span> <span class="text-slate-500 dark:text-slate-400 ml-1">（请点击右上角「查询最新订阅数据」，系统将一次性自动获取 MoviePilot、CD2 实盘与站点可补缺资源）</span>`;
       }
     }
 
-    async function startUnifiedSubscriptionQuery() {
+    async function startUnifiedSubscriptionQuery(overrideType) {
+      const reqType = overrideType || currentMediaTab || 'tv';
       const reuseChk = document.getElementById('subQueryReuseCacheChk');
       const reuseCache = reuseChk ? Boolean(reuseChk.checked) : true;
       if (subUnifiedPollTimer) { clearTimeout(subUnifiedPollTimer); subUnifiedPollTimer = null; }
@@ -8039,6 +8047,7 @@
         const st = await api('/api/moviepilot/subscriptions/unified-query', {
           method: 'POST',
           body: JSON.stringify({
+            media_type: reqType,
             search_resources: true,
             reuse_resource_cache: reuseCache
           })
@@ -8168,6 +8177,17 @@
       const tabTv = document.getElementById('mediaTabTv');
       const tabMovie = document.getElementById('mediaTabMovie');
 
+      const queryBtnText = document.getElementById('subUnifiedQueryBtnText');
+      if (queryBtnText) {
+        queryBtnText.textContent = tab === 'tv' ? '查询最新电视剧订阅' : '查询最新电影订阅';
+      }
+      const queryBtn = document.getElementById('subUnifiedQueryBtn');
+      if (queryBtn) {
+        queryBtn.title = tab === 'tv'
+          ? '仅查询电视剧最新订阅、扫描 CD2 剧集实盘并搜寻断更补缺资源（保留电影数据）'
+          : '仅查询电影最新订阅、扫描 CD2 电影实盘并搜寻老片死种补缺资源（保留电视剧数据）';
+      }
+
       if (tab === 'tv') {
         if (tabTv) tabTv.className = "flex items-center gap-2 px-4 py-1.5 rounded-lg text-xs font-bold transition bg-white dark:bg-slate-700 text-indigo-600 dark:text-white shadow-sm";
         if (tabMovie) tabMovie.className = "flex items-center gap-2 px-4 py-1.5 rounded-lg text-xs font-bold transition text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white";
@@ -8250,7 +8270,7 @@
           </div>
           <div class="flex items-center gap-2 flex-shrink-0">
             <button onclick="openCategoryBatchUnsubModal('safe')" ${count === 0 ? 'disabled' : ''} class="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white font-bold transition shadow-sm flex items-center gap-1.5">
-              <i class="fa-solid fa-trash-can text-[11px]"></i>
+              <i class="fa-solid fa-ban text-[11px]"></i>
               <span>批量一键取消订阅 (${count})</span>
             </button>
           </div>
@@ -8287,7 +8307,7 @@
               <span>批量补缺下载 (${dlItems.length})</span>
             </button>
             <button onclick="openCategoryBatchUnsubModal('${modeKey}')" ${count === 0 ? 'disabled' : ''} class="px-3.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 disabled:opacity-40 text-white font-bold transition shadow-sm flex items-center gap-1.5" title="对该分类下无源或不再需要的订阅批量取消订阅">
-              <i class="fa-solid fa-trash-can text-[11px]"></i>
+              <i class="fa-solid fa-ban text-[11px]"></i>
               <span>批量取消订阅 (${noResItems.length > 0 ? noResItems.length : count})</span>
             </button>
           </div>
@@ -8305,7 +8325,7 @@
           </div>
           <div class="flex items-center gap-2 flex-shrink-0">
             <button onclick="openCategoryBatchUnsubModal('never_downloaded')" ${count === 0 ? 'disabled' : ''} class="px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-900 dark:bg-slate-700 dark:hover:bg-slate-600 disabled:opacity-40 text-white font-bold transition shadow-sm flex items-center gap-1.5">
-              <i class="fa-solid fa-trash-can text-[11px]"></i>
+              <i class="fa-solid fa-ban text-[11px]"></i>
               <span>批量取消订阅 (${count})</span>
             </button>
           </div>
@@ -8323,7 +8343,7 @@
           </div>
           <div class="flex items-center gap-2 flex-shrink-0">
             <button onclick="openCategoryBatchUnsubModal('short_tv')" ${count === 0 ? 'disabled' : ''} class="px-3.5 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-700 disabled:opacity-40 text-white font-bold transition shadow-sm flex items-center gap-1.5">
-              <i class="fa-solid fa-trash-can text-[11px]"></i>
+              <i class="fa-solid fa-ban text-[11px]"></i>
               <span>批量取消订阅 (${count})</span>
             </button>
           </div>
@@ -8342,7 +8362,7 @@
           </div>
           <div class="flex items-center gap-2 flex-shrink-0">
             <button onclick="openCategoryBatchUnsubModal('low_quality')" ${cleanableCount === 0 ? 'disabled' : ''} class="px-3.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 disabled:opacity-40 text-white font-bold transition shadow-sm flex items-center gap-1.5">
-              <i class="fa-solid fa-trash-can text-[11px]"></i>
+              <i class="fa-solid fa-ban text-[11px]"></i>
               <span>批量取消订阅 (${cleanableCount})</span>
             </button>
           </div>
@@ -8367,26 +8387,27 @@
       const container = document.getElementById('subListContainer');
       if (!container) return;
 
-      // 尚未执行过「查询最新订阅数据」时的空态引导
+      // 尚未执行过查询时的空态引导
       if (!hasSubSnapshot || allSubscriptions.length === 0) {
         renderSubContextBanner([]);
         const isRunning = subUnifiedQueryState && subUnifiedQueryState.status === 'running';
+        const targetType = currentMediaTab === 'movie' ? '电影' : '电视剧';
         container.innerHTML = `
           <div class="p-12 text-center rounded-2xl border border-dashed border-slate-300 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-900/40 space-y-3">
             <div class="w-12 h-12 mx-auto rounded-2xl bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 flex items-center justify-center">
               <i class="fa-solid fa-${isRunning ? 'spinner fa-spin' : 'satellite-dish'} text-xl"></i>
             </div>
             <div class="space-y-1">
-              <h4 class="text-sm font-bold text-slate-800 dark:text-slate-100">${isRunning ? '正在查询最新订阅数据，请稍候...' : '尚未加载订阅治理数据'}</h4>
+              <h4 class="text-sm font-bold text-slate-800 dark:text-slate-100">${isRunning ? `正在查询最新${targetType}订阅数据，请稍候...` : `尚未加载${targetType}订阅治理数据`}</h4>
               <p class="text-xs text-slate-500 dark:text-slate-400 max-w-lg mx-auto">
-                点击「查询最新订阅数据」后，系统将自动连接 MoviePilot、扫描 CD2 实盘库存，并为断更剧集与往年老片搜寻站点可补缺资源，一次性生成全部类别的完整数据。
+                点击「查询最新${targetType}订阅」后，系统将独立连接 MoviePilot、扫描 CD2 ${targetType}实盘库存，并为断更条目搜寻站点可补缺资源（保留另一类别的已有数据）。
               </p>
             </div>
             ${!isRunning ? `
             <div class="pt-1">
               <button onclick="startUnifiedSubscriptionQuery()" class="px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-sm transition inline-flex items-center gap-2">
                 <i class="fa-solid fa-satellite-dish"></i>
-                <span>立即查询最新订阅数据</span>
+                <span>立即查询最新${targetType}订阅</span>
               </button>
             </div>` : ''}
           </div>`;
@@ -8496,18 +8517,17 @@
 
         let progressHtml = '';
         if (s.media_type === 'tv') {
-          const srcPill = s.cd2_verified
-            ? `<span class="px-1.5 py-0.2 rounded bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 text-[10px] font-bold">CD2 实存</span>`
-            : `<span class="px-1.5 py-0.2 rounded bg-slate-100 dark:bg-slate-800 text-slate-500 text-[10px]">MP 记录</span>`;
-          let epText = `${s.current_episodes ?? 0} / ${s.total_episodes || '?'} 集`;
-          if (s.lack_episodes != null) epText += ` (缺 ${s.lack_episodes} 集)`;
-          if (s.cd2_verified && (s.cd2_source_episodes != null || s.cd2_archive_episodes != null)) {
-            epText += ` [源${s.cd2_source_episodes || 0}·归档${s.cd2_archive_episodes || 0}]`;
+          if (s.cd2_verified) {
+            const srcPill = `<span class="px-1.5 py-0.2 rounded bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 text-[10px] font-bold">CD2 已收录</span>`;
+            let epText = `${s.current_episodes ?? 0} / ${s.total_episodes || '?'} 集`;
+            if (s.lack_episodes != null) epText += ` (缺 ${s.lack_episodes} 集)`;
+            if (s.cd2_source_episodes != null || s.cd2_archive_episodes != null) {
+              epText += ` [源${s.cd2_source_episodes || 0}·归档${s.cd2_archive_episodes || 0}]`;
+            }
+            progressHtml = `${srcPill} <span class="font-mono text-slate-700 dark:text-slate-200 font-semibold">${epText}</span>`;
+          } else {
+            progressHtml = `<span class="px-1.5 py-0.2 rounded bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800 text-[10px] font-medium">CD2 未核验</span> <span class="text-slate-400 text-[11px]">请点击「查询最新订阅数据」（总 ${s.total_episodes || '?'} 集）</span>`;
           }
-          if (s.cd2_verified && s.mp_completed_episodes != null && s.mp_completed_episodes !== s.current_episodes) {
-            epText += ` <span class="text-slate-400">(MP记${s.mp_completed_episodes})</span>`;
-          }
-          progressHtml = `${srcPill} <span class="font-mono text-slate-700 dark:text-slate-200 font-semibold">${epText}</span>`;
         } else {
           const movLibPill = s.cd2_verified
             ? (s.cd2_in_library
@@ -8582,9 +8602,7 @@
               <div class="flex items-center gap-1.5 pt-1">
                 ${s.resource_status === 'downloadable' ? `<button onclick="pushSingleSubGapFill(${s.id})" class="px-2.5 py-1 text-xs rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold transition shadow-2xs" title="一键推送已搜出的补缺种子至 MoviePilot">📥 补缺下载</button>` : ''}
                 ${s.state === 'R' ? `<button onclick="toggleSubStatus(${s.id}, 'S')" class="px-2 py-0.8 text-xs rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 hover:bg-amber-100 transition font-medium" title="置为暂停观察">暂停</button>` : `<button onclick="toggleSubStatus(${s.id}, 'R')" class="px-2 py-0.8 text-xs rounded-lg border border-indigo-300 dark:border-indigo-700 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 transition font-medium" title="恢复活跃追更">恢复</button>`}
-                <button onclick="triggerDeleteSingleSub(${s.id})" class="text-slate-400 hover:text-red-500 text-xs p-1.5 transition" title="取消此条订阅">
-                  <i class="fa-solid fa-trash-can"></i>
-                </button>
+                <button onclick="triggerDeleteSingleSub(${s.id})" class="px-2 py-0.8 text-xs rounded-lg border border-rose-300 dark:border-rose-700 bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 hover:bg-rose-100 dark:hover:bg-rose-900/60 transition font-medium" title="取消此条订阅（绝不删除本地媒体文件）">取消订阅</button>
               </div>
             </div>
           </div>
@@ -9123,23 +9141,26 @@
         const stateColor = stateCode === 'R' ? 'text-emerald-500' : (stateCode === 'P' ? 'text-amber-500' : 'text-slate-400');
         const stateName = stateCode === 'R' ? '运行中' : (stateCode === 'P' ? '已暂停' : '已停止');
 
-        // 入库状态标签（优先展示 CD2 实盘来源）
+        // 入库状态标签（严格以 CD2 实盘为唯一依据）
         let libraryBadge = '';
-        if (item.in_library_status === 'in_library') {
-          libraryBadge = `<span class="px-2 py-0.5 rounded font-medium bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800/60 text-[11px] flex items-center gap-1"><i class="fa-solid fa-check text-[10px]"></i>${item.cd2_verified ? 'CD2 已入库' : '已入媒体库'}</span>`;
-        } else if (item.in_library_status === 'not_in_library') {
-          libraryBadge = `<span class="px-2 py-0.5 rounded font-medium bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400 border border-slate-200 dark:border-slate-700 text-[11px]">${item.cd2_verified ? 'CD2 未入库' : '未入库'}</span>`;
+        if (!item.cd2_verified) {
+          libraryBadge = `<span class="px-2 py-0.5 rounded font-medium bg-amber-50 text-amber-700 dark:bg-amber-950/50 dark:text-amber-300 text-[11px]">CD2 未核验</span>`;
+        } else if (item.in_library_status === 'in_library') {
+          libraryBadge = `<span class="px-2 py-0.5 rounded font-medium bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800/60 text-[11px] flex items-center gap-1"><i class="fa-solid fa-check text-[10px]"></i>CD2 已入库</span>`;
         } else {
-          libraryBadge = `<span class="px-2 py-0.5 rounded font-medium bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400 text-[11px]">待同步 CD2</span>`;
+          libraryBadge = `<span class="px-2 py-0.5 rounded font-medium bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400 border border-slate-200 dark:border-slate-700 text-[11px]">CD2 未入库</span>`;
         }
 
         // 进度/公映描述
         let progressDesc = '';
         if (!isMovie) {
-          const srcPrefix = item.cd2_verified ? 'CD2 实存' : 'MP 记录';
-          progressDesc = `${srcPrefix} ${item.completed_episodes ?? '?'} / ${item.total_episodes ?? '?'} 集`;
-          if (item.lack_episodes != null) {
-            progressDesc += ` (缺 ${item.lack_episodes} 集)`;
+          if (item.cd2_verified) {
+            progressDesc = `CD2 已收录 ${item.completed_episodes ?? 0} / ${item.total_episodes ?? '?'} 集`;
+            if (item.lack_episodes != null) {
+              progressDesc += ` (缺 ${item.lack_episodes} 集)`;
+            }
+          } else {
+            progressDesc = `CD2 未核验（总 ${item.total_episodes ?? '?'} 集）`;
           }
         } else {
           if (item.release_stage === 'in_theaters') {
@@ -9261,7 +9282,7 @@
         let season_record_id = null;
         if (cleanup) {
           const sources = await api('/api/moviepilot/subscriptions/' + id + '/sources');
-          if (!sources.length) throw new Error('没有对应的源季初检记录，请先初检');
+          if (!sources.length) throw new Error('CD2 源目录中未找到该剧季文件（可能已归档或尚未下载），请直接选择「仅退订」');
           const index = sources.length === 1 ? 0 : Number(prompt('选择源季目录序号\n' +
             sources.map((s, i) => (i + 1) + '. ' + s.path).join('\n'))) - 1;
           if (!sources[index]) return;
@@ -9303,13 +9324,26 @@
       const files = r.files || [];
       const remaining = files.filter(f => !(r.deleted || []).includes(f.path));
       const text = (r.subscription.name || '') + '\n' + r.evidence.message +
-        '\n' + (r.cleanup ? '退订并删除以下源视频，可能包含唯一副本：\n' + remaining.map(f => f.path + ' (' + f.size + ' 字节)').join('\n') +
-          '\n字幕、NFO 和海报将保留。' : '仅退订') +
+        '\n' + (r.cleanup ? '退订并彻底删除以下源文件（包含视频、字幕、NFO及元数据）：\n' + remaining.map(f => f.path + ' (' + f.size + ' 字节)').join('\n') +
+          '\n【彻底删源规则】若该剧集无其它季度或文件，将一并删除剧集空目录并通过 CD2 刷新。' : '仅退订') +
         '\n操作编号 ' + r.operation_id;
       if (!await showSubscriptionPlan(text)) return;
       const out = await api('/api/moviepilot/subscription-operations/' + r.operation_id + '/execute', {method:'POST'});
       alert(out.message + '\n操作编号 ' + r.operation_id);
-      await loadSubscriptions();
+      if (out && out.ok) {
+        const removedId = Number(r.sub_id);
+        allSubscriptions = allSubscriptions.filter(s => Number(s.id) !== removedId);
+        if (currentPreviewData && Array.isArray(currentPreviewData.to_clean)) {
+          currentPreviewData.to_clean = currentPreviewData.to_clean.filter(x => Number(x.id) !== removedId);
+          currentPreviewData.matched_count = currentPreviewData.to_clean.length;
+          modalSelectedIds.delete(removedId);
+          const countEl = document.getElementById('modalMatchedCount');
+          if (countEl) countEl.textContent = currentPreviewData.matched_count;
+          updateSelectedCount();
+          renderModalCleanItems();
+        }
+        await loadSubscriptions({ cachedOnly: true, silent: true });
+      }
     }
 
     async function resumeSubOperations() {
@@ -9455,7 +9489,7 @@
         }
         alert(res.message + detailStr);
         if (res.source === 'cd2') {
-          await loadSubscriptions();
+          await loadSubscriptions({ cachedOnly: false, silent: true });
         }
       } catch (e) {
         alert('核验 CD2 失败: ' + e.message);

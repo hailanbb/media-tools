@@ -4,7 +4,7 @@
 
 **专为 115网盘 · CloudDrive2 · MoviePilot · Emby / Jellyfin 打造的下一代智能化媒体治理与生命周期工作流引擎**
 
-[![Release](https://img.shields.io/badge/Release-v2.5.66-6366f1?style=for-the-badge&logo=github)](VERSIONING.md)
+[![Release](https://img.shields.io/badge/Release-v2.5.68-6366f1?style=for-the-badge&logo=github)](VERSIONING.md)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776ab?style=for-the-badge&logo=python)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20Native%20%7C%20Docker-0078d4?style=for-the-badge&logo=windows)](#-快速启动与部署)
 [![MoviePilot](https://img.shields.io/badge/MoviePilot-v2.x%20Ready-ff5722?style=for-the-badge&logo=fastapi)](https://github.com/jxxghp/MoviePilot)
@@ -20,7 +20,7 @@
   <a href="#-配置指南-env">配置指南</a> •
   <a href="#-零数据丢失安全防线">安全防线</a> •
   <a href="#-技术方案与规范索引">文档索引</a> •
-  <a href="#-版本演进与重要里程碑">版本演进 (v2.5.66)</a>
+  <a href="#-版本演进与重要里程碑">版本演进 (v2.5.68)</a>
 </p>
 
 </div>
@@ -228,7 +228,7 @@ MediaFlow 所有配置项均以 `MF_` 前缀开头，大小写不敏感：
 | **会话交接与最新进展** | [MediaFlow 会话交接摘要 (v2.5.61)](MediaFlow会话交接摘要-v2.5.61-2026-11-21.md)<br/>[MediaFlow 会话交接摘要 (v2.5.60)](MediaFlow会话交接摘要-v2.5.60-2026-11-20.md)<br/>[MediaFlow 会话交接摘要 (v2.5.59)](MediaFlow会话交接摘要-v2.5.59-2026-11-20.md) | **v2.5.61** |
 | **整体重构方案** | [五模块处理流程重构与智能清理方案](MediaFlow五模块处理流程重构与智能清理方案-v2.5.44.md)<br/>[五模块一致性核查报告](MediaFlow五模块一致性核查-v2.5.56-2026-11-20.md) | **v2.5.44 ~ v2.5.56** |
 | **专项扩展方案** | [媒体整理智能修复需求与交互方案](MediaFlow媒体整理智能修复需求与交互方案-v2.5.40.md)<br/>[电影订阅智能清理需求与交互方案](MediaFlow电影订阅智能清理需求与交互方案-v2.5.65.md)<br/>[剧集订阅智能清理需求与交互方案](MediaFlow剧集订阅智能清理需求与交互方案-v2.5.65.md) | **v2.5.40 ~ v2.5.65** |
-| **历史版本与迁移** | [完整版本演进历史与全量修改记录](VERSIONING.md)<br/>[媒体脚本迁移记录 (油猴版至统一仓库)](MIGRATION.md) | **v1.0 ~ v2.5.65** |
+| **历史版本与迁移** | [完整版本演进历史与全量修改记录](VERSIONING.md)<br/>[媒体脚本迁移记录 (油猴版至统一仓库)](MIGRATION.md) | **v1.0 ~ v2.5.68** |
 
 ---
 
@@ -238,7 +238,8 @@ MediaFlow 所有配置项均以 `MF_` 前缀开头，大小写不敏感：
 
 | 版本号 | 发布日期 | 关键特性与核心演进 | 状态 |
 | :---: | :---: | :--- | :---: |
-| **`v2.5.66`** | **2026-11-22** | • **「媒体整理智能修复」五层生产级闭环重构 (R01–R33)**：彻底根治 `baseline=0` 误拉 250 条历史与 Windows `os.path.exists` 误杀 Linux 路径缺陷，改为调用 MoviePilot 原生 `POST /api/v1/storage/list` 实时跨机核查源与目标文件、伴随字幕及 `errmsg` 真实报错<br/>• 适配 MP v2.15.6 `ManualTransferItem` 契约，强制 `preview=true` 逐项校验与 `submitted → verifying → 目标落地核验 → resolved` 闭环，挂入后台定时调度循环<br/>• 前端升级为按作品/季或故障根因分组聚合、真实 5 段式证据链详情抽屉、快捷自动修复开关与受控基线重设 | **最新稳定版** |
+| **`v2.5.68`** | **2026-11-23** | • **剧集与电影独立统一查询流水线**：`/subscriptions/query-unified` 支持 `media_type` 精准分流（`tv` / `movie`），CD2 实盘增量合并免全盘重扫，阶段 3 站点搜寻引入 3 并发批次流水线<br/>• **严格 CD2 实盘唯一真相源**：未核验 CD2 严格标记「CD2 未核验」，绝不因 MP 记录误判已完结；目录索引加固防止跨作品误穿透；电影未发售状态严控入库判定<br/>• **彻底删源与剧根空目录自动收尾**：退订并删源彻底清理源视频、字幕、NFO 元数据，无其它季度时深度自动清理剧集外层空目录并刷新 CD2 缓存，即时剔除快照残留<br/>• **复杂前缀与衍生花絮解析防护**：`episode_parser.py` 增强独立花絮/特辑前缀（Clip/Extra/Vlog/Diary/先导片/纯享版/加更版等）识别，14 项专项测试 100% 通过 | **最新稳定版** |
+| **`v2.5.66`** | 2026-11-22 | • **「媒体整理智能修复」五层生产级闭环重构 (R01–R33)**：彻底根治 `baseline=0` 误拉 250 条历史与 Windows `os.path.exists` 误杀 Linux 路径缺陷，改为调用 MoviePilot 原生 `POST /api/v1/storage/list` 实时跨机核查源与目标文件、伴随字幕及 `errmsg` 真实报错<br/>• 适配 MP v2.15.6 `ManualTransferItem` 契约，强制 `preview=true` 逐项校验与 `submitted → verifying → 目标落地核验 → resolved` 闭环，挂入后台定时调度循环<br/>• 前端升级为按作品/季或故障根因分组聚合、真实 5 段式证据链详情抽屉、快捷自动修复开关与受控基线重设 | 历史里程碑 |
 | **`v2.5.65`** | 2026-11-22 | • **影视剧订阅治理闭环与全流程实时进度**：进入页签秒读本地快照不自动扫描，顶部收敛为唯一主按钮「查询最新订阅数据」（MP ➔ CD2 实盘 ➔ PT 站点三阶段全宽进度面板）<br/>• 剧集/电影各分类精准收口专属功能按钮（全季完结/已入库→批量一键取消订阅；断更/老片死种→批量补缺下载 + 批量取消订阅；零进度/短剧/异常特征→批量取消订阅）<br/>• 所有批量操作接入统一 `400ms` 实时逐项进度条，消除批量退订 $N+1$ 瓶颈 | 历史里程碑 |
 | **`v2.5.63`** | **2026-11-22** | • 影视剧订阅治理升级：剧集实存集数与电影入库判定全面改以 CD2 实盘异步快照为准<br/>• 剧集断更拆分为「部分已下·断更」与「零进度死种」，联动补缺选种引擎支持一键批量查源补缺/退订（电影老片死种同步支持）<br/>• 短剧四维识别防误杀长篇国漫与综艺；移除冗余豆瓣标签，新增无封面/繁体/小语种/无中文译名异常特征清理 | 历史里程碑 |
 | **`v2.5.62`** | **2026-11-21** | • 缺集待补「核对入库」异步并发化与实时进度条；补缺推送后自动清理 MP 本季转移记录防跳过整理 | 历史里程碑 |
@@ -267,7 +268,7 @@ media-tools/
 ├── 剧集整理docker页面设计/    # UI 原型设计与前端视觉规范稿
 ├── 媒体整理需求/             # 历史基线需求与 MoviePilot 接口接入技术白皮书
 ├── README.md               # 仓库主说明文档
-└── VERSIONING.md           # 完整版本全量变更日志 (v1.0 ~ v2.5.66)
+└── VERSIONING.md           # 完整版本全量变更日志 (v1.0 ~ v2.5.68)
 ```
 
 ---

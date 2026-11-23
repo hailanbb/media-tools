@@ -220,15 +220,15 @@ async def _scan_season_episodes(
                 fname = str(f.get("name") or "")
                 if not is_video_file(fname):
                     continue
-                parsed = parse_episode(fname)
-                if parsed.is_special or parsed.episode is None:
+                parsed = parse_episode(fname, str(f.get("path") or ""), int(f.get("size") or 0))
+                if parsed.is_special or parsed.is_extra or not parsed.episode_numbers:
                     continue
-                if parsed.season is not None and parsed.season != target_season:
+                if parsed.season_number is not None and parsed.season_number != target_season:
                     continue
-                if parsed.episodes:
-                    eps.update(parsed.episodes)
-                else:
-                    eps.add(parsed.episode)
+                valid_eps = [ep for ep in parsed.episode_numbers if ep > 0]
+                if not valid_eps:
+                    continue
+                eps.update(valid_eps)
                 found_any = True
                 if not fname.lower().endswith(".strm") and int(f.get("size") or 0) > 0:
                     video_sizes.append(int(f.get("size") or 0))
@@ -243,15 +243,15 @@ async def _scan_season_episodes(
             fname = str(f.get("name") or "")
             if not is_video_file(fname):
                 continue
-            parsed = parse_episode(fname)
-            if parsed.is_special or parsed.episode is None:
+            parsed = parse_episode(fname, str(f.get("path") or ""), int(f.get("size") or 0))
+            if parsed.is_special or parsed.is_extra or not parsed.episode_numbers:
                 continue
-            if parsed.season is not None and parsed.season != 1:
+            if parsed.season_number is not None and parsed.season_number != 1:
                 continue
-            if parsed.episodes:
-                eps.update(parsed.episodes)
-            else:
-                eps.add(parsed.episode)
+            valid_eps = [ep for ep in parsed.episode_numbers if ep > 0]
+            if not valid_eps:
+                continue
+            eps.update(valid_eps)
             found_any = True
             if not fname.lower().endswith(".strm") and int(f.get("size") or 0) > 0:
                 video_sizes.append(int(f.get("size") or 0))
@@ -428,16 +428,17 @@ async def build_cd2_subscription_inventory(
                 if kind == "tv":
                     if tid:
                         tv_show_index_tid.setdefault(tid, []).append((side, ipath))
-                    if nt:
+                    elif nt:
+                        # 仅当目录本身不含 [tmdbid=...] 时才建立纯标题兜底索引，防止跨作品误匹配
                         tv_show_index_title.setdefault(nt, []).append((side, ipath))
                 else:
                     if tid:
                         movie_dir_index_tid.setdefault(tid, []).append((side, ipath))
-                    tk_yr = _title_year_key(nt, yr)
-                    if tk_yr:
-                        movie_dir_index_title.setdefault(tk_yr, []).append((side, ipath))
-                    if nt:
-                        movie_dir_index_title.setdefault(nt, []).append((side, ipath))
+                    else:
+                        # 仅当电影目录不含 [tmdbid=...] 时才建立标题+年份兜底索引（无年份目录才索引纯标题）
+                        tk_yr = _title_year_key(nt, yr)
+                        if tk_yr:
+                            movie_dir_index_title.setdefault(tk_yr, []).append((side, ipath))
 
         cat_tasks = [
             *(_scan_cat("tv", side, p) for side, p in tv_cat_dirs),
@@ -579,8 +580,8 @@ async def build_cd2_subscription_inventory(
             "tv_by_title": tv_by_title,
             "movie_by_tmdb": movie_by_tmdb,
             "movie_by_title": movie_by_title,
-            "tv_dirs_indexed": len(tv_show_index_tid),
-            "movie_dirs_indexed": len(movie_dir_index_tid),
+            "tv_dirs_indexed": len(tv_show_index_tid) if scope != "movie" else int(prev_snap.get("tv_dirs_indexed") or 0),
+            "movie_dirs_indexed": len(movie_dir_index_tid) if scope != "tv" else int(prev_snap.get("movie_dirs_indexed") or 0),
             "category_errors": category_errors[:20],
         }
 
@@ -823,31 +824,42 @@ async def enrich_subscriptions_with_cd2_and_cache(
     except Exception as exc:
         log.warning("读取本地 SeasonRecord 辅助 CD2 索引失败: %s", exc)
 
-    # 2. 只读加载本地 MetadataCache 中已有 TMDB 剧集缓存（用于短剧时长/类型精准判定，零外部请求）
+    # 2. 只读加载本地 MetadataCache 中已有 TMDB 剧集与季缓存（用于短剧时长/类型及 99 集占位纠偏，零外部请求）
     tmdb_cache_map: dict[str, dict[str, Any]] = {}
+    tmdb_season_cache_map: dict[str, dict[str, Any]] = {}
     try:
-        tv_tids = {
-            f"tmdb_tv:{str(s.get('tmdbid') or s.get('tmdb_id')).strip()}"
-            for s in subs
-            if str(s.get("tmdbid") or s.get("tmdb_id") or "").strip().isdigit()
-        }
-        if tv_tids:
+        cache_keys: set[str] = set()
+        for s in subs:
+            tid_s = str(s.get("tmdbid") or s.get("tmdb_id") or "").strip()
+            if not tid_s.isdigit():
+                continue
+            cache_keys.add(f"tmdb_tv:{tid_s}")
+            sn_s = int(s.get("season") or 1)
+            cache_keys.add(f"tmdb_tv_season:{tid_s}:{sn_s}")
+        if cache_keys:
             # SQLite IN 子句分块查询，防止超 999 参数上限
-            tid_list = list(tv_tids)
-            for i in range(0, len(tid_list), 400):
-                chunk = tid_list[i:i + 400]
+            key_list = list(cache_keys)
+            for i in range(0, len(key_list), 400):
+                chunk = key_list[i:i + 400]
                 mc_rows = (
                     await db.execute(select(MetadataCache).where(MetadataCache.cache_key.in_(chunk)))
                 ).scalars().all()
                 for mr in mc_rows:
                     try:
                         payload = json.loads(mr.payload_json or "{}")
-                        if isinstance(payload, dict) and payload:
+                        if not (isinstance(payload, dict) and payload):
+                            continue
+                        if str(mr.cache_key).startswith("tmdb_tv_season:"):
+                            tmdb_season_cache_map[f"{mr.media_id}:{mr.season_number}"] = payload
+                        else:
                             tmdb_cache_map[str(mr.media_id)] = payload
                     except Exception:
                         pass
     except Exception as exc:
         log.warning("读取 MetadataCache 辅助订阅诊断失败: %s", exc)
+
+    settings = get_settings()
+    cd2_configured = bool(settings.cd2_url and (settings.source_root or settings.archive_root or settings.library_root))
 
     tv_by_key = (snapshot or {}).get("tv_by_key") or {}
     tv_by_title = (snapshot or {}).get("tv_by_title") or {}
@@ -861,6 +873,8 @@ async def enrich_subscriptions_with_cd2_and_cache(
 
     for raw in subs:
         s = dict(raw)
+        if cd2_configured:
+            s["strict_cd2_only"] = True
         raw_type = str(s.get("type") or s.get("mtype") or s.get("media_type") or "").strip().lower()
         is_mov = (
             raw_type in ("movie", "电影")
@@ -875,7 +889,7 @@ async def enrich_subscriptions_with_cd2_and_cache(
         if is_mov:
             hit = movie_by_tmdb.get(tid) if tid else None
             if hit is None:
-                hit = movie_by_title.get(_title_year_key(name, year)) or movie_by_title.get(_title_year_key(name, ""))
+                hit = movie_by_title.get(_title_year_key(name, year))
             if hit is not None:
                 s["cd2_verified"] = True
                 s["cd2_in_library"] = bool(hit.get("in_library"))
@@ -893,7 +907,7 @@ async def enrich_subscriptions_with_cd2_and_cache(
             hit = tv_by_key.get(key) if key else None
             if hit is None and nt_key:
                 hit = tv_by_title.get(nt_key)
-            if hit is None and key:
+            if hit is None and key and (snapshot is None or not tv_scanned_ok):
                 hit = season_rec_map.get(key)
 
             if hit is not None:
@@ -919,7 +933,8 @@ async def enrich_subscriptions_with_cd2_and_cache(
                 s["cd2_episode_numbers"] = []
                 s["cd2_paths"] = []
 
-            # 注入已有 TMDB 缓存的时长、类型与季集数（用于短剧高精度判定，零额外网络调用）
+            # 注入已有 TMDB 缓存的时长、类型与季集数（用于短剧高精度判定与 99 集纠偏，零额外网络调用）
+            cd2_ep_val = int(s.get("cd2_total_episodes") or 0)
             if tid and tid in tmdb_cache_map:
                 td = tmdb_cache_map[tid]
                 if isinstance(td.get("episode_run_time"), list):
@@ -934,9 +949,17 @@ async def enrich_subscriptions_with_cd2_and_cache(
                     for ts in td["seasons"]:
                         if isinstance(ts, dict) and int(ts.get("season_number") or -1) == sn:
                             ep_cnt = int(ts.get("episode_count") or 0)
-                            if ep_cnt > 0 and not s.get("tmdb_season_episodes"):
+                            if ep_cnt >= 2 and ep_cnt >= cd2_ep_val and not s.get("tmdb_season_episodes"):
                                 s["tmdb_season_episodes"] = ep_cnt
                             break
+
+            if key and key in tmdb_season_cache_map:
+                sd = tmdb_season_cache_map[key]
+                ep_cnt = int(sd.get("episode_count") or sd.get("aired_count") or 0)
+                if ep_cnt >= 2 and ep_cnt >= cd2_ep_val:
+                    s["tmdb_season_episodes"] = ep_cnt
+                    if sd.get("season_finished") is True:
+                        s["season_finished"] = True
 
         enriched.append(s)
 

@@ -307,10 +307,11 @@ def diagnose_movie_subscription(sub: Dict[str, Any], now: Optional[datetime] = N
     movie_year = int(year_str) if year_str.isdigit() else 0
 
     # CD2 实盘真相优先（3.1：已入库完成判定以 CD2 为准）
+    strict_cd2_only = bool(sub.get("strict_cd2_only"))
     cd2_verified = bool(sub.get("cd2_verified"))
     cd2_in_library = sub.get("cd2_in_library")  # True | False | None
     cd2_paths = list(sub.get("cd2_paths") or [])
-    data_source = "cd2" if cd2_verified else "mp"
+    data_source = "cd2" if cd2_verified else ("cd2_pending" if strict_cd2_only else "mp")
 
     # 兼容既有单元测试的 in_library / not_in_library 注入；当 cd2_verified=True 时严格以 CD2 为准
     if cd2_verified:
@@ -364,12 +365,14 @@ def diagnose_movie_subscription(sub: Dict[str, Any], now: Optional[datetime] = N
             in_library_status=lib_status_str, **common_ext,
         )
 
-    # 门禁 M2：实物已核实入库（CD2 已验证时严格以 CD2 为准；未同步 CD2 时兼容旧证据）
+    # 门禁 M2：实物已核实入库（strict_cd2_only / cd2_verified 下严格以 CD2 为唯一依据；未启用 CD2 的纯单测兼容旧证据但绝不误判当年新片）
     is_in_library = bool(in_library_evidence) or (
-        not cd2_verified
+        not strict_cd2_only
+        and not cd2_verified
         and state == "P"
         and not not_in_library
         and release_stage not in ("in_theaters", "upcoming_theatrical")
+        and not (movie_year >= now.year)
     )
 
     if is_in_library and not not_in_library:
@@ -446,6 +449,18 @@ def diagnose_movie_subscription(sub: Dict[str, Any], now: Optional[datetime] = N
             in_library_status=lib_status_str, **common_ext,
         )
 
+    if strict_cd2_only and not cd2_verified:
+        return SubscriptionDiagnosis(
+            sub_id=sub_id, name=name, year=year_str, media_type="movie", season=None,
+            total_episodes=1, completed_episodes=0, lack_episodes=1, state=state, username=username,
+            clean_eligible=False, clean_confidence="low",
+            clean_rule="active", clean_rule_name="待 CD2 实盘核验",
+            clean_reason="CD2 实盘库存尚未核验完成，为严格保证电影入库判定仅以 CD2 为唯一依据，暂不按 MoviePilot 状态归类，请点击「查询最新订阅数据」完成核验",
+            days_inactive=inactive_days, created_days_ago=created_days, is_protected=False,
+            is_douban_sync=is_douban, release_stage=release_stage or "unknown",
+            in_library_status=lib_status_str, **common_ext,
+        )
+
     # 门禁 M4：往年老片长期无源死种（3.2：支持先用补缺站点能力批量筛查资源再决定下载或退订）
     if movie_year > 0 and movie_year < (now.year - 1) and created_days >= 60:
         if not is_douban and not sub.get("allow_manual_stalled"):
@@ -519,11 +534,6 @@ def diagnose_tv_subscription(sub: Dict[str, Any], now: Optional[datetime] = None
 
     raw_total_ep = sub.get("total_episode") or sub.get("total_episodes")
     tmdb_total_ep = sub.get("tmdb_season_episodes")
-    # 若有 TMDB 真实总集数，修正 MP 的 99 占位符
-    if tmdb_total_ep and int(tmdb_total_ep) > 0 and (not raw_total_ep or int(raw_total_ep) == 99):
-        total_ep: Optional[int] = int(tmdb_total_ep)
-    else:
-        total_ep = int(raw_total_ep) if raw_total_ep is not None else None
 
     mp_lack_ep = sub.get("lack_episode")
     if sub.get("completed_episode") is not None or sub.get("current_episode") is not None:
@@ -533,16 +543,28 @@ def diagnose_tv_subscription(sub: Dict[str, Any], now: Optional[datetime] = None
     else:
         mp_comp_ep = 0
 
-    # CD2 实盘集数优先（2.4：以 CD2 为准）
+    # CD2 实盘集数优先（2.4：以 CD2 为唯一依据）
+    strict_cd2_only = bool(sub.get("strict_cd2_only"))
     cd2_verified = bool(sub.get("cd2_verified"))
     cd2_src_eps = sub.get("cd2_source_episodes")
     cd2_arch_eps = sub.get("cd2_archive_episodes")
     cd2_tot_eps = sub.get("cd2_total_episodes")
     cd2_ep_nums = list(sub.get("cd2_episode_numbers") or [])
     cd2_paths = list(sub.get("cd2_paths") or [])
-    data_source = "cd2" if cd2_verified else "mp"
+
+    # 若有可信的 TMDB 真实总集数（排除单集占位符及低于 CD2 实存集数的残缺条目），修正 MP 的 99 占位符
+    if (
+        tmdb_total_ep
+        and int(tmdb_total_ep) >= 2
+        and (cd2_tot_eps is None or int(tmdb_total_ep) >= int(cd2_tot_eps))
+        and (not raw_total_ep or int(raw_total_ep) == 99)
+    ):
+        total_ep: Optional[int] = int(tmdb_total_ep)
+    else:
+        total_ep = int(raw_total_ep) if raw_total_ep is not None else None
 
     if cd2_verified and cd2_tot_eps is not None:
+        data_source = "cd2"
         comp_ep = int(cd2_tot_eps)
         if total_ep and total_ep > 0 and total_ep != 99:
             lack_ep: Optional[int] = max(0, total_ep - comp_ep)
@@ -550,7 +572,12 @@ def diagnose_tv_subscription(sub: Dict[str, Any], now: Optional[datetime] = None
             lack_ep = max(0, 99 - comp_ep)
         else:
             lack_ep = None
+    elif strict_cd2_only and not cd2_verified:
+        data_source = "cd2_pending"
+        comp_ep = 0
+        lack_ep = total_ep
     else:
+        data_source = "mp"
         comp_ep = mp_comp_ep
         lack_ep = int(mp_lack_ep) if mp_lack_ep is not None else None
 
@@ -573,7 +600,7 @@ def diagnose_tv_subscription(sub: Dict[str, Any], now: Optional[datetime] = None
     in_lib_status = (
         ("in_library" if comp_ep > 0 else "not_in_library")
         if cd2_verified
-        else ("in_library" if comp_ep > 0 else "unknown")
+        else ("unknown" if strict_cd2_only else ("in_library" if comp_ep > 0 else "unknown"))
     )
 
     common_ext = dict(
@@ -628,12 +655,12 @@ def diagnose_tv_subscription(sub: Dict[str, Any], now: Optional[datetime] = None
                 total_episodes=total_ep, completed_episodes=comp_ep, lack_episodes=lack_ep, state=state, username=username,
                 clean_eligible=False, clean_confidence="low",
                 clean_rule="airing_protect", clean_rule_name="连载在播保护",
-                clean_reason=f"当前已播集已齐 ({comp_ep}/{total_ep or comp_ep} 集)，但本季仍在排播连载中，锁定保留",
+                clean_reason=f"{'CD2 已收录' if cd2_verified else '当前已播集'}已齐 ({comp_ep}/{total_ep or comp_ep} 集)，但本季仍在排播连载中，锁定保留",
                 days_inactive=inactive_days, created_days_ago=created_days, is_protected=True,
                 is_short_tv=is_short_drama, is_douban_sync=is_douban, **common_ext,
             )
 
-        src_tag = "CD2 实存" if cd2_verified else "集数"
+        src_tag = "CD2 已收录" if cd2_verified else "集数"
         return SubscriptionDiagnosis(
             sub_id=sub_id, name=name, year=year_str, media_type="tv", season=season,
             total_episodes=total_ep, completed_episodes=comp_ep, lack_episodes=0, state=state, username=username,
@@ -651,10 +678,21 @@ def diagnose_tv_subscription(sub: Dict[str, Any], now: Optional[datetime] = None
             total_episodes=total_ep, completed_episodes=comp_ep, lack_episodes=lack_ep, state=state, username=username,
             clean_eligible=True, clean_confidence="medium",
             clean_rule="low_quality", clean_rule_name="异常特征待清",
-            clean_reason=f"命中异常/低质特征（{'、'.join(lq_reasons)}），且当前实存 0 集，大概率为无效词条，建议复核或批量退订",
+            clean_reason=f"命中异常/低质特征（{'、'.join(lq_reasons)}），且{'CD2 已收录' if cd2_verified else '当前实存'} 0 集，大概率为无效词条，建议复核或批量退订",
             days_inactive=inactive_days, created_days_ago=created_days, is_protected=False,
             is_short_tv=is_short_drama, is_douban_sync=True,
             stalled_kind="never_downloaded", can_gap_fill=False, **common_ext,
+        )
+
+    if strict_cd2_only and not cd2_verified:
+        return SubscriptionDiagnosis(
+            sub_id=sub_id, name=name, year=year_str, media_type="tv", season=season,
+            total_episodes=total_ep, completed_episodes=comp_ep, lack_episodes=lack_ep, state=state, username=username,
+            clean_eligible=False, clean_confidence="low",
+            clean_rule="active", clean_rule_name="待 CD2 实盘核验",
+            clean_reason="CD2 实盘库存尚未核验完成，为严格保证「已收录」仅以 CD2 为唯一依据，暂不按 MoviePilot 计数归类，请点击「查询最新订阅数据」完成核验",
+            days_inactive=inactive_days, created_days_ago=created_days, is_protected=False,
+            is_short_tv=is_short_drama, is_douban_sync=is_douban, **common_ext,
         )
 
     # 门禁 T3：短剧/微短剧虚标长期停滞（Medium Confidence）
@@ -665,7 +703,7 @@ def diagnose_tv_subscription(sub: Dict[str, Any], now: Optional[datetime] = None
             total_episodes=total_ep, completed_episodes=comp_ep, lack_episodes=lack_ep, state=state, username=username,
             clean_eligible=True, clean_confidence="medium",
             clean_rule="short_tv_stalled", clean_rule_name="短剧虚标停滞",
-            clean_reason=f"识别为短剧（{sd_why}），已停滞 {inactive_days} 天（当前 {comp_ep}/{total_ep or '?'} 集），建议核查退订",
+            clean_reason=f"识别为短剧（{sd_why}），已停滞 {inactive_days} 天（{'CD2 已收录' if cd2_verified else '当前'} {comp_ep}/{total_ep or '?'} 集），建议核查退订",
             days_inactive=inactive_days, created_days_ago=created_days, is_protected=False,
             is_short_tv=True, is_douban_sync=is_douban,
             stalled_kind="partial_stalled" if comp_ep > 0 else "never_downloaded",
@@ -674,7 +712,7 @@ def diagnose_tv_subscription(sub: Dict[str, Any], now: Optional[datetime] = None
 
     # 门禁 T4（2.3 细分桶 A）：部分已下·中途断更停滞（曾经下载过部分集数，后续断更 → 强推荐先一键联动补缺梳理！）
     if (state in ("P", "S") or inactive_days >= 30) and comp_ep > 0 and (lack_ep is None or lack_ep > 0):
-        src_tag = "CD2 实存" if cd2_verified else "已收录"
+        src_tag = "CD2 已收录" if cd2_verified else "已收录"
         return SubscriptionDiagnosis(
             sub_id=sub_id, name=name, year=year_str, media_type="tv", season=season,
             total_episodes=total_ep, completed_episodes=comp_ep, lack_episodes=lack_ep, state=state, username=username,
@@ -693,7 +731,7 @@ def diagnose_tv_subscription(sub: Dict[str, Any], now: Optional[datetime] = None
             total_episodes=total_ep, completed_episodes=0, lack_episodes=lack_ep, state=state, username=username,
             clean_eligible=True, clean_confidence="medium",
             clean_rule="zombie", clean_rule_name="零进度·从未下载",
-            clean_reason=f"自订阅起已逾 {created_days} 天，至今实存 0 集无任何资源入库；适合批量取消订阅（亦可先筛查站点）",
+            clean_reason=f"自订阅起已逾 {created_days} 天，至今{'CD2 已收录' if cd2_verified else '实存'} 0 集无任何资源入库；适合批量取消订阅（亦可先筛查站点）",
             days_inactive=inactive_days, created_days_ago=created_days, is_protected=False,
             is_short_tv=is_short_drama, is_douban_sync=is_douban,
             stalled_kind="never_downloaded", can_gap_fill=True, **common_ext,

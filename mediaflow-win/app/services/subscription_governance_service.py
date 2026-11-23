@@ -17,7 +17,7 @@ import asyncio
 import json
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -61,6 +61,7 @@ _memory_unified_snapshot: dict[str, Any] | None = None
 
 _unified_query_state: dict[str, Any] = {
     "job_id": "",
+    "media_type": "all",
     "status": "idle",        # idle | running | completed | stopped | failed
     "stage": "",             # mp_fetch | cd2_scan | resource_search | done
     "stage_label": "尚未执行查询",
@@ -1048,6 +1049,7 @@ async def _run_unified_query_worker(
     job_id: str,
     db_session_factory,
     *,
+    media_type: str = "all",
     search_resources: bool = True,
     reuse_resource_cache: bool = True,
 ) -> None:
@@ -1058,6 +1060,14 @@ async def _run_unified_query_worker(
     min_resolution = str(getattr(settings, "gap_fill_min_resolution", "") or "")
     require_chinese = bool(getattr(settings, "gap_fill_require_chinese", False))
 
+    media_type_clean = (media_type or "all").lower().strip()
+    if media_type_clean not in ("all", "tv", "movie"):
+        media_type_clean = "all"
+    type_label = (
+        "电视剧" if media_type_clean == "tv"
+        else ("电影" if media_type_clean == "movie" else "剧集与电影")
+    )
+
     mp = MoviePilotClient()
     tmdb = TMDBClient()
     sem = asyncio.Semaphore(3)
@@ -1066,9 +1076,9 @@ async def _run_unified_query_worker(
         # ── 阶段 1/3：获取 MoviePilot 最新订阅清单 ──────────────────────
         _unified_query_state.update({
             "stage": "mp_fetch",
-            "stage_label": "阶段 1/3 · 获取 MoviePilot 订阅",
+            "stage_label": f"阶段 1/3 · 获取 {type_label}订阅",
             "progress_pct": 8,
-            "message": "正在从 MoviePilot 拉取最新剧集与电影订阅列表...",
+            "message": f"正在从 MoviePilot 拉取最新{type_label}订阅列表...",
         })
         raw_subs = await mp.list_subscriptions()
         if _unified_query_state.get("aborted"):
@@ -1079,46 +1089,156 @@ async def _run_unified_query_worker(
             })
             return
 
-        # 先用现有 CD2 快照快速生成一版初始数据，让页面立刻有响应
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        async with db_session_factory() as db:
-            await assemble_subscriptions_payload(db, raw_subs, save_as_snapshot=True, queried_at=now_str)
-            _unified_query_state["data_ready"] = True
-            _unified_query_state["queried_at"] = now_str
-            _unified_query_state["snapshot_version"] = int(_unified_query_state.get("snapshot_version") or 0) + 1
+        _unified_query_state.update({
+            "progress_pct": 18,
+            "message": f"已获取 MoviePilot 共 {len(raw_subs)} 条订阅，准备扫描 CD2 {type_label}实盘库存...",
+        })
 
         # ── 阶段 2/3：全盘扫描 CD2 实盘库存（源目录 + 归档目录） ─────────
         _unified_query_state.update({
             "stage": "cd2_scan",
-            "stage_label": "阶段 2/3 · 扫描 CD2 实盘库存",
+            "stage_label": f"阶段 2/3 · 扫描 CD2 实盘库存 ({type_label})",
             "progress_pct": 20,
-            "message": "正在扫描 CD2 源目录与归档目录，核实剧集实存集数与电影入库状态...",
+            "message": f"正在扫描 CD2 受控目录，核实{type_label}实盘状态...",
         })
 
         def _cd2_progress(pct: int, stage: str, msg: str, scanned: int, total: int, tv_cnt: int, mov_cnt: int) -> None:
-            mapped_pct = 20 + int((max(0, min(pct, 100)) * 32) / 100)
+            mapped_pct = 20 + int((max(0, min(pct, 100)) * 30) / 100)
             _unified_query_state.update({
                 "stage": "cd2_scan",
-                "stage_label": "阶段 2/3 · 扫描 CD2 实盘库存",
+                "stage_label": f"阶段 2/3 · 扫描 CD2 实盘库存 ({type_label})",
                 "progress_pct": mapped_pct,
                 "message": f"[阶段 2/3] {msg}",
             })
 
         await build_cd2_subscription_inventory(
             db_session_factory,
-            scope="all",
+            scope=media_type_clean,
             raw_subs=raw_subs,
             progress_cb=_cd2_progress,
         )
 
-        # 用最新 CD2 实盘库存重新组装并持久化全分类快照
+        # 基于 CD2 快照进行初步注入，识别存在 99 集占位符或总集数未知且 CD2 已有实存的剧集并向 TMDB 纠偏
+        async with db_session_factory() as db:
+            enriched_subs, _ = await enrich_subscriptions_with_cd2_and_cache(db, raw_subs)
+
+        fix_pairs: list[tuple[int, int]] = []
+        if media_type_clean != "movie":
+            seen_fix_pairs: set[tuple[int, int]] = set()
+            for s in enriched_subs:
+                if _unified_query_state.get("aborted"):
+                    break
+                if diagnose_subscription(s).media_type != "tv":
+                    continue
+                raw_tot = s.get("total_episode") or s.get("total_episodes")
+                if s.get("cd2_verified") and int(s.get("cd2_total_episodes") or 0) > 0:
+                    if (raw_tot is None or int(raw_tot) in (0, 99)) and not s.get("tmdb_season_episodes"):
+                        tid_raw = str(s.get("tmdbid") or s.get("tmdb_id") or "").strip()
+                        if tid_raw.isdigit():
+                            sn_val = int(s.get("season") or 1)
+                            pair = (int(tid_raw), sn_val)
+                            if pair not in seen_fix_pairs:
+                                seen_fix_pairs.add(pair)
+                                fix_pairs.append(pair)
+
+        if fix_pairs and not _unified_query_state.get("aborted"):
+            _unified_query_state.update({
+                "progress_pct": 52,
+                "message": f"[阶段 2/3] 正在通过 TMDB 纠正 {len(fix_pairs)} 部剧集的真实季总集数（消除 99 集占位符）...",
+            })
+            tmdb_sem = asyncio.Semaphore(5)
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            cutoff_str = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+
+            async def _fetch_tmdb_season_meta(tid_int: int, sn_val: int) -> tuple[int, int, dict[str, Any]] | None:
+                if _unified_query_state.get("aborted"):
+                    return None
+                async with tmdb_sem:
+                    try:
+                        det = await tmdb.get_season_detail(tid_int, sn_val)
+                    except Exception:
+                        return None
+                if not isinstance(det, dict):
+                    return None
+                eps = det.get("episodes")
+                if not isinstance(eps, list) or not eps:
+                    return None
+                ep_nums = [
+                    int(e.get("episode_number"))
+                    for e in eps
+                    if isinstance(e, dict) and e.get("episode_number") and int(e.get("episode_number")) > 0
+                ]
+                if not ep_nums:
+                    return None
+                ep_count = max(len(ep_nums), max(ep_nums))
+                aired_eps = [
+                    e for e in eps
+                    if isinstance(e, dict) and e.get("air_date") and str(e.get("air_date"))[:10] <= today_str
+                ]
+                all_have_air = all(isinstance(e, dict) and bool(e.get("air_date")) for e in eps)
+                max_air = max(
+                    (str(e.get("air_date"))[:10] for e in eps if isinstance(e, dict) and e.get("air_date")),
+                    default="",
+                )
+                finished_flag = bool(ep_count >= 2 and all_have_air and max_air and max_air <= cutoff_str)
+                return tid_int, sn_val, {
+                    "tmdb_id": tid_int,
+                    "season_number": sn_val,
+                    "episode_count": ep_count,
+                    "aired_count": len(aired_eps),
+                    "season_finished": finished_flag,
+                    "last_air_date": max_air,
+                }
+
+            season_meta_results = await asyncio.gather(
+                *(_fetch_tmdb_season_meta(tid_i, sn_i) for tid_i, sn_i in fix_pairs),
+                return_exceptions=True,
+            )
+            valid_metas = [r for r in season_meta_results if isinstance(r, tuple) and len(r) == 3]
+            if valid_metas:
+                async with db_session_factory() as db:
+                    for tid_i, sn_i, payload in valid_metas:
+                        ck = f"tmdb_tv_season:{tid_i}:{sn_i}"
+                        p_str = json.dumps(payload, ensure_ascii=False)
+                        row = (
+                            await db.execute(select(MetadataCache).where(MetadataCache.cache_key == ck))
+                        ).scalar_one_or_none()
+                        if row:
+                            row.payload_json = p_str
+                            row.verified = True
+                            row.status = "ok"
+                            row.updated_at = datetime.now()
+                        else:
+                            db.add(
+                                MetadataCache(
+                                    cache_key=ck,
+                                    source="tmdb_tv_season",
+                                    media_id=str(tid_i),
+                                    season_number=sn_i,
+                                    payload_json=p_str,
+                                    verified=True,
+                                    status="ok",
+                                )
+                            )
+                    await db.commit()
+
+        # 用最新 CD2 实盘库存与 TMDB 季纠偏缓存重新组装并持久化全分类快照
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         async with db_session_factory() as db:
             enriched_subs, _ = await enrich_subscriptions_with_cd2_and_cache(db, raw_subs)
             await assemble_subscriptions_payload(db, raw_subs, save_as_snapshot=True, queried_at=now_str)
             res_cache = await load_resource_audit_cache(db)
             if not reuse_resource_cache:
-                res_cache.clear()
+                if media_type_clean == "all":
+                    res_cache.clear()
+                elif media_type_clean == "tv":
+                    for k in list(res_cache.keys()):
+                        if ":tv:" in k or k.endswith(":tv"):
+                            res_cache.pop(k, None)
+                elif media_type_clean == "movie":
+                    for k in list(res_cache.keys()):
+                        if ":movie:" in k or k.endswith(":movie"):
+                            res_cache.pop(k, None)
                 await save_resource_audit_cache(db, res_cache)
 
         _unified_query_state.update({
@@ -1134,7 +1254,7 @@ async def _run_unified_query_worker(
                 "stage": "done",
                 "stage_label": "查询完成",
                 "progress_pct": 100,
-                "message": f"已完成 MoviePilot 与 CD2 实盘数据同步（共 {len(raw_subs)} 条订阅）",
+                "message": f"已完成 MoviePilot 与 CD2 {type_label}实盘数据同步（共 {len(raw_subs)} 条订阅）",
             })
             return
 
@@ -1142,9 +1262,9 @@ async def _run_unified_query_worker(
         target_subs: list[dict[str, Any]] = []
         for s in enriched_subs:
             diag = diagnose_subscription(s)
-            if diag.media_type == "tv" and diag.clean_rule == "stalled":
+            if media_type_clean in ("all", "tv") and diag.media_type == "tv" and diag.clean_rule == "stalled":
                 target_subs.append(s)
-            elif diag.media_type == "movie" and diag.clean_rule in ("zombie", "douban_stale"):
+            elif media_type_clean in ("all", "movie") and diag.media_type == "movie" and diag.clean_rule in ("zombie", "douban_stale"):
                 target_subs.append(s)
 
         # 电影数量少优先排前面，剧集按已收集集数降序（越接近收齐的越优先搜寻补缺）
@@ -1158,16 +1278,16 @@ async def _run_unified_query_worker(
         total_targets = len(target_subs)
         _unified_query_state.update({
             "stage": "resource_search",
-            "stage_label": "阶段 3/3 · 搜寻站点可补缺资源",
+            "stage_label": f"阶段 3/3 · 搜寻{type_label}可补缺资源",
             "resource_total": total_targets,
             "resource_processed": 0,
             "resource_downloadable": 0,
             "resource_no_source": 0,
             "progress_pct": 56 if total_targets > 0 else 100,
             "message": (
-                f"[阶段 3/3] 正在通过 MoviePilot 搜寻 {total_targets} 部「部分已下·断更 / 老片死种」的站点资源..."
+                f"[阶段 3/3] 正在通过 MoviePilot 搜寻 {total_targets} 部{type_label}「部分已下·断更 / 老片死种」的站点资源..."
                 if total_targets > 0
-                else "全部数据查询完成（当前无需要搜寻站点资源的断更条目）"
+                else f"全部数据查询完成（当前无需要搜寻站点资源的{type_label}断更条目）"
             ),
         })
 
@@ -1201,10 +1321,9 @@ async def _run_unified_query_worker(
         dl_cnt = 0
         no_cnt = 0
 
-        for idx, sub in enumerate(target_subs):
+        async def _audit_one_target(sub: dict[str, Any]) -> tuple[dict[str, Any] | None, bool]:
             if _unified_query_state.get("aborted"):
-                break
-
+                return None, False
             diag = diagnose_subscription(sub)
             tid = sub.get("tmdbid") or sub.get("tmdb_id")
             cached_hit = None
@@ -1216,58 +1335,70 @@ async def _run_unified_query_worker(
                     tmdb_id=tid,
                     season=diag.season,
                 )
-
             if cached_hit and cached_hit.get("audit_status") in (
                 "downloadable",
                 "no_resource",
                 "already_queued",
                 "skipped",
             ):
-                res_item = cached_hit
-                need_network = False
-            else:
-                need_network = True
-                res_item = await _audit_single_subscription_item(
-                    sub,
-                    mp=mp,
-                    tmdb=tmdb,
-                    category_plans=category_plans,
-                    active_downloads=active_downloads,
-                    sem=sem,
-                    is_aborted_fn=lambda: bool(_unified_query_state.get("aborted")),
-                    min_seeders=min_seeders,
-                    tier_ratio=tier_ratio,
-                    min_slack=min_slack,
-                    min_resolution=min_resolution,
-                    require_chinese=require_chinese,
-                )
-                if res_item:
-                    _store_item_in_resource_cache(res_cache, res_item)
+                return cached_hit, False
 
-            if not res_item:
+            res_item = await _audit_single_subscription_item(
+                sub,
+                mp=mp,
+                tmdb=tmdb,
+                category_plans=category_plans,
+                active_downloads=active_downloads,
+                sem=sem,
+                is_aborted_fn=lambda: bool(_unified_query_state.get("aborted")),
+                min_seeders=min_seeders,
+                tier_ratio=tier_ratio,
+                min_slack=min_slack,
+                min_resolution=min_resolution,
+                require_chinese=require_chinese,
+            )
+            return (res_item or None), True
+
+        BATCH_SIZE = 3
+        for start_idx in range(0, total_targets, BATCH_SIZE):
+            if _unified_query_state.get("aborted"):
                 break
+            batch = target_subs[start_idx:start_idx + BATCH_SIZE]
+            batch_results = await asyncio.gather(*(_audit_one_target(s) for s in batch))
 
-            processed = idx + 1
-            st = res_item.get("audit_status")
-            if st == "downloadable":
-                dl_cnt += 1
-            elif st in ("no_resource", "skipped", "error"):
-                no_cnt += 1
+            batch_network = False
+            last_name = ""
+            aborted_hit = False
+            for res_item, used_net in batch_results:
+                if not res_item:
+                    aborted_hit = True
+                    continue
+                if used_net:
+                    _store_item_in_resource_cache(res_cache, res_item)
+                    batch_network = True
+                processed += 1
+                last_name = str(res_item.get("name") or last_name)
+                st = res_item.get("audit_status")
+                if st == "downloadable":
+                    dl_cnt += 1
+                elif st in ("no_resource", "skipped", "error"):
+                    no_cnt += 1
 
-            pct = 55 + int((processed * 45) / max(1, total_targets))
-            _unified_query_state.update({
-                "resource_processed": processed,
-                "resource_downloadable": dl_cnt,
-                "resource_no_source": no_cnt,
-                "progress_pct": min(99, pct),
-                "message": (
-                    f"[阶段 3/3] 正在搜寻站点补缺资源：{res_item.get('name')} "
-                    f"({processed}/{total_targets} · 已命中 {dl_cnt} 部可补缺 / {no_cnt} 部无源)"
-                ),
-            })
+            if processed > 0:
+                pct = 55 + int((processed * 45) / max(1, total_targets))
+                _unified_query_state.update({
+                    "resource_processed": processed,
+                    "resource_downloadable": dl_cnt,
+                    "resource_no_source": no_cnt,
+                    "progress_pct": min(99, pct),
+                    "message": (
+                        f"[阶段 3/3] 正在搜寻站点补缺资源：{last_name} "
+                        f"({processed}/{total_targets} · 已命中 {dl_cnt} 部可补缺 / {no_cnt} 部无源)"
+                    ),
+                })
 
-            # 每新搜寻 2 部或全部完成时，落盘保存并递增 snapshot_version 触发前端实时刷新卡片
-            if (need_network and processed % 2 == 0) or processed == total_targets:
+            # 每完成 2 批网络搜寻或到达末尾时落盘并递增 snapshot_version
+            if (batch_network and (processed % 6 == 0 or start_idx + BATCH_SIZE >= total_targets)) or processed == total_targets:
                 async with db_session_factory() as db:
                     await save_resource_audit_cache(db, res_cache)
                     await assemble_subscriptions_payload(
@@ -1276,6 +1407,9 @@ async def _run_unified_query_worker(
                 _unified_query_state["snapshot_version"] = (
                     int(_unified_query_state.get("snapshot_version") or 0) + 1
                 )
+
+            if aborted_hit or _unified_query_state.get("aborted"):
+                break
 
         # 收尾落盘
         async with db_session_factory() as db:
@@ -1311,6 +1445,7 @@ async def _run_unified_query_worker(
 def start_unified_subscription_query(
     db_session_factory,
     *,
+    media_type: str = "all",
     search_resources: bool = True,
     reuse_resource_cache: bool = True,
 ) -> dict[str, Any]:
@@ -1324,13 +1459,21 @@ def start_unified_subscription_query(
         return get_unified_query_status()
 
     job_id = f"uq-{uuid.uuid4().hex[:8]}"
+    media_type_clean = (media_type or "all").lower().strip()
+    if media_type_clean not in ("all", "tv", "movie"):
+        media_type_clean = "all"
+    type_label = (
+        "电视剧" if media_type_clean == "tv"
+        else ("电影" if media_type_clean == "movie" else "剧集与电影")
+    )
     _unified_query_state.update({
         "job_id": job_id,
+        "media_type": media_type_clean,
         "status": "running",
         "stage": "mp_fetch",
-        "stage_label": "阶段 1/3 · 获取 MoviePilot 订阅",
+        "stage_label": f"阶段 1/3 · 获取 {type_label}订阅",
         "progress_pct": 5,
-        "message": "正在启动统一查询：连接 MoviePilot、CD2 与补缺站点...",
+        "message": f"正在启动{type_label}订阅查询：连接 MoviePilot、CD2 与补缺站点...",
         "aborted": False,
         "resource_total": 0,
         "resource_processed": 0,
@@ -1341,6 +1484,7 @@ def start_unified_subscription_query(
         _run_unified_query_worker(
             job_id,
             db_session_factory,
+            media_type=media_type_clean,
             search_resources=search_resources,
             reuse_resource_cache=reuse_resource_cache,
         )

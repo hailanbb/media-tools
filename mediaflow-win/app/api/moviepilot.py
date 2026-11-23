@@ -45,24 +45,18 @@ async def check_subscription_resources(sub_id: int):
 
 @router.get("/subscriptions/{sub_id}/sources")
 async def subscription_sources(sub_id: int, db: AsyncSession = Depends(get_db)):
-    from app.services.subscription_service import subscription, identity
-    from app.models.season import SeasonRecord
-    from sqlalchemy import select
+    from app.services.subscription_service import discover_source_season_entries, subscription
+    from app.clients.clouddrive2 import CloudDrive2Client
     _check_mp_configured()
-    mp = MoviePilotClient()
+    mp, disk = MoviePilotClient(), CloudDrive2Client()
     try:
         sub = await subscription(mp, sub_id)
         if not sub:
             raise HTTPException(404, "订阅不存在")
-        tid, season = identity(sub)
-        rows = await db.scalars(select(SeasonRecord).where(SeasonRecord.tmdb_id == tid,
-            SeasonRecord.season_number == season, SeasonRecord.status != "manually_handled"))
-        unique = {}
-        for row in rows:
-            unique[row.season_path] = {"id": row.id, "path": row.season_path}
-        return list(unique.values())
+        return await discover_source_season_entries(db, disk, sub)
     finally:
         await mp.close()
+        await disk.close()
 
 
 @router.post("/subscriptions/{sub_id}/operation-preview")
@@ -134,6 +128,7 @@ class SubscriptionCd2SyncRequest(BaseModel):
 
 
 class UnifiedSubscriptionQueryRequest(BaseModel):
+    media_type: str = "all"  # "all" | "tv" | "movie"
     search_resources: bool = True
     reuse_resource_cache: bool = True
 
@@ -189,8 +184,12 @@ async def trigger_unified_subscriptions_query(
     from app.services.subscription_governance_service import start_unified_subscription_query
     search_res = True if body is None else bool(body.search_resources)
     reuse_cache = True if body is None else bool(body.reuse_resource_cache)
+    req_media_type = (body.media_type.lower() if body and body.media_type else "all").strip()
+    if req_media_type not in ("all", "tv", "movie"):
+        req_media_type = "all"
     return start_unified_subscription_query(
         async_session,
+        media_type=req_media_type,
         search_resources=search_res,
         reuse_resource_cache=reuse_cache,
     )
@@ -632,6 +631,7 @@ async def batch_delete_subscriptions(
     mp = MoviePilotClient()
     success_count = 0
     fail_count = 0
+    deleted_ids: list[int] = []
     errors: list[str] = []
     total_count = len(body.sub_ids)
 
@@ -689,9 +689,11 @@ async def batch_delete_subscriptions(
                 )
                 db.add(op_log)
                 success_count += 1
+                deleted_ids.append(int(sid))
             except Exception as e:
                 if mp_deleted:
                     success_count += 1
+                    deleted_ids.append(int(sid))
                     errors.append(f"退订 {title} 在 MP 已生效，但本地审计日志写入失败: {e}")
                 else:
                     fail_count += 1
@@ -707,7 +709,7 @@ async def batch_delete_subscriptions(
 
         if success_count > 0:
             await db.commit()
-            await mutate_unified_snapshot_on_delete(db, body.sub_ids)
+            await mutate_unified_snapshot_on_delete(db, deleted_ids)
 
         msg = f"批量清理完成：成功退订 {success_count} 项"
         if fail_count > 0:
