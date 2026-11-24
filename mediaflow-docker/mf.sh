@@ -178,7 +178,7 @@ configure_env_wizard() {
     echo ""
 
     local cur_port cur_cd2_url cur_cd2_token cur_mp_url cur_mp_token
-    local cur_src cur_arc cur_lib cur_auth cur_debug
+    local cur_src cur_arc cur_lib cur_debug
     cur_port="$(get_env_val MF_PORT "8080")"
     cur_cd2_url="$(get_env_val MF_CD2_URL "http://${lan_ip}:19798")"
     cur_cd2_token="$(get_env_val MF_CD2_TOKEN "")"
@@ -187,10 +187,9 @@ configure_env_wizard() {
     cur_src="$(get_env_val MF_SOURCE_ROOT "/115/Library_incs/nas")"
     cur_arc="$(get_env_val MF_ARCHIVE_ROOT "/115/Library_incs/nas.finish")"
     cur_lib="$(get_env_val MF_LIBRARY_ROOT "$cur_arc")"
-    cur_auth="$(get_env_val MF_AUTH_TOKEN "")"
     cur_debug="$(get_env_val MF_DEBUG "false")"
 
-    local v_port v_cd2_url v_cd2_token v_mp_url v_mp_token v_src v_arc v_lib v_auth
+    local v_port v_cd2_url v_cd2_token v_mp_url v_mp_token v_src v_arc v_lib
 
     read -r -p "1. Web 服务端口 [默认: ${cur_port}]: " v_port
     v_port="${v_port:-$cur_port}"
@@ -217,16 +216,8 @@ configure_env_wizard() {
     read -r -p "7. 归档目标根路径 MF_ARCHIVE_ROOT [当前: ${cur_arc}]: " v_arc
     v_arc="${v_arc:-$cur_arc}"
 
-    read -r -p "8. 媒体库根路径 MF_LIBRARY_ROOT [默认同归档路径: ${v_arc}]: " v_lib
+    read -r -p "8. Emby成品媒体库根路径 MF_LIBRARY_ROOT (一般直接回车同归档路径) [默认: ${v_arc}]: " v_lib
     v_lib="${v_lib:-$v_arc}"
-
-    local mask_auth="${cur_auth:+已设置(回车保留，输入 none 清除)}"
-    read -r -p "9. API 访问保护密码 MF_AUTH_TOKEN (可选) [${mask_auth:-留空不启用}]: " v_auth
-    if [ "$v_auth" = "none" ]; then
-        v_auth=""
-    else
-        v_auth="${v_auth:-$cur_auth}"
-    fi
 
     # 保留用户可能手动添加的其他可选配置（如 MF_TMDB_API_KEY / MF_GAP_FILL_*）
     local extra_lines=""
@@ -239,7 +230,7 @@ configure_env_wizard() {
 MF_DEBUG=${cur_debug}
 MF_PORT=${v_port}
 MF_DATA_DIR=/app/data
-$([ -n "$v_auth" ] && echo "MF_AUTH_TOKEN=${v_auth}" || echo "# MF_AUTH_TOKEN=")
+# MF_AUTH_TOKEN=  # 注意：网页端无登录框，浏览器直接访问请保持注释留空；公网建议在 Nginx/Lucky 反代层加密码
 
 # CloudDrive2 连接
 MF_CD2_URL=${v_cd2_url}
