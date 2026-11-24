@@ -467,6 +467,9 @@ def get_suggest_cached_detail(subject_id: str) -> dict[str, Any]:
     return dict(cached) if isinstance(cached, dict) else {}
 
 
+_TRANSIENT_CF_STATUS = frozenset({502, 503, 504, 520, 522, 524})
+
+
 async def _throttle_cf_proxy(min_interval: float = _CF_PROXY_MIN_INTERVAL) -> None:
     global _LAST_CF_REQUEST_AT
     if min_interval <= 0:
@@ -477,6 +480,27 @@ async def _throttle_cf_proxy(min_interval: float = _CF_PROXY_MIN_INTERVAL) -> No
         if wait > 0:
             await asyncio.sleep(wait)
         _LAST_CF_REQUEST_AT = time.monotonic()
+
+
+async def _cf_get_with_retry(
+    http_client: httpx.AsyncClient,
+    url: str,
+    *,
+    params: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    cf_throttle_seconds: float = _CF_PROXY_MIN_INTERVAL,
+) -> httpx.Response:
+    """对 CF 反代偶发边缘握手超时、连接重置或 502/503/504/52x 网关抖动自动重试 1 次。"""
+    await _throttle_cf_proxy(cf_throttle_seconds)
+    try:
+        resp = await http_client.get(url, params=params, headers=headers)
+    except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError):
+        await _throttle_cf_proxy(cf_throttle_seconds)
+        return await http_client.get(url, params=params, headers=headers)
+    if resp.status_code in _TRANSIENT_CF_STATUS:
+        await _throttle_cf_proxy(cf_throttle_seconds)
+        resp = await http_client.get(url, params=params, headers=headers)
+    return resp
 
 
 async def _throttle_direct_cookie(min_interval: float = _DIRECT_COOKIE_MIN_INTERVAL) -> None:
@@ -537,11 +561,12 @@ async def search_fallback(
                 if is_cf_proxy_in_backoff():
                     break
                 try:
-                    await _throttle_cf_proxy(cf_throttle_seconds)
-                    resp = await http_client.get(
+                    resp = await _cf_get_with_retry(
+                        http_client,
                         f"{cfg['proxy_base']}{ep_path}",
                         params={"q": q_norm},
                         headers=_build_cf_headers(cfg, include_cookie=False),
+                        cf_throttle_seconds=cf_throttle_seconds,
                     )
                     # 旧版 Worker 尚未部署 /search 时静默回落 /suggest
                     if resp.status_code == 404 and ep_path == "/search":
@@ -704,7 +729,8 @@ async def fetch_detail_fallback(
     if isinstance(cached_detail, dict) and _is_usable_detail(cached_detail):
         return dict(cached_detail)
 
-    # 1. Cloudflare Workers 反代（优先 Rexxar；404 直接终止；仅在配置了 Cookie 时才尝试网页 /subject 兜底，避免无 Cookie 必出 302）
+    # 1. Cloudflare Workers 反代（优先 Rexxar；404 直接终止不再串调 Cookie；偶发超时自动重试 1 次）
+    confirmed_not_tv = False
     if cfg["proxy_base"]:
         if is_cf_proxy_in_backoff():
             reason = str(_STATE.get("cf_backoff_reason") or "CF 反代风控退避中")
@@ -715,10 +741,11 @@ async def fetch_detail_fallback(
                 cf_channels.append(("cf_proxy_subject", f"/subject/{sid}", True))
             for ch_name, path, is_html in cf_channels:
                 try:
-                    await _throttle_cf_proxy(cf_throttle_seconds)
-                    resp = await http_client.get(
+                    resp = await _cf_get_with_retry(
+                        http_client,
                         f"{cfg['proxy_base']}{path}",
                         headers=_build_cf_headers(cfg, include_cookie=is_html),
+                        cf_throttle_seconds=cf_throttle_seconds,
                     )
                     if not is_html and resp.status_code in (302, 403) and cfg["cookie_header"]:
                         await _throttle_cf_proxy(cf_throttle_seconds)
@@ -727,6 +754,7 @@ async def fetch_detail_fallback(
                             headers=_build_cf_headers(cfg, include_cookie=True),
                         )
                     if resp.status_code == 404:
+                        confirmed_not_tv = True
                         diag.append({"source": ch_name, "subject_id": sid, "status": "unavailable", "reason": "非剧集条目 (HTTP 404)"})
                         break
                     if resp.status_code in (302, 403):
@@ -746,6 +774,9 @@ async def fetch_detail_fallback(
                     diag.append({"source": ch_name, "subject_id": sid, "status": "unavailable", "reason": "详情缺少季集数"})
                 except Exception as exc:
                     diag.append({"source": ch_name, "subject_id": sid, "status": "failed", "reason": lookup_error_reason(exc)})
+
+    if confirmed_not_tv:
+        return {}
 
     # 2. 本机 Cookie 直连（Rexxar → Subject HTML）
     if cfg["cookie_header"]:
@@ -784,7 +815,12 @@ async def _probe_cf_proxy(cfg: dict[str, Any], http_client: httpx.AsyncClient) -
         return {"configured": False, "ok": False, "http_status": 0, "latency_ms": 0, "sample_title": "", "reason": "未配置反代地址"}
     started = time.monotonic()
     try:
-        resp = await http_client.get(f"{cfg['proxy_base']}/probe", headers=_build_cf_headers(cfg))
+        resp = await _cf_get_with_retry(
+            http_client,
+            f"{cfg['proxy_base']}/probe",
+            headers=_build_cf_headers(cfg, include_cookie=False),
+            cf_throttle_seconds=0.0,
+        )
         latency = int((time.monotonic() - started) * 1000)
         if resp.status_code == 200:
             data = resp.json()
@@ -817,31 +853,77 @@ async def _probe_direct_cookie(
     if not cfg["cookie_header"]:
         return {"configured": False, "ok": False, "http_status": 0, "latency_ms": 0, "sample_title": "", "reason": "未导入豆瓣 Cookie"}
     started = time.monotonic()
-    try:
-        await _throttle_direct_cookie(throttle_seconds)
-        resp = await http_client.get(
-            "https://movie.douban.com/j/subject_suggest",
-            params={"q": "庆余年"},
-            headers=_build_direct_headers("suggest", cfg["cookie_header"]),
-        )
-        latency = int((time.monotonic() - started) * 1000)
-        if resp.status_code == 200 and not _is_blocked_response(resp.status_code, resp.text):
-            hits = search_items(resp.json())
-            if hits:
+    probe_steps = [
+        (
+            "rexxar_tv",
+            "https://m.douban.com/rexxar/api/v2/tv/25853071",
+            None,
+            "rexxar",
+        ),
+        (
+            "classic_search",
+            "https://www.douban.com/j/search",
+            {"q": "庆余年", "start": 0, "cat": "1002"},
+            "classic_search",
+        ),
+        (
+            "subject_html",
+            "https://movie.douban.com/subject/25853071/",
+            None,
+            "subject",
+        ),
+    ]
+    last_status = 0
+    last_reason = "探测未通过"
+    for mode, url, params, hdr_kind in probe_steps:
+        try:
+            await _throttle_direct_cookie(throttle_seconds)
+            resp = await http_client.get(
+                url,
+                params=params,
+                headers=_build_direct_headers(hdr_kind, cfg["cookie_header"], subject_id="25853071", query="庆余年"),
+            )
+            last_status = resp.status_code
+            latency = int((time.monotonic() - started) * 1000)
+            if _is_blocked_response(resp.status_code, resp.text):
+                last_reason = "本机 IP 被豆瓣风控或 Cookie 已过期 (004/302 拦截，有 CF 反代在线时不影响使用)"
+                continue
+            if resp.status_code != 200:
+                last_reason = f"上游返回 HTTP {resp.status_code}"
+                continue
+            sample_title = ""
+            if mode == "rexxar_tv":
+                d = normalize_detail(resp.json())
+                if d.get("title") and d.get("number_of_episodes"):
+                    sample_title = str(d["title"])
+            elif mode == "classic_search":
+                hits = _extract_flexible_search_items(resp.json())
+                if hits:
+                    sample_title = str(hits[0].get("title") or "")
+            else:
+                d = subject_page_detail(resp.text, "25853071")
+                sample_title = str(d.get("title") or "")
+            if sample_title:
                 return {
                     "configured": True,
                     "ok": True,
                     "http_status": 200,
                     "latency_ms": latency,
-                    "sample_title": str(hits[0].get("title") or ""),
+                    "sample_title": sample_title,
                     "reason": "Cookie 直连在线",
                 }
-            return {"configured": True, "ok": False, "http_status": 200, "latency_ms": latency, "sample_title": "", "reason": "返回空列表"}
-        reason = "Cookie 已过期或触发豆瓣 004/验证码拦截" if _is_blocked_response(resp.status_code, resp.text) else f"HTTP {resp.status_code}"
-        return {"configured": True, "ok": False, "http_status": resp.status_code, "latency_ms": latency, "sample_title": "", "reason": reason}
-    except Exception as exc:
-        latency = int((time.monotonic() - started) * 1000)
-        return {"configured": True, "ok": False, "http_status": 0, "latency_ms": latency, "sample_title": "", "reason": lookup_error_reason(exc)}
+            last_reason = "返回内容为空"
+        except Exception as exc:
+            last_reason = lookup_error_reason(exc)
+    latency = int((time.monotonic() - started) * 1000)
+    return {
+        "configured": True,
+        "ok": False,
+        "http_status": last_status,
+        "latency_ms": latency,
+        "sample_title": "",
+        "reason": last_reason,
+    }
 
 
 async def check_health(

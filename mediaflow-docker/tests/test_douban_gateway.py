@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+
+_TEST_DIR = tempfile.TemporaryDirectory(prefix="mf-test-douban-")
+os.environ.update(MF_DATA_DIR=_TEST_DIR.name, MF_CD2_URL="", MF_CD2_TOKEN="", MF_MP_URL="", MF_MP_TOKEN="", MF_TMDB_API_KEY="")
 
 from httpx import ASGITransport, AsyncClient
 
@@ -303,6 +307,94 @@ class TestDoubanGatewayFailoverAndApi(unittest.IsolatedAsyncioTestCase):
         cached = douban_gateway.get_suggest_cached_detail("37283814")
         self.assertEqual(cached["number_of_episodes"], 52)
         self.assertEqual(cached["year"], "2025")
+
+    async def test_cf_proxy_404_does_not_fallthrough_to_direct_cookie_004(self):
+        douban_gateway.reset_state_for_tests()
+        douban_gateway.save_runtime_config(
+            {
+                "proxy_base": "https://douban.ubaby.top",
+                "proxy_token": "tok123",
+                "raw_cookie": 'dbcl2="11223344:secret"; bid=abcdefghijk',
+            }
+        )
+        called_urls = []
+
+        async def _fake_get(url, headers=None, params=None):
+            called_urls.append(url)
+            if "douban.ubaby.top/rexxar/tv/27165968" in url:
+                return SimpleNamespace(status_code=404, text="Not Found")
+            raise AssertionError(f"Should not call any other url on 404: {url}")
+
+        diag = []
+        detail = await douban_gateway.fetch_detail_fallback(
+            "27165968", SimpleNamespace(get=_fake_get), diagnostics=diag, cf_throttle_seconds=0.0
+        )
+        self.assertEqual(detail, {})
+        self.assertEqual(len(called_urls), 1)
+        self.assertTrue(any(d.get("status") == "unavailable" and "非剧集条目" in d.get("reason", "") for d in diag))
+        self.assertFalse(any("Cookie 已失效" in d.get("reason", "") for d in diag))
+
+    async def test_cf_get_with_retry_recovers_from_transient_error(self):
+        douban_gateway.reset_state_for_tests()
+        attempts = 0
+
+        async def _flaky_get(url, headers=None, params=None):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return SimpleNamespace(status_code=502, text="Bad Gateway")
+            return SimpleNamespace(status_code=200, json=lambda: [{"id": "1", "title": "Test"}])
+
+        resp = await douban_gateway._cf_get_with_retry(
+            SimpleNamespace(get=_flaky_get), "https://douban.ubaby.top/suggest", cf_throttle_seconds=0.0
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(attempts, 2)
+
+    def test_years_compatible_and_douban_evidence_season_year_tolerance(self):
+        from app.core.inspector import _douban_evidence, _years_compatible
+
+        # 1. 验证年份兼容函数
+        self.assertTrue(_years_compatible("2025", "2024", allow_adjacent=True))
+        self.assertTrue(_years_compatible("2024", "2025", allow_adjacent=True))
+        self.assertTrue(_years_compatible("2025", "2025", allow_adjacent=False))
+        self.assertFalse(_years_compatible("2025", "2024", allow_adjacent=False))
+        self.assertFalse(_years_compatible("2019", "1994", allow_adjacent=True))
+        self.assertTrue(_years_compatible("", "2024", allow_adjacent=True))
+
+        # 2. 少年泰坦出击 第九季：TMDB 参考年份 2024，豆瓣年份 2025（相差1年）应当成功核验通过
+        detail = {
+            "id": "37283814",
+            "douban_id": "37283814",
+            "title": "少年泰坦出击 第九季",
+            "original_title": "Teen Titans Go! Season 9",
+            "year": "2025",
+            "number_of_episodes": 52,
+            "type": "tv",
+        }
+        res_matched = _douban_evidence(
+            detail,
+            "37283814",
+            "少年泰坦出击 第九季",
+            "少年泰坦出击 (2013) [tmdbid=45140]",
+            wanted={9},
+            tmdb_id=45140,
+            season_years={9: "2024"},
+        )
+        self.assertIn(9, res_matched)
+        self.assertEqual(res_matched[9]["total"], 52)
+
+        # 3. 若年份差距达到2年或以上（如翻拍版本），应被安全拦截拒绝
+        res_rejected = _douban_evidence(
+            detail,
+            "37283814",
+            "少年泰坦出击 第九季",
+            "少年泰坦出击 (2013) [tmdbid=45140]",
+            wanted={9},
+            tmdb_id=45140,
+            season_years={9: "2020"},
+        )
+        self.assertEqual(res_rejected, {})
 
 
 if __name__ == "__main__":

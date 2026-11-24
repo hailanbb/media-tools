@@ -324,62 +324,77 @@ async function handleProbe(cookieHeader) {
       name: "suggest",
       url: "https://movie.douban.com/j/subject_suggest?q=%E5%BA%86%E4%BD%99%E5%B9%B4",
       kind: "suggest",
+      timeoutMs: 6000,
     },
     {
       name: "rexxar_tv",
       url: `https://m.douban.com/rexxar/api/v2/tv/${probeSubject}`,
       kind: "rexxar",
+      timeoutMs: 6000,
     },
     {
       name: "frodo_tv",
       url: `https://frodo.douban.com/api/v2/tv/${probeSubject}?apiKey=${FRODO_API_KEYS[0]}`,
       kind: "frodo",
+      timeoutMs: 3500,
     },
   ];
 
-  const results = {};
-  for (const c of checks) {
-    const started = Date.now();
-    try {
-      const resp = await fetch(c.url, {
-        method: "GET",
-        headers: buildUpstreamHeaders(c.kind, probeSubject, cookieHeader),
-        redirect: "manual",
-      });
-      let okJson = false;
-      let sampleTitle = "";
-      if (resp.ok) {
-        const text = await resp.text();
-        try {
-          const parsed = JSON.parse(text);
-          if (Array.isArray(parsed) && parsed.length > 0) {
-            okJson = true;
-            sampleTitle = String(parsed[0].title || "");
-          } else if (parsed && typeof parsed === "object" && (parsed.title || parsed.id)) {
-            okJson = true;
-            sampleTitle = String(parsed.title || "");
-          }
-        } catch {
-          okJson = false;
+  const entries = await Promise.all(
+    checks.map(async (c) => {
+      const started = Date.now();
+      try {
+        const init = {
+          method: "GET",
+          headers: buildUpstreamHeaders(c.kind, probeSubject, cookieHeader),
+          redirect: "manual",
+        };
+        if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+          init.signal = AbortSignal.timeout(c.timeoutMs);
         }
-      } else {
-        await resp.body?.cancel();
+        const resp = await fetch(c.url, init);
+        let okJson = false;
+        let sampleTitle = "";
+        if (resp.ok) {
+          const text = await resp.text();
+          try {
+            const parsed = JSON.parse(text);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              okJson = true;
+              sampleTitle = String(parsed[0].title || "");
+            } else if (parsed && typeof parsed === "object" && (parsed.title || parsed.id)) {
+              okJson = true;
+              sampleTitle = String(parsed.title || "");
+            }
+          } catch {
+            okJson = false;
+          }
+        } else {
+          await resp.body?.cancel();
+        }
+        return [
+          c.name,
+          {
+            ok: resp.ok && okJson,
+            http_status: resp.status,
+            latency_ms: Date.now() - started,
+            sample_title: sampleTitle,
+          },
+        ];
+      } catch (err) {
+        return [
+          c.name,
+          {
+            ok: false,
+            http_status: 0,
+            latency_ms: Date.now() - started,
+            error: err instanceof Error ? err.message.slice(0, 120) : "fetch_failed",
+          },
+        ];
       }
-      results[c.name] = {
-        ok: resp.ok && okJson,
-        http_status: resp.status,
-        latency_ms: Date.now() - started,
-        sample_title: sampleTitle,
-      };
-    } catch (err) {
-      results[c.name] = {
-        ok: false,
-        http_status: 0,
-        latency_ms: Date.now() - started,
-        error: err instanceof Error ? err.message.slice(0, 120) : "fetch_failed",
-      };
-    }
-  }
+    })
+  );
+  const results = Object.fromEntries(entries);
   const anyOk = Object.values(results).some((r) => r.ok);
   return jsonResponse({ ok: anyOk, results }, anyOk ? 200 : 502);
 }

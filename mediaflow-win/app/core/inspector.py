@@ -28,6 +28,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
+from app.clients import douban_gateway
 from app.clients.clouddrive2 import GrpcError
 from app.core.directory_governance import (
     build_physical_dir_entry,
@@ -1107,7 +1108,7 @@ async def run_inspection(
                                 douban_gateway.record_mp_failure(f"MoviePilot 豆瓣详情异常: {type(exc).__name__}")
                     if not db_detail and douban_gateway.has_fallback_configured():
                         try:
-                            async with httpx.AsyncClient(timeout=8.0) as _fb_http:
+                            async with httpx.AsyncClient(timeout=httpx.Timeout(18.0, connect=8.0)) as _fb_http:
                                 db_detail = await douban_gateway.fetch_detail_fallback(target_did, _fb_http)
                         except Exception:
                             db_detail = {}
@@ -1153,7 +1154,7 @@ async def run_inspection(
                 })
                 info = {}
 
-            if (not active_mapping and mp_client and info.get("total") and max(all_ep_nums, default=0) > info["total"]
+            if (not active_mapping and _can_query_douban(mp_client) and info.get("total") and max(all_ep_nums, default=0) > info["total"]
                     and not info.get("douban_checked")):
                 _, secondary = await _fetch_seasons_via_douban(
                     mp_client, show_name, log, [season_num], tmdb_id=tmdb_id_num,
@@ -2949,6 +2950,18 @@ def _series_title(text: str) -> str:
     return re.sub(r"[\W_]+", "", text).casefold()
 
 
+def _can_query_douban(mp_client: Any) -> bool:
+    return bool(mp_client) or douban_gateway.has_fallback_configured()
+
+
+def _years_compatible(db_year: Any, ref_year: Any, *, allow_adjacent: bool = False) -> bool:
+    """校验豆瓣年份与参考年份兼容性：续季（S02+）容忍跨年首播/点映产生的 ±1 年偏差，同时拦截 ≥2 年的翻拍版碰撞。"""
+    y1, y2 = str(db_year or "").strip(), str(ref_year or "").strip()
+    if not (y1.isdigit() and len(y1) == 4 and y2.isdigit() and len(y2) == 4):
+        return True
+    return abs(int(y1) - int(y2)) <= (1 if allow_adjacent else 0)
+
+
 def _douban_evidence(detail, subject_id, search_title, show_name, wanted, tmdb_id, bound_season=None, season_years=None):
     """仅返回身份、季号都可核实的季表；单季条目有时使用键 1。"""
     if not isinstance(detail, dict) or not detail:
@@ -2965,9 +2978,23 @@ def _douban_evidence(detail, subject_id, search_title, show_name, wanted, tmdb_i
     # 数字可能是片名的一部分。仅在季号与独立身份或首播年份相符时认可紧连数字的续季标题。
     series = _series_title(clean)
     same_id = bool(tmdb_id and str(detail.get("tmdb_id")) == str(tmdb_id))
-    numbered_season = next((sn for sn in wanted if sn > 1 and
-                            _series_title(titles[0]) == series + str(sn) and
-                            (same_id or (season_years or {}).get(sn) == str(detail.get("year") or "-"))), None)
+    numbered_season = next(
+        (
+            sn
+            for sn in wanted
+            if sn > 1
+            and _series_title(titles[0]) == series + str(sn)
+            and (
+                same_id
+                or (
+                    bool((season_years or {}).get(sn))
+                    and bool(detail.get("year"))
+                    and _years_compatible(detail.get("year"), (season_years or {}).get(sn), allow_adjacent=True)
+                )
+            )
+        ),
+        None,
+    )
     if bound_season is None and not numbered_season and series not in {_series_title(t) for t in titles}:
         if not tmdb_id or str(detail.get("tmdb_id")) != str(tmdb_id):
             return {}
@@ -3003,8 +3030,12 @@ def _douban_evidence(detail, subject_id, search_title, show_name, wanted, tmdb_i
     if bound_season is None and year and detail.get("year") and str(detail["year"]) != year[1]:
         counts.pop(1, None)
     if bound_season is None and detail.get("year"):
-        counts = {sn: n for sn, n in counts.items() if not (season_years or {}).get(sn)
-                  or str(detail["year"]) == season_years[sn]}
+        counts = {
+            sn: n
+            for sn, n in counts.items()
+            if not (season_years or {}).get(sn)
+            or _years_compatible(detail["year"], season_years[sn], allow_adjacent=(sn >= 2))
+        }
     return {sn: {"total": n, "douban_id": subject_id, "bound": bound_season is not None,
                  "finished": (detail.get("status") or "") in ("Ended", "已完结", "已播完")}
             for sn, n in counts.items()
@@ -3037,7 +3068,7 @@ async def _fetch_seasons_via_douban(mp_client, show_name, log=None, needed_seaso
             or (d.get("title") and str(d.get("type") or "").casefold() in ("电影", "movie"))
         )
 
-    async def read(subject_id, title, season=None):
+    async def read(subject_id, title, season=None, shared_http=None):
         subject_id = str(subject_id)
         if not subject_id.isdigit():
             return {}
@@ -3065,24 +3096,47 @@ async def _fetch_seasons_via_douban(mp_client, show_name, log=None, needed_seaso
                     if mp_tried and not _detail_has_core_info(detail) and douban_gateway.has_fallback_configured():
                         douban_gateway.record_mp_failure(mp_failed_err or "MoviePilot 豆瓣详情缺少季集数")
                 if not _detail_has_core_info(detail) and douban_gateway.has_fallback_configured():
-                    async with httpx.AsyncClient(timeout=8.0) as http:
-                        detail = await douban_gateway.fetch_detail_fallback(subject_id, http, diagnostics=diagnostics)
+                    if shared_http is not None:
+                        detail = await douban_gateway.fetch_detail_fallback(subject_id, shared_http, diagnostics=diagnostics)
+                    else:
+                        async with httpx.AsyncClient(timeout=httpx.Timeout(18.0, connect=8.0)) as http:
+                            detail = await douban_gateway.fetch_detail_fallback(subject_id, http, diagnostics=diagnostics)
                 if not _detail_has_core_info(detail) and not douban_gateway.has_fallback_configured():
                     async with httpx.AsyncClient(timeout=8.0) as http:
                         response = await http.get(f"https://movie.douban.com/subject/{subject_id}/", headers={"User-Agent":"Mozilla/5.0"})
                         if response.status_code != 200:
                             raise ValueError(f"豆瓣详情 HTTP {response.status_code}")
                         detail = subject_page_detail(response.text, subject_id)
-                detail_cache[subject_id] = detail
-            detail = detail_cache[subject_id]
-            found = _douban_evidence(detail, subject_id, title, show_name, wanted, tmdb_id, season, season_years)
-            reason = "身份与季号匹配，取得季资料" if found else "未取得可匹配的季号、年份或连续集数资料"
+                if isinstance(detail, dict) and detail:
+                    detail_cache[subject_id] = detail
+            else:
+                detail = detail_cache[subject_id]
             if not isinstance(detail, dict) or not detail:
-                reason = "详情返回为空"
+                return {}
+            found = _douban_evidence(detail, subject_id, title, show_name, wanted, tmdb_id, season, season_years)
+            if found:
+                reason = "身份与季号匹配，取得季资料"
             elif detail.get("tmdb_id") and tmdb_id and str(detail["tmdb_id"]) != str(tmdb_id):
                 reason = "详情绑定另一 TMDB 作品，未采纳"
             elif str(detail.get("type") or "").casefold() in ("电影", "movie"):
                 reason = "候选是电影，未采纳"
+            elif (cand_sn := _parse_season_from_text(str(detail.get("title") or title or ""))) is not None and wanted and cand_sn not in wanted:
+                reason = f"候选为第 {cand_sn} 季，与当前待核验季不符"
+            elif detail.get("year") and any(
+                (season_years or {}).get(sn)
+                and not _years_compatible(detail.get("year"), (season_years or {}).get(sn), allow_adjacent=(sn >= 2))
+                for sn in (wanted or [1])
+            ):
+                reason = f"条目年份 ({detail.get('year')}) 与目标季年份差距过大，未采纳"
+            elif (
+                (year_m := re.search(r"[（(](\d{4})[)）]", show_name))
+                and (not wanted or 1 in wanted)
+                and detail.get("year")
+                and str(detail.get("year")) != year_m[1]
+            ):
+                reason = f"条目年份 ({detail.get('year')}) 与首播年份 ({year_m[1]}) 不符，未采纳"
+            else:
+                reason = "未取得可匹配的季号、年份或连续集数资料"
             diagnostics.append({"source": "douban_detail", "subject_id": str(subject_id), "title":title,
                                 "status": "matched" if found else "rejected", "reason": reason})
             return found
@@ -3116,7 +3170,8 @@ async def _fetch_seasons_via_douban(mp_client, show_name, log=None, needed_seaso
         candidates = {}
         use_gateway_fallback = douban_gateway.has_fallback_configured()
         search_sem = asyncio.Semaphore(1 if use_gateway_fallback else 3)
-        async with httpx.AsyncClient(timeout=8.0) as http:
+        matches = {}
+        async with httpx.AsyncClient(timeout=httpx.Timeout(18.0, connect=8.0)) as http:
             async def search(q):
                 async with search_sem:
                     found = {}
@@ -3157,8 +3212,31 @@ async def _fetch_seasons_via_douban(mp_client, show_name, log=None, needed_seaso
                                 douban_gateway.record_mp_failure(f"MoviePilot 豆瓣搜索异常: {type(exc).__name__}")
                             diagnostics.append({"source":"moviepilot_douban", "query":q, "status":"failed", "reason":lookup_error_reason(exc), "error_type":type(exc).__name__})
                     return found
+            allowed_series = {_series_title(q) for q in [*base_queries, *(extra_queries or [])] if _series_title(q)}
+            numbered_series = {f"{s}{sn}" for s in allowed_series for sn in unbound if sn > 1}
+
+            def _candidate_tier(c_title: str) -> int | None:
+                raw_t = str(c_title or "")
+                parsed_sn = _parse_season_from_text(raw_t)
+                if unbound and parsed_sn is not None and parsed_sn not in unbound:
+                    return None
+                if unbound and all(sn > 0 for sn in unbound) and re.search(r"电影版|剧场版", raw_t):
+                    return None
+                cs = _series_title(raw_t)
+                is_exact = cs in allowed_series or cs in numbered_series
+                is_prefix = bool(cs) and any(len(s) >= 2 and (cs.startswith(s) or s.startswith(cs)) for s in allowed_series)
+                if is_exact and unbound and (parsed_sn in unbound or cs in numbered_series):
+                    return 0
+                if is_exact:
+                    return 1
+                if is_prefix and unbound and parsed_sn in unbound:
+                    return 2
+                if is_prefix:
+                    return 3
+                return 4
+
             if use_gateway_fallback and douban_gateway.should_skip_mp():
-                # 备选通道下顺序查询并仅在目标季全部命中时提前短路（避免前 1 词只返回前几季就跳过「第九季」等精准季词）
+                # 备选通道下顺序查询，且仅当每个待核验季均已出现系列名精确匹配的该季候选时才提前短路
                 for q in queries[:6]:
                     found = await search(q)
                     candidates.update(found)
@@ -3166,33 +3244,47 @@ async def _fetch_seasons_via_douban(mp_client, show_name, log=None, needed_seaso
                         break
                     if candidates and (
                         not unbound
-                        or all(any(_parse_season_from_text(t) == sn for t in candidates.values()) for sn in unbound)
+                        or all(
+                            any(
+                                _candidate_tier(t) == 0
+                                and (_parse_season_from_text(t) == sn or _series_title(t) in {f"{s}{sn}" for s in allowed_series})
+                                for t in candidates.values()
+                            )
+                            for sn in unbound
+                        )
                     ):
                         break
             else:
                 for found in await asyncio.gather(*(search(q) for q in queries[:8])):
                     candidates.update(found)
-        matches = {}
-        # 优先读取标题中命中季号的候选，详情预算随本次涉及的季数增长；备选通道限精简预算防风控。
-        ranked = sorted(candidates.items(), key=lambda item: _parse_season_from_text(item[1]) not in unbound)
-        detail_sem = asyncio.Semaphore(1 if (use_gateway_fallback and douban_gateway.should_skip_mp()) else 3)
-        detail_limit = min(8, max(4, 2 * len(unbound))) if (use_gateway_fallback and douban_gateway.should_skip_mp()) else min(48, max(24, 4 * len(unbound)))
-        async def bounded_read(did, title):
-            async with detail_sem:
-                return await read(did, title)
-        if use_gateway_fallback and douban_gateway.should_skip_mp():
-            for did, title in ranked[:detail_limit]:
-                found = await bounded_read(did, title)
-                for sn, info in found.items():
-                    if sn not in result:
-                        matches.setdefault(sn, []).append(info)
-                if unbound and unbound.issubset(set(result) | set(matches)):
-                    break
-        else:
-            for found in await asyncio.gather(*(bounded_read(did, title) for did, title in ranked[:detail_limit])):
-                for sn, info in found.items():
-                    if sn not in result:
-                        matches.setdefault(sn, []).append(info)
+
+            # 过滤明写其它季号或电影版的条目，并按「精确系列+目标季 > 精确系列 > 前缀系列 > 其它」分层排序
+            tiered_candidates = [(did, c_title, tier) for did, c_title in candidates.items() if (tier := _candidate_tier(c_title)) is not None]
+            if not tiered_candidates and candidates:
+                tiered_candidates = [(did, c_title, 4) for did, c_title in candidates.items()]
+            if use_gateway_fallback and douban_gateway.should_skip_mp():
+                strong_tiers = [it for it in tiered_candidates if it[2] <= 3]
+                if strong_tiers:
+                    tiered_candidates = strong_tiers
+            ranked = [(did, c_title) for did, c_title, _ in sorted(tiered_candidates, key=lambda it: it[2])]
+            detail_sem = asyncio.Semaphore(1 if (use_gateway_fallback and douban_gateway.should_skip_mp()) else 3)
+            detail_limit = min(8, max(4, 2 * len(unbound))) if (use_gateway_fallback and douban_gateway.should_skip_mp()) else min(48, max(24, 4 * len(unbound)))
+            async def bounded_read(did, title):
+                async with detail_sem:
+                    return await read(did, title, shared_http=http if use_gateway_fallback else None)
+            if use_gateway_fallback and douban_gateway.should_skip_mp():
+                for did, title in ranked[:detail_limit]:
+                    found = await bounded_read(did, title)
+                    for sn, info in found.items():
+                        if sn not in result:
+                            matches.setdefault(sn, []).append(info)
+                    if unbound and unbound.issubset(set(result) | set(matches)):
+                        break
+            else:
+                for found in await asyncio.gather(*(bounded_read(did, title) for did, title in ranked[:detail_limit])):
+                    for sn, info in found.items():
+                        if sn not in result:
+                            matches.setdefault(sn, []).append(info)
         for sn, hits in matches.items():
             if len(hits) == 1:
                 result[sn] = hits[0]
@@ -3367,7 +3459,7 @@ async def auto_recalibrate_season(
             if log:
                 log.warning("TMDB 自愈校准执行异常: %s", e)
 
-    if mp_client:
+    if _can_query_douban(mp_client):
         _, seasons = await _fetch_seasons_via_douban(
             mp_client, show_name, log, [season_num], tmdb_id=current_tmdb_id)
         info = seasons.get(season_num)
@@ -3695,7 +3787,7 @@ async def _resolve_show_metadata(
                 break
 
     # 3. 豆瓣双轨深度检索与交叉核对
-    if mp_client:
+    if _can_query_douban(mp_client):
         douban_diagnostics = []
         db_id, db_seasons = await _fetch_seasons_via_douban(
             mp_client=mp_client,

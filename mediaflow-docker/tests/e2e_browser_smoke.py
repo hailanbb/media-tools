@@ -38,9 +38,9 @@ def run_e2e_smoke() -> None:
 
     with sync_playwright() as p:
         try:
-            browser = p.chromium.launch(channel="msedge", headless=True)
+            browser = p.chromium.launch(channel="msedge", headless=True, args=["--no-proxy-server"])
         except Exception:
-            browser = p.chromium.launch(headless=True)
+            browser = p.chromium.launch(headless=True, args=["--no-proxy-server"])
 
         context = browser.new_context(viewport={"width": 1440, "height": 900})
         page = context.new_page()
@@ -59,7 +59,7 @@ def run_e2e_smoke() -> None:
         )
 
         # 1. 打开首页并等待初始加载
-        page.goto(BASE_URL, wait_until="networkidle", timeout=20000)
+        page.goto(BASE_URL, wait_until="domcontentloaded", timeout=15000)
         badge_txt = page.locator("#appVersionBadge").inner_text().strip()
         assert badge_txt == f"v{VERSION}", f"页面版本徽章应为 v{VERSION}，实际为 {badge_txt}"
         checks.append(f"首页渲染正常，版本徽章={badge_txt}")
