@@ -31,7 +31,7 @@ err()   { echo -e "${RED}[错误]${NC} $*"; }
 
 pause_key() {
     echo ""
-    read -r -p "按回车键返回主菜单..." _
+    read -r -p "按回车键返回主菜单..." _ </dev/tty 2>/dev/null || read -r -p "按回车键返回主菜单..." _ || true
 }
 
 # 自动安装自身为全局命令 mf
@@ -142,7 +142,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8080/api/system/health"]
+      test: ["CMD", "curl", "-sf", "--max-time", "3", "http://localhost:8080/api/system/version"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -261,20 +261,25 @@ wait_and_verify() {
     local lan_ip
     lan_ip="$(get_lan_ip)"
 
-    info "正在等待服务就绪并验证版本..."
-    for _ in $(seq 1 20); do
-        if curl -sf "http://127.0.0.1:${port}/api/system/health" >/dev/null 2>&1; then
+    info "正在等待 MediaFlow 服务就绪..."
+    for _ in $(seq 1 15); do
+        local ver_json
+        ver_json="$(curl -sf --connect-timeout 1 --max-time 2 "http://127.0.0.1:${port}/api/system/version" 2>/dev/null || true)"
+        if [ -n "$ver_json" ]; then
             local ver
-            ver="$(curl -s "http://127.0.0.1:${port}/api/system/version" 2>/dev/null || echo '未知')"
+            ver="$(echo "$ver_json" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/v\1/p')"
             ok "MediaFlow 启动成功！"
             echo -e "  ${GREEN}访问地址:${NC} http://${lan_ip}:${port}"
-            echo -e "  ${GREEN}当前版本:${NC} ${ver}"
+            echo -e "  ${GREEN}当前版本:${NC} ${ver:-$ver_json}"
             return 0
         fi
-        sleep 2
+        sleep 1
     done
 
-    err "服务在 40 秒内未通过健康检查，建议在主菜单选择 [6] 查看实时日志排查。"
+    err "服务在 15 秒内未就绪，以下是容器状态与最近 40 行报错日志："
+    echo "--------------------------------------------------"
+    (cd "$BASE_DIR" && docker compose ps && echo "--- 最近日志 ---" && docker compose logs --tail=40) || true
+    echo "--------------------------------------------------"
     return 1
 }
 
@@ -440,9 +445,19 @@ action_stop() {
 action_logs() {
     [ -f "$COMPOSE_FILE" ] || { err "尚未安装。"; return 1; }
     cd "$BASE_DIR" || return 1
-    info "正在显示实时日志（按 Ctrl+C 退出并返回菜单）..."
+    echo ""
+    echo "请选择日志查看方式："
+    echo "  1. 静态查看最近 100 行日志（推荐排查启动报错，不会闪退）"
+    echo "  2. 实时滚动日志（按 Ctrl+C 停止滚动并停留）"
+    read -r -p "请选择 [默认 1]: " log_mode
     echo "--------------------------------------------------"
-    ( trap 'exit 0' INT; docker compose logs -f --tail=100 )
+    if [ "${log_mode:-1}" = "2" ]; then
+        info "实时日志中，按 Ctrl+C 停止滚动..."
+        ( trap 'exit 0' INT; docker compose logs -f --tail=100 ) || true
+    else
+        docker compose logs --tail=100 || true
+    fi
+    echo "--------------------------------------------------"
 }
 
 action_manual_backup() {
@@ -527,10 +542,20 @@ action_status() {
     if [ -f "$COMPOSE_FILE" ]; then
         cd "$BASE_DIR" && docker compose ps
     fi
-    if curl -sf "http://127.0.0.1:${port}/api/system/health" >/dev/null 2>&1; then
+    local ver_json
+    ver_json="$(curl -sf --connect-timeout 1 --max-time 2 "http://127.0.0.1:${port}/api/system/version" 2>/dev/null || true)"
+    if [ -n "$ver_json" ]; then
         echo -e "  接口状态: ${GREEN}🟢 正常${NC}"
-        echo -e "  运行版本: ${GREEN}$(curl -s "http://127.0.0.1:${port}/api/system/version")${NC}"
+        echo -e "  运行版本: ${GREEN}${ver_json}${NC}"
         echo -e "  访问地址: ${CYAN}http://${lan_ip}:${port}${NC}"
+        info "正在检测外部通道（CD2 / MP / TMDB / 豆瓣，最多等 8 秒）..."
+        local health_json
+        health_json="$(curl -sf --connect-timeout 2 --max-time 8 "http://127.0.0.1:${port}/api/system/health" 2>/dev/null || true)"
+        if [ -n "$health_json" ]; then
+            echo "  外部通道: ${health_json}"
+        else
+            warn "外部通道探测超时（可能是 CD2/MP 地址不可达或较慢，不影响打开网页）"
+        fi
     else
         echo -e "  接口状态: ${RED}🔴 未运行或异常${NC}"
     fi
@@ -544,9 +569,11 @@ render_banner() {
     clear 2>/dev/null || true
     local port status_str ver_str
     port="$(get_port)"
-    if curl -sf "http://127.0.0.1:${port}/api/system/health" >/dev/null 2>&1; then
+    local ver_json
+    ver_json="$(curl -sf --connect-timeout 1 --max-time 1 "http://127.0.0.1:${port}/api/system/version" 2>/dev/null || true)"
+    if [ -n "$ver_json" ]; then
         status_str="${GREEN}🟢 运行中${NC}"
-        ver_str="$(curl -s "http://127.0.0.1:${port}/api/system/version" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/v\1/p')"
+        ver_str="$(echo "$ver_json" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/v\1/p')"
         ver_str="${ver_str:-运行中}"
     elif [ -f "$COMPOSE_FILE" ]; then
         status_str="${RED}🔴 已停止${NC}"
@@ -576,6 +603,9 @@ render_banner() {
 
 main() {
     install_shortcut
+    if [ -f "$COMPOSE_FILE" ] && grep -q '/api/system/health' "$COMPOSE_FILE" 2>/dev/null; then
+        sed -i 's|/api/system/health|/api/system/version|g' "$COMPOSE_FILE" 2>/dev/null || true
+    fi
     while true; do
         render_banner
         read -r -p "请输入选项数字 [0-9]: " choice
@@ -585,7 +615,7 @@ main() {
             3) action_edit_env; pause_key ;;
             4) action_restart; pause_key ;;
             5) action_stop; pause_key ;;
-            6) action_logs ;;
+            6) action_logs; pause_key ;;
             7) action_manual_backup; pause_key ;;
             8) action_rollback; pause_key ;;
             9) action_status; pause_key ;;

@@ -42,7 +42,7 @@ docker image prune -f >/dev/null 2>&1 || true
 
 echo "=== [5/5] 升级后健康与版本验收 ==="
 for i in $(seq 1 15); do
-    if curl -sf "http://127.0.0.1:${PORT}/api/system/health" >/dev/null; then
+    if curl -sf "http://127.0.0.1:${PORT}/api/system/version" >/dev/null; then
         echo "升级成功！当前运行版本：$(curl -s http://127.0.0.1:${PORT}/api/system/version)"
         exit 0
     fi
