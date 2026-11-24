@@ -66,7 +66,10 @@
     .no-scrollbar::-webkit-scrollbar { display: none; }
     .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
 
-    /* 扫描内容频繁变化，固定进度面板及数字槽，避免内容反复挤动布局。 */
+    /* 扫描内容频繁变化，固定进度面板、实时看板与侧边栏卡片尺寸并隔离重排，彻底消除抖动。 */
+    #inspectProgressModal {
+      overscroll-behavior: contain;
+    }
     #inspectProgressModal > div {
       flex: 0 0 auto;
       min-width: 0;
@@ -75,6 +78,30 @@
       overflow-y: auto;
       overflow-x: hidden;
       scrollbar-gutter: stable;
+      contain: layout style paint;
+    }
+    #inspectProgressStep {
+      display: block;
+      height: 1rem;
+      line-height: 1rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    #inspectProgressShowBox {
+      height: 2.75rem;
+      min-height: 2.75rem;
+      box-sizing: border-box;
+      overflow: hidden;
+      contain: layout style;
+    }
+    #inspectProgressShow {
+      display: block;
+      height: 1.25rem;
+      line-height: 1.25rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
     #inspectProgressPercent, #liveBannerPercent {
       display: inline-block;
@@ -84,14 +111,109 @@
       white-space: nowrap;
       font-variant-numeric: tabular-nums;
     }
+    #inspectProgressPercent {
+      height: 1.75rem;
+      line-height: 1.75rem;
+    }
+    #liveBannerPercent {
+      height: 1.5rem;
+      line-height: 1.5rem;
+    }
     #inspectProgressCount {
+      display: inline-block;
       flex: 0 0 11ch;
       width: 11ch;
+      height: 1.25rem;
+      line-height: 1.25rem;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
       text-align: right;
       font-variant-numeric: tabular-nums;
+    }
+    #liveInspectionBanner {
+      contain: layout style paint;
+      overflow: hidden;
+    }
+    #liveBannerStatusText {
+      height: 1.25rem;
+      line-height: 1.25rem;
+      min-width: 0;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+    #liveBannerCountText {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex: 0 0 11ch;
+      width: 11ch;
+      height: 1.375rem;
+      line-height: 1.375rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+    }
+    #liveBannerShowRow {
+      height: 1.25rem;
+      line-height: 1.25rem;
+      overflow: hidden;
+    }
+    #liveBannerCurrentShow {
+      display: block;
+      min-width: 0;
+      flex: 1 1 0%;
+      height: 1.25rem;
+      line-height: 1.25rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    #taskMenuList {
+      contain: layout style;
+      overflow-anchor: none;
+    }
+    .task-card-stable {
+      contain: layout style paint;
+    }
+    .task-card-pct-slot {
+      display: inline-block;
+      flex: 0 0 5.5ch;
+      width: 5.5ch;
+      height: 1rem;
+      line-height: 1rem;
+      text-align: right;
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+    }
+    .task-card-show-slot {
+      display: block;
+      min-width: 0;
+      flex: 1 1 0%;
+      height: 1rem;
+      line-height: 1rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    /* 纯 GPU 合成层进度条缩放，彻底避免 width 过渡引发布局重排 */
+    .mf-progress-bar-fill {
+      width: 100%;
+      transform-origin: left center;
+      transform: scaleX(0.01);
+      transition: transform 280ms cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .mf-progress-bar-fill {
+        transition: none;
+      }
+      #liveBannerPulse,
+      #inspectProgressModal .animate-pulse,
+      #taskMenuList .animate-pulse {
+        animation: none;
+      }
     }
 
     /* 移动端触控优化 */
@@ -540,45 +662,45 @@
           </div>
 
           <!-- 初检实时监控看板（当任务处于 running / paused 时常驻呈现） -->
-          <div id="liveInspectionBanner" class="hidden rounded-2xl p-4 bg-gradient-to-r from-indigo-50/90 via-purple-50/70 to-pink-50/90 dark:from-indigo-950/60 dark:via-purple-950/40 dark:to-pink-950/60 border border-indigo-200/80 dark:border-indigo-800 shadow-sm space-y-3 transition-all duration-300 my-4">
-            <div class="flex items-center justify-between">
-              <div class="flex items-center space-x-2.5 min-w-0">
+          <div id="liveInspectionBanner" class="hidden rounded-2xl p-4 bg-gradient-to-r from-indigo-50/90 via-purple-50/70 to-pink-50/90 dark:from-indigo-950/60 dark:via-purple-950/40 dark:to-pink-950/60 border border-indigo-200/80 dark:border-indigo-800 shadow-sm space-y-3 my-4">
+            <div class="flex items-center justify-between gap-2 min-h-[2rem]">
+              <div class="flex items-center space-x-2.5 min-w-0 flex-1">
                 <span class="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse shrink-0" id="liveBannerPulse"></span>
-                <span class="text-xs font-bold text-slate-900 dark:text-white flex items-center gap-1.5 truncate" id="liveBannerStatusText">
-                  <i class="fa-solid fa-satellite-dish text-indigo-500 text-xs"></i>
-                  <span>初检多任务并行加速分析中...</span>
+                <span class="text-xs font-bold text-slate-900 dark:text-white flex items-center gap-1.5 min-w-0 truncate" id="liveBannerStatusText">
+                  <i class="fa-solid fa-satellite-dish text-indigo-500 text-xs shrink-0"></i>
+                  <span class="truncate">初检多任务并行加速分析中...</span>
                 </span>
                 <span class="text-[11px] px-2 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-900 text-indigo-700 dark:text-indigo-300 font-mono font-semibold shrink-0" id="liveBannerCountText">[0/0]</span>
               </div>
 
               <div class="flex items-center space-x-2 shrink-0">
                 <span class="text-base font-extrabold text-indigo-600 dark:text-indigo-400 font-mono mr-1" id="liveBannerPercent">1%</span>
-                <button onclick="triggerPauseCurrentTask()" id="liveBannerPauseBtn" class="px-2.5 py-1 rounded-lg bg-amber-100 hover:bg-amber-200 dark:bg-amber-950 text-amber-700 dark:text-amber-300 text-xs font-semibold flex items-center gap-1 transition">
+                <button onclick="triggerPauseCurrentTask()" id="liveBannerPauseBtn" class="px-2.5 py-1 rounded-lg bg-amber-100 hover:bg-amber-200 dark:bg-amber-950 text-amber-700 dark:text-amber-300 text-xs font-semibold flex items-center gap-1 transition-colors">
                   <i class="fa-solid fa-pause text-[10px]" id="liveBannerPauseIcon"></i>
                   <span id="liveBannerPauseText">暂停</span>
                 </button>
-                <button onclick="triggerStopCurrentTask()" class="px-2.5 py-1 rounded-lg bg-red-100 hover:bg-red-200 dark:bg-red-950 text-red-600 dark:text-red-400 text-xs font-semibold flex items-center gap-1 transition">
+                <button onclick="triggerStopCurrentTask()" class="px-2.5 py-1 rounded-lg bg-red-100 hover:bg-red-200 dark:bg-red-950 text-red-600 dark:text-red-400 text-xs font-semibold flex items-center gap-1 transition-colors">
                   <i class="fa-solid fa-stop text-[10px]"></i>
                   <span>停止</span>
                 </button>
-                <button onclick="openInspectProgressModal(document.getElementById('currentTaskTitle').textContent)" class="p-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-500 hover:text-indigo-600 hover:bg-white dark:hover:bg-slate-800 text-xs transition" title="放大为沉浸式进度面板">
+                <button onclick="openInspectProgressModal(document.getElementById('currentTaskTitle').textContent)" class="p-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-500 hover:text-indigo-600 hover:bg-white dark:hover:bg-slate-800 text-xs transition-colors" title="放大为沉浸式进度面板">
                   <i class="fa-solid fa-expand"></i>
                 </button>
               </div>
             </div>
 
-            <!-- 流光全景进度条 -->
+            <!-- 流光全景进度条（纯合成层 scaleX 渲染，零重排） -->
             <div class="w-full bg-slate-200/80 dark:bg-slate-800 rounded-full h-2.5 overflow-hidden p-0.5 border border-indigo-100 dark:border-indigo-900">
-              <div id="liveBannerProgressBar" class="bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 h-full rounded-full transition-all duration-300 ease-out" style="width: 1%"></div>
+              <div id="liveBannerProgressBar" class="mf-progress-bar-fill bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 h-full rounded-full" style="transform: scaleX(0.01)"></div>
             </div>
 
             <!-- 当前探测剧集与并发说明 -->
-            <div class="flex items-center justify-between text-xs text-slate-600 dark:text-slate-300">
-              <div class="flex items-center space-x-1.5 truncate">
+            <div id="liveBannerShowRow" class="flex items-center justify-between gap-2 text-xs text-slate-600 dark:text-slate-300">
+              <div class="flex items-center space-x-1.5 min-w-0 flex-1 overflow-hidden h-5">
                 <i class="fa-solid fa-film text-indigo-400 text-[10px] shrink-0"></i>
                 <span class="truncate font-medium text-slate-700 dark:text-slate-200" id="liveBannerCurrentShow">正在探测目录与匹配 TMDB...</span>
               </div>
-              <span class="text-[11px] text-indigo-500 dark:text-indigo-400 shrink-0 font-mono font-medium ml-2">⚡ 3 协程多任务加速</span>
+              <span class="text-[11px] text-indigo-500 dark:text-indigo-400 shrink-0 font-mono font-medium">⚡ 3 协程多任务加速</span>
             </div>
           </div>
 
@@ -1273,21 +1395,21 @@
         <span class="text-lg font-bold text-indigo-600 dark:text-indigo-400 font-mono" id="inspectProgressPercent">0%</span>
       </div>
 
-      <!-- 动态渐变流光进度条 -->
+      <!-- 动态渐变流光进度条（纯合成层 scaleX 渲染，零重排） -->
       <div class="w-full bg-slate-100 dark:bg-slate-800 rounded-full h-3 overflow-hidden p-0.5 border border-slate-200/80 dark:border-slate-700/80">
-        <div id="inspectProgressBar" class="bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 h-full rounded-full transition-[width] duration-300 ease-out" style="width: 0%"></div>
+        <div id="inspectProgressBar" class="mf-progress-bar-fill bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 h-full rounded-full" style="transform: scaleX(0.01)"></div>
       </div>
 
       <!-- 当前扫描剧集 -->
-      <div class="bg-slate-50 dark:bg-slate-800/60 rounded-xl p-3 border border-slate-200/60 dark:border-slate-700/60 flex items-center justify-between text-xs">
-        <span class="text-slate-600 dark:text-slate-300 flex items-center gap-1.5 min-w-0 flex-1">
+      <div id="inspectProgressShowBox" class="bg-slate-50 dark:bg-slate-800/60 rounded-xl px-3 border border-slate-200/60 dark:border-slate-700/60 flex items-center justify-between text-xs">
+        <span class="text-slate-600 dark:text-slate-300 flex items-center gap-1.5 min-w-0 flex-1 overflow-hidden h-5">
           <i class="fa-solid fa-film text-slate-400 shrink-0"></i>
           <span class="truncate min-w-0 flex-1 font-medium" id="inspectProgressShow">等待目录遍历...</span>
         </span>
         <span class="text-slate-500 dark:text-slate-400 font-mono font-semibold shrink-0 ml-2" id="inspectProgressCount">[0/0]</span>
       </div>
 
-      <div class="flex items-center justify-between pt-2 border-t border-slate-100 dark:border-slate-800 text-xs">
+      <div class="flex items-center justify-between pt-2 border-t border-slate-100 dark:border-slate-800 text-xs min-h-[2.25rem]">
         <div class="flex items-center space-x-1.5" id="modalControlBtnGroup">
           <button onclick="triggerPauseActiveTask()" id="modalPauseBtn" class="px-2.5 py-1.5 rounded-lg bg-amber-50 dark:bg-amber-950/50 hover:bg-amber-100 dark:hover:bg-amber-900 text-amber-700 dark:text-amber-300 font-medium flex items-center gap-1 transition">
             <i class="fa-solid fa-pause text-xs" id="modalPauseIcon"></i>
@@ -2550,6 +2672,11 @@
     function updateTaskDetailHeader(taskId) {
       const task = taskList.find(t => t.id === taskId);
       if (!task) return;
+
+      const liveBannerEl = document.getElementById('liveInspectionBanner');
+      if (liveBannerEl && task.status !== 'running' && task.status !== 'paused' && activeInspectTaskId !== taskId) {
+        liveBannerEl.classList.add('hidden');
+      }
       const titleEl = document.getElementById('currentTaskTitle');
       if (titleEl && titleEl.textContent !== task.title) titleEl.textContent = task.title;
       const pathEl = document.getElementById('currentTaskPath');
@@ -2683,7 +2810,7 @@
         }
 
         return `
-          <div onclick="selectTask('${task.id}')" id="task-card-${task.id}" class="app-card ${task.id === currentTaskId ? 'app-card-active' : ''} rounded-xl p-3 cursor-pointer hover:border-slate-300 dark:hover:border-slate-700 transition relative overflow-hidden group">
+          <div onclick="selectTask('${task.id}')" id="task-card-${task.id}" class="app-card task-card-stable ${task.id === currentTaskId ? 'app-card-active' : ''} rounded-xl p-3 cursor-pointer hover:border-slate-300 dark:hover:border-slate-700 transition-colors relative overflow-hidden group">
             <div class="flex items-start justify-between gap-1.5">
               <div class="flex-1 min-w-0">
                 <div class="flex items-center gap-1.5 mb-0.5">
@@ -2699,16 +2826,16 @@
               </div>
             </div>
             ${(task.status === 'running' || task.status === 'paused' || task.status === 'stopping') ? `
-            <div class="mt-2 pt-1.5 border-t border-slate-100 dark:border-slate-800 space-y-1 h-[36px] flex flex-col justify-between">
-              <div class="flex items-center justify-between text-[10px] leading-4">
-                <span class="text-indigo-600 dark:text-indigo-400 font-semibold truncate max-w-[130px] flex items-center gap-1">
-                  <i class="fa-solid fa-satellite-dish text-[8px] animate-pulse"></i>
-                  <span id="task-card-show-${task.id}" class="truncate inline-block max-w-[110px]">${task.status === 'stopping' ? '正在安全保存进度...' : (task.status === 'paused' ? '初检已暂停' : '并发分析中...')}</span>
+            <div class="mt-2 pt-1.5 border-t border-slate-100 dark:border-slate-800 space-y-1 h-[36px] flex flex-col justify-between overflow-hidden">
+              <div class="flex items-center justify-between gap-1 text-[10px] h-4 leading-4">
+                <span class="text-indigo-600 dark:text-indigo-400 font-semibold min-w-0 flex-1 flex items-center gap-1 overflow-hidden h-4">
+                  <i class="fa-solid fa-satellite-dish text-[8px] animate-pulse shrink-0"></i>
+                  <span id="task-card-show-${task.id}" class="task-card-show-slot">${task.status === 'stopping' ? '正在安全保存进度...' : (task.status === 'paused' ? '初检已暂停' : '并发分析中...')}</span>
                 </span>
-                <span class="font-mono font-bold text-indigo-600 dark:text-indigo-400 shrink-0 ml-1" id="task-card-pct-${task.id}">${task.status === 'stopping' ? '保存中' : (task.status === 'paused' ? '暂停' : '扫描中')}</span>
+                <span class="font-mono font-bold text-indigo-600 dark:text-indigo-400 shrink-0 ml-1 task-card-pct-slot" id="task-card-pct-${task.id}">${task.status === 'stopping' ? '保存中' : (task.status === 'paused' ? '暂停' : '扫描中')}</span>
               </div>
               <div class="w-full bg-slate-100 dark:bg-slate-800 rounded-full h-1.5 overflow-hidden">
-                <div id="task-card-bar-${task.id}" class="bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 h-full rounded-full transition-all duration-300" style="width: ${task.status === 'stopping' ? '0%' : (task.status === 'paused' ? '50%' : '15%')}"></div>
+                <div id="task-card-bar-${task.id}" class="mf-progress-bar-fill bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 h-full rounded-full" style="transform: scaleX(${task.status === 'stopping' ? 0.01 : (task.status === 'paused' ? 0.5 : 0.05)})"></div>
               </div>
             </div>` : `
             <div class="mt-2 pt-1.5 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between text-[10px] h-[36px]">
@@ -2806,6 +2933,11 @@
 
       const task = taskList.find(t => t.id === taskId);
       if (!task) return;
+
+      const liveBannerEl = document.getElementById('liveInspectionBanner');
+      if (liveBannerEl && task.status !== 'running' && task.status !== 'paused' && activeInspectTaskId !== taskId) {
+        liveBannerEl.classList.add('hidden');
+      }
 
       document.getElementById('currentTaskTitle').textContent = task.title;
       document.getElementById('currentTaskPath').textContent = task.path;
@@ -3145,12 +3277,22 @@
       if (element.title !== text) element.title = text;
     }
 
+    function setProgressBarPercent(el, pct) {
+      if (!el) return;
+      const clamped = Math.min(100, Math.max(0, Number(pct) || 0));
+      const scale = Math.max(0.01, clamped / 100);
+      const transformVal = `scaleX(${scale.toFixed(4)})`;
+      if (el.style.transform !== transformVal) {
+        el.style.transform = transformVal;
+      }
+    }
+
     function openInspectProgressModal(taskTitle) {
       const modal = document.getElementById('inspectProgressModal');
       if (!modal) return;
       setInspectionProgressText('inspectProgressStep', `正在为 [${taskTitle || '剧集'}] 初检扫描...`);
       setInspectionProgressText('inspectProgressPercent', '1%');
-      document.getElementById('inspectProgressBar').style.width = '1%';
+      setProgressBarPercent(document.getElementById('inspectProgressBar'), 1);
       setInspectionProgressText('inspectProgressShow', '正在连接 CloudDrive2 递归探测目录结构...');
       setInspectionProgressText('inspectProgressCount', '[扫描中]');
 
@@ -3178,11 +3320,24 @@
       if (modal) modal.classList.add('hidden');
     }
 
+    let _lastLiveTaskId = null;
     let _lastLiveIsPaused = null;
     let _lastLiveShowText = '';
     let _lastLivePct = -1;
+    let _lastLiveCountText = '';
+
+    function resetLiveInspectionCache(taskId = null) {
+      _lastLiveTaskId = taskId;
+      _lastLiveIsPaused = null;
+      _lastLiveShowText = '';
+      _lastLivePct = -1;
+      _lastLiveCountText = '';
+    }
 
     function updateLiveInspectionUI(taskId, p) {
+      if (_lastLiveTaskId !== taskId) {
+        resetLiveInspectionCache(taskId);
+      }
       const pct = Math.min(100, Math.max(1, Math.round(Number(p.percent) || 1)));
       const isPaused = (p.status === 'paused');
       if (p.status === 'stopping') {
@@ -3193,7 +3348,7 @@
         return;
       }
 
-      // 1. 更新主面板常驻看板
+      // 1. 更新主面板常驻看板（固定高度 + contain 隔离 + 纯合成层 scaleX，零布局位移）
       const liveBanner = document.getElementById('liveInspectionBanner');
       if (liveBanner && currentTaskId === taskId) {
         if (p.status === 'running' || p.status === 'paused') {
@@ -3204,27 +3359,26 @@
             _lastLivePct = pct;
             const bannerPct = document.getElementById('liveBannerPercent');
             if (bannerPct) bannerPct.textContent = `${pct}%`;
-            const bannerBar = document.getElementById('liveBannerProgressBar');
-            if (bannerBar) bannerBar.style.width = `${pct}%`;
+            setProgressBarPercent(document.getElementById('liveBannerProgressBar'), pct);
           }
           const showText = p.current_show || p.message || '正在分析中...';
           if (_lastLiveShowText !== showText) {
             _lastLiveShowText = showText;
-            const bannerShow = document.getElementById('liveBannerCurrentShow');
-            if (bannerShow) bannerShow.textContent = showText;
+            setInspectionProgressText('liveBannerCurrentShow', showText);
           }
-          const bannerCnt = document.getElementById('liveBannerCountText');
-          if (bannerCnt) {
-            const cntText = p.total > 0 ? `[${p.current}/${p.total}季]` : '[探测中]';
-            if (bannerCnt.textContent !== cntText) bannerCnt.textContent = cntText;
+          const cntText = p.total > 0 ? `[${p.current}/${p.total}季]` : '[探测中]';
+          if (_lastLiveCountText !== cntText) {
+            _lastLiveCountText = cntText;
+            const bannerCnt = document.getElementById('liveBannerCountText');
+            if (bannerCnt) bannerCnt.textContent = cntText;
           }
           if (_lastLiveIsPaused !== isPaused) {
             _lastLiveIsPaused = isPaused;
             const bannerStatus = document.getElementById('liveBannerStatusText');
             if (bannerStatus) {
               bannerStatus.innerHTML = isPaused
-                ? '<i class="fa-solid fa-pause text-orange-500 text-xs"></i><span>初检任务已暂停 (随时可点击继续)</span>'
-                : '<i class="fa-solid fa-satellite-dish text-indigo-500 text-xs"></i><span>初检多任务并行加速分析中...</span>';
+                ? '<i class="fa-solid fa-pause text-orange-500 text-xs shrink-0"></i><span class="truncate">初检任务已暂停 (随时可点击继续)</span>'
+                : '<i class="fa-solid fa-satellite-dish text-indigo-500 text-xs shrink-0"></i><span class="truncate">初检多任务并行加速分析中...</span>';
             }
             const bannerPauseText = document.getElementById('liveBannerPauseText');
             if (bannerPauseText) bannerPauseText.textContent = isPaused ? '继续' : '暂停';
@@ -3238,23 +3392,33 @@
         }
       }
 
-      // 2. 更新左侧任务卡片微型进度条（脏值更新，不引起重排抖动）
+      // 2. 更新左侧任务卡片微型进度条（固定宽高槽位 + 纯合成层 scaleX，零重排抖动）
       const cardPct = document.getElementById(`task-card-pct-${taskId}`);
       const pctText = isPaused ? '已暂停' : `${pct}%`;
       if (cardPct && cardPct.textContent !== pctText) cardPct.textContent = pctText;
 
-      const cardBar = document.getElementById(`task-card-bar-${taskId}`);
-      const widthVal = `${pct}%`;
-      if (cardBar && cardBar.style.width !== widthVal) cardBar.style.width = widthVal;
+      setProgressBarPercent(document.getElementById(`task-card-bar-${taskId}`), pct);
 
       const cardShow = document.getElementById(`task-card-show-${taskId}`);
-      const showShort = isPaused ? '初检已暂停' : (p.current_show ? p.current_show.slice(0, 15) : '分析中...');
-      if (cardShow && cardShow.textContent !== showShort) cardShow.textContent = showShort;
+      const showShort = isPaused ? '初检已暂停' : (p.current_show || '分析中...');
+      if (cardShow && cardShow.textContent !== showShort) {
+        cardShow.textContent = showShort;
+        cardShow.title = showShort;
+      }
     }
 
     async function startInspectionWithProgress(taskId, taskTitle) {
       activeInspectTaskId = taskId;
+      resetLiveInspectionCache(taskId);
       openInspectProgressModal(taskTitle);
+      // 启动即同步呈现常驻看板，避免 500ms 首包到达时后台页面突然下移 120px
+      updateLiveInspectionUI(taskId, {
+        status: 'running',
+        percent: 1,
+        current: 0,
+        total: 0,
+        current_show: '正在连接 CloudDrive2 递归探测目录结构...',
+      });
 
       try {
         await api(`/api/inspect/${taskId}/run`, { method: 'POST' });
@@ -3271,19 +3435,16 @@
             const p = await api(`/api/inspect/${taskId}/progress`);
             if (!p || activeInspectTaskId !== taskId) return;
 
-            const pPct = document.getElementById('inspectProgressPercent');
             const pBar = document.getElementById('inspectProgressBar');
             const pShow = document.getElementById('inspectProgressShow');
             const pCnt = document.getElementById('inspectProgressCount');
-            const pStep = document.getElementById('inspectProgressStep');
             const closeBtn = document.getElementById('inspectProgressCloseBtn');
-            const pauseBtnText = document.getElementById('modalPauseText');
             const pauseIcon = document.getElementById('modalPauseIcon');
             const ctrlGroup = document.getElementById('modalControlBtnGroup');
 
             const pct = Math.min(100, Math.max(1, Math.round(Number(p.percent) || 1)));
             setInspectionProgressText('inspectProgressPercent', `${pct}%`);
-            if (pBar && pBar.style.width !== `${pct}%`) pBar.style.width = `${pct}%`;
+            setProgressBarPercent(pBar, pct);
 
             if (pShow) {
               if (p.current_show) {
@@ -3328,7 +3489,7 @@
               activeInspectTaskId = null;
 
               setInspectionProgressText('inspectProgressPercent', '100%');
-              if (pBar) pBar.style.width = '100%';
+              setProgressBarPercent(pBar, 100);
               setInspectionProgressText('inspectProgressShow', p.message || '初检分析全部完成！');
               setInspectionProgressText('inspectProgressStep', '初检分析已成功完成');
               if (ctrlGroup) ctrlGroup.classList.add('hidden');
@@ -3450,6 +3611,11 @@
         await api(`/api/tasks/${taskId}/reinspect`, { method: 'POST' });
       } catch (e) {
         console.warn('重置状态警告:', e);
+      }
+      if (task) {
+        task.status = 'running';
+        task.statusDot = statusDotClass('running');
+        renderTaskList();
       }
       startInspectionWithProgress(taskId, task ? task.title : '剧集');
     }
@@ -8551,7 +8717,7 @@
         });
         closeNewTaskModal();
         await loadTasks();
-        selectTask(task.id);
+        await selectTask(task.id);
 
         // 立即唤起初检进度可视化系统，启动端到端扫描
         startInspectionWithProgress(task.id, task.name || path);

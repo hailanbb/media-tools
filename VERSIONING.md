@@ -1,6 +1,15 @@
 # MediaFlow 版本管理
 
-## v2.5.74（2026-11-24，本地实现，已同步本地 media-tools）
+## v2.5.75（2026-11-24，本地实现，已同步本地 media-tools）
+
+- **初检执行期页面抖动（CLS）彻底治理**：
+  - **主工作区实时监控看板（`#liveInspectionBanner`）零位移加固**：移除容器与进度条上的 `transition-all` 布局过渡动画；启用 `contain: layout style paint` 隔离内部重排；为状态栏、`#liveBannerCountText`（固定 `11ch` + `tabular-nums`）、`#liveBannerShowRow` 与 `#liveBannerCurrentShow`（补齐 `min-w-0 flex-1` 与固定行高 `1.25rem`）锁定盒模型尺寸，彻底根治中英文/数字目录名交替时行盒高度变化（1–3px）经 `transition-all` 放大引发下方 5 张分类卡片及剧集列表上下跳动的问题。
+  - **居中进度弹窗（`#inspectProgressModal`）垂直防跳**：为 `#inspectProgressModal > div` 增加 `contain: layout style paint`；锁定 `#inspectProgressStep`（`1rem`）、`#inspectProgressShowBox`（`2.75rem`）、`#inspectProgressShow`（`1.25rem`）、`#inspectProgressCount`（`11ch` + `1.25rem`）及底部按钮栏最小高度，消除居中弹窗每 500ms 随剧名字符集切换上下抖动。
+  - **侧边栏运行中任务卡（`#taskMenuList`）消除基线跳动**：将 `task-card-show-*` 从易受 `overflow: hidden` 基线偏移影响的 `inline-block` 改为 `block` 固定行高槽位，为 `task-card-pct-*` 锁定 `5.5ch` 等宽数字槽位，卡片启用 `contain: layout style paint`。
+  - **进度条全面升级为 GPU 合成层 `transform: scaleX(...)`**：弹窗、主看板、侧边栏三处进度条统一改用 `.mf-progress-bar-fill`（`transform-origin: left center` + `scaleX` 合成层过渡，零主线程布局重排），并遵循 `@media (prefers-reduced-motion: reduce)`；启动新建任务时先 `await selectTask(task.id)` 且同步显示常驻看板，避免 500ms 首包到达或后台异步拉数导致背景页面骤降跳动。
+  - **自动化回归测试**：`tests/test_frontend_logic.js` 新增防抖契约与 `scaleX` 运行期 VM 校验并通过。
+
+## v2.5.74（2026-11-24，本地实现，已同步 GitHub）
 
 - **豆瓣主备通道自动熔断切换与自动回切（`DoubanGateway`）**：
   - MoviePilot 豆瓣主通道异常或返回空结果时，自动触发冷却窗口并无缝切换至备选通道（优先 Cloudflare Workers 反代，其次本机 Cookie 直连）；冷却到期后静默探测 MP，一旦恢复立即自动切回 MP 主通道，全程无需重启。

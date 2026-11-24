@@ -1181,4 +1181,92 @@ console.log("===================================================================
     assert(topBarEl.innerHTML.includes('bg-red-500') && topBarEl.innerHTML.includes('openDoubanConfigModal()'), '异常态必须渲染红点且提示点击配置');
     console.log('✓ 豆瓣主备状态灯三态渲染与配置弹窗绑定契约测试通过');
   }
+
+  // ======================================================================
+  // 验证 v2.5.75 初检执行期防抖契约（固定行高/列宽、contain 隔离、合成层 scaleX 进度条）
+  // ======================================================================
+  {
+    const bannerTagMatch = htmlContent.match(/<div id="liveInspectionBanner"[^>]*>/);
+    assert(bannerTagMatch, '必须存在 #liveInspectionBanner');
+    assert(!bannerTagMatch[0].includes('transition-all'), '#liveInspectionBanner 禁止使用 transition-all 以防布局重排动画抖动');
+
+    const bannerBarMatch = htmlContent.match(/<div id="liveBannerProgressBar"[^>]*>/);
+    assert(bannerBarMatch && bannerBarMatch[0].includes('mf-progress-bar-fill'), '#liveBannerProgressBar 必须使用合成层 mf-progress-bar-fill');
+    assert(!bannerBarMatch[0].includes('transition-all'), '#liveBannerProgressBar 禁止使用 transition-all');
+
+    const modalBarMatch = htmlContent.match(/<div id="inspectProgressBar"[^>]*>/);
+    assert(modalBarMatch && modalBarMatch[0].includes('mf-progress-bar-fill'), '#inspectProgressBar 必须使用合成层 mf-progress-bar-fill');
+    assert(!modalBarMatch[0].includes('transition-[width]'), '#inspectProgressBar 不应再过渡 width 属性');
+
+    const cardBarMatch = htmlContent.match(/<div id="task-card-bar-\$\{task\.id\}"[^>]*>/);
+    assert(cardBarMatch && cardBarMatch[0].includes('mf-progress-bar-fill'), '侧边栏任务卡片进度条必须使用合成层 mf-progress-bar-fill');
+
+    assert(htmlContent.includes('#liveInspectionBanner {\n      contain: layout style paint;') || htmlContent.includes('#liveInspectionBanner {\r\n      contain: layout style paint;'), '#liveInspectionBanner 必须启用 CSS contain 隔离重排');
+    assert(htmlContent.includes('#inspectProgressShowBox'), '弹窗剧集行必须有固定高度容器 #inspectProgressShowBox');
+    assert(htmlContent.includes('#liveBannerShowRow'), '实时看板剧集行必须有固定高度容器 #liveBannerShowRow');
+    assert(htmlContent.includes('prefers-reduced-motion: reduce'), '进度动效必须尊重 prefers-reduced-motion');
+    assert(htmlContent.includes('await selectTask(task.id);'), 'confirmCreateNewTask 必须先 await selectTask 再启动初检弹窗，避免背景重绘抖动');
+
+    // 运行期 VM 校验：进度条仅更新 transform: scaleX(...)，不改写 width，且跨任务重置缓存
+    const mkEl = (hidden = false) => {
+      const cls = new Set(hidden ? ['hidden'] : []);
+      return {
+        textContent: '',
+        title: '',
+        innerHTML: '',
+        className: '',
+        style: { transform: '', width: '' },
+        classList: {
+          add(c) { cls.add(c); },
+          remove(c) { cls.delete(c); },
+          contains(c) { return cls.has(c); }
+        }
+      };
+    };
+    const progEls = {
+      liveInspectionBanner: mkEl(true),
+      liveBannerPercent: mkEl(),
+      liveBannerProgressBar: mkEl(),
+      liveBannerCurrentShow: mkEl(),
+      liveBannerCountText: mkEl(),
+      liveBannerStatusText: mkEl(),
+      liveBannerPauseText: mkEl(),
+      liveBannerPauseIcon: mkEl(),
+      'task-card-pct-t1': mkEl(),
+      'task-card-bar-t1': mkEl(),
+      'task-card-show-t1': mkEl(),
+    };
+    const pCtx = {
+      currentTaskId: 't1',
+      document: { getElementById: (id) => progEls[id] || null },
+    };
+    const extractFn = name => {
+      const m = htmlContent.match(new RegExp(`(?:async\\s+)?function\\s+${name}\\b[^]*?\\n    \\}`));
+      assert(m, `找不到函数 ${name}`);
+      return m[0];
+    };
+    vm.createContext(pCtx);
+    vm.runInContext([
+      'let _lastLiveTaskId = null;',
+      'let _lastLiveIsPaused = null;',
+      'let _lastLiveShowText = "";',
+      'let _lastLivePct = -1;',
+      'let _lastLiveCountText = "";',
+      extractFn('setInspectionProgressText'),
+      extractFn('setProgressBarPercent'),
+      extractFn('resetLiveInspectionCache'),
+      extractFn('updateLiveInspectionUI'),
+    ].join(';\n'), pCtx);
+
+    pCtx.updateLiveInspectionUI('t1', { status: 'running', percent: 42, current: 21, total: 50, current_show: 'Mickey Mouse Clubhouse+ (2025)' });
+    assert.strictEqual(progEls.liveInspectionBanner.classList.contains('hidden'), false, '运行态应显示实时看板');
+    assert.strictEqual(progEls.liveBannerPercent.textContent, '42%');
+    assert.strictEqual(progEls.liveBannerCountText.textContent, '[21/50季]');
+    assert.strictEqual(progEls.liveBannerCurrentShow.textContent, 'Mickey Mouse Clubhouse+ (2025)');
+    assert.strictEqual(progEls.liveBannerProgressBar.style.transform, 'scaleX(0.4200)');
+    assert.strictEqual(progEls.liveBannerProgressBar.style.width, '', '进度条不得写入 style.width 触发重排');
+    assert.strictEqual(progEls['task-card-bar-t1'].style.transform, 'scaleX(0.4200)');
+    assert.strictEqual(progEls['task-card-bar-t1'].style.width, '', '侧边栏进度条不得写入 style.width 触发重排');
+    console.log('✓ 初检执行期防抖契约与合成层 scaleX 渲染回归测试通过');
+  }
 })().catch(error => {console.error(error); process.exitCode = 1;});

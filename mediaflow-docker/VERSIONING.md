@@ -1,5 +1,35 @@
 # MediaFlow 版本管理
 
+## v2.5.75（2026-11-24，本地实现，已同步本地 media-tools）
+
+- **初检执行期页面抖动（CLS）彻底治理**：
+  - **主工作区实时监控看板（`#liveInspectionBanner`）零位移加固**：移除容器与进度条上的 `transition-all` 布局过渡动画；启用 `contain: layout style paint` 隔离内部重排；为状态栏、`#liveBannerCountText`（固定 `11ch` + `tabular-nums`）、`#liveBannerShowRow` 与 `#liveBannerCurrentShow`（补齐 `min-w-0 flex-1` 与固定行高 `1.25rem`）锁定盒模型尺寸，彻底根治中英文/数字目录名交替时行盒高度变化（1–3px）经 `transition-all` 放大引发下方 5 张分类卡片及剧集列表上下跳动的问题。
+  - **居中进度弹窗（`#inspectProgressModal`）垂直防跳**：为 `#inspectProgressModal > div` 增加 `contain: layout style paint`；锁定 `#inspectProgressStep`（`1rem`）、`#inspectProgressShowBox`（`2.75rem`）、`#inspectProgressShow`（`1.25rem`）、`#inspectProgressCount`（`11ch` + `1.25rem`）及底部按钮栏最小高度，消除居中弹窗每 500ms 随剧名字符集切换上下抖动。
+  - **侧边栏运行中任务卡（`#taskMenuList`）消除基线跳动**：将 `task-card-show-*` 从易受 `overflow: hidden` 基线偏移影响的 `inline-block` 改为 `block` 固定行高槽位，为 `task-card-pct-*` 锁定 `5.5ch` 等宽数字槽位，卡片启用 `contain: layout style paint`。
+  - **进度条全面升级为 GPU 合成层 `transform: scaleX(...)`**：弹窗、主看板、侧边栏三处进度条统一改用 `.mf-progress-bar-fill`（`transform-origin: left center` + `scaleX` 合成层过渡，零主线程布局重排），并遵循 `@media (prefers-reduced-motion: reduce)`；启动新建任务时先 `await selectTask(task.id)` 且同步显示常驻看板，避免 500ms 首包到达或后台异步拉数导致背景页面骤降跳动。
+  - **自动化回归测试**：`tests/test_frontend_logic.js` 新增防抖契约与 `scaleX` 运行期 VM 校验并通过。
+
+## v2.5.74（2026-11-24，本地实现，已同步 GitHub）
+
+- **豆瓣主备通道自动熔断切换与自动回切（`DoubanGateway`）**：
+  - MoviePilot 豆瓣主通道异常或返回空结果时，自动触发冷却窗口并无缝切换至备选通道（优先 Cloudflare Workers 反代，其次本机 Cookie 直连）；冷却到期后静默探测 MP，一旦恢复立即自动切回 MP 主通道，全程无需重启。
+  - `GET /api/system/health`（支持 `?force_refresh=true`）接入 `douban_gateway.check_health()`，返回 `online` / `fallback:cf_proxy` / `fallback:cookie` / `error` 及详细诊断；前端顶栏「豆瓣」状态灯新增青色 `豆瓣 (备选)` 态且可点击打开配置弹窗。
+  - 初检引擎 `_fetch_seasons_via_douban` 与单季映射详情查询统一接入备选检索与详情回退；`normalize_detail` 兼容 Rexxar / Frodo 原生字段（`episodes_count`、`type="tv"`、`pubdate` 年份）。
+- **原生支持 `Cookie-Editor` 一键导入与脱敏热存储**：
+  - 新增 `app/core/douban_cookie.py`，自动识别 **Cookie-Editor JSON**、Netscape `cookies.txt`、HTTP Header String 与键值对；仅提取 `.douban.com` 域未过期字段、自动补全 11 位随机 `bid` 并严格脱敏存储于 `data/douban_gateway.json`（免重启热生效，API 响应永不回传明文 `dbcl2` 或 `proxy_token`）。
+- **Cloudflare Workers 豆瓣只读元数据反代（`cloudflare-douban-proxy/`）**：
+  - 独立提供可部署至自定义域名（如 `douban.ubaby.top`）的轻量只读反代 Worker：严格上游白名单（`/health`、`/probe`、`/suggest`、`/rexxar`、`/frodo`、`/subject` 零开放 SSRF）、SHA-256 + `timingSafeEqual` 恒定时间鉴权、流式透传与结构化 JSON 日志，配套 `tests/worker.test.mjs` 单元测试。
+
+## v2.5.73（2026-11-24，本地实现，已同步本地 media-tools）
+
+- **「待复核清理」目录组独立行卡片重构与彻底去重**：
+  - 废除旧版把多组目录塞进嵌套大黄框+外层折叠箭头的展示形式，改为与下方剧季卡片视觉完全对齐的**独立平铺 `app-card` 行卡片**（左置图标槽、`border-l-4` 色条、标题与季号胶囊、直接行内展示全部源端/归档库物理路径与集数摘要、右置「集数对比」与「确认归档目标」按钮）。
+  - 下方单季清理清单自动剔除纯目录归并项（混合项如同时含重复版本清理仍保留），顶部「待复核清理」统计拆分为无重叠的 `N 季清理 + 另待归并 M 组目录`，后端 `TaskSummary` 新增向后兼容字段 `review_clean_seasons`。
+- **目录组覆盖矩阵逻辑纠偏**：
+  - 修复 `build_group_coverage_matrix` 对多季目录组做笛卡尔积导致源端不存在季凭空生成 `0/N集` 假行的问题，且不再被归档库历史季膨胀。
+  - 归档端未收录当前季时如实标注 `本季未归档`（有其他季时附 `已存 Sxx`）且缺号列显示 `—`，消除误标 `0/N集` 与全季缺号的误导；同步修正操作列错位文案为 `点击右侧「确认归档目标」`。
+- **自动化测试补齐**：`tests/test_frontend_logic.js` 与 `tests/test_v2539_directory_merge.py` 新增独立行卡片渲染、纯归并去重、混合项保留、矩阵防假行、归档诚实展示及 `review_clean` 统计回归用例并全部通过。
+
 ## v2.5.72（2026-11-24，本地实现并同步 GitHub）
 
 - **种子缓存 4 小时 TTL 防链接过期**：为 `downloadable` 站点种子缓存新增 4 小时有效期（`RESOURCE_DOWNLOADABLE_CACHE_TTL_SECONDS = 14400`），防止如天空（`hdsky.me`）等 PT 站点的短时效签名下载直链隔天失效后继续被复用。

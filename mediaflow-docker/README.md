@@ -4,7 +4,7 @@
 
 **专为 115网盘 · CloudDrive2 · MoviePilot · Emby / Jellyfin 打造的下一代智能化媒体治理与生命周期工作流引擎**
 
-[![Release](https://img.shields.io/badge/Release-v2.5.72-6366f1?style=for-the-badge&logo=github)](VERSIONING.md)
+[![Release](https://img.shields.io/badge/Release-v2.5.75-6366f1?style=for-the-badge&logo=github)](VERSIONING.md)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776ab?style=for-the-badge&logo=python)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20Native%20%7C%20Docker-0078d4?style=for-the-badge&logo=windows)](#-快速启动与部署)
 [![MoviePilot](https://img.shields.io/badge/MoviePilot-v2.x%20Ready-ff5722?style=for-the-badge&logo=fastapi)](https://github.com/jxxghp/MoviePilot)
@@ -20,7 +20,7 @@
   <a href="#-配置指南-env">配置指南</a> •
   <a href="#-零数据丢失安全防线">安全防线</a> •
   <a href="#-技术方案与规范索引">文档索引</a> •
-  <a href="#-版本演进与重要里程碑">版本演进 (v2.5.72)</a>
+  <a href="#-版本演进与重要里程碑">版本演进 (v2.5.75)</a>
 </p>
 
 </div>
@@ -228,7 +228,7 @@ MediaFlow 所有配置项均以 `MF_` 前缀开头，大小写不敏感：
 | **会话交接与最新进展** | [MediaFlow 会话交接摘要 (v2.5.61)](MediaFlow会话交接摘要-v2.5.61-2026-11-21.md)<br/>[MediaFlow 会话交接摘要 (v2.5.60)](MediaFlow会话交接摘要-v2.5.60-2026-11-20.md)<br/>[MediaFlow 会话交接摘要 (v2.5.59)](MediaFlow会话交接摘要-v2.5.59-2026-11-20.md) | **v2.5.61** |
 | **整体重构方案** | [五模块处理流程重构与智能清理方案](MediaFlow五模块处理流程重构与智能清理方案-v2.5.44.md)<br/>[五模块一致性核查报告](MediaFlow五模块一致性核查-v2.5.56-2026-11-20.md) | **v2.5.44 ~ v2.5.56** |
 | **专项扩展方案** | [媒体整理智能修复需求与交互方案](MediaFlow媒体整理智能修复需求与交互方案-v2.5.40.md)<br/>[电影订阅智能清理需求与交互方案](MediaFlow电影订阅智能清理需求与交互方案-v2.5.72.md)<br/>[剧集订阅智能清理需求与交互方案](MediaFlow剧集订阅智能清理需求与交互方案-v2.5.72.md) | **v2.5.40 ~ v2.5.72** |
-| **历史版本与迁移** | [完整版本演进历史与全量修改记录](VERSIONING.md)<br/>[媒体脚本迁移记录 (油猴版至统一仓库)](MIGRATION.md) | **v1.0 ~ v2.5.72** |
+| **历史版本与迁移** | [完整版本演进历史与全量修改记录](VERSIONING.md)<br/>[媒体脚本迁移记录 (油猴版至统一仓库)](MIGRATION.md) | **v1.0 ~ v2.5.74** |
 
 ---
 
@@ -238,7 +238,10 @@ MediaFlow 所有配置项均以 `MF_` 前缀开头，大小写不敏感：
 
 | 版本号 | 发布日期 | 关键特性与核心演进 | 状态 |
 | :---: | :---: | :--- | :---: |
-| **`v2.5.72`** | **2026-11-24** | • **种子缓存 4 小时 TTL + 失败自动换种**：为可下载种子缓存增加 4h 有效期防 PT 签名直链过期；推送失败自动触发实时重搜并切换其他站点活种重试，同步清理 MP 转移记录；前后端完整透出每部失败作品的站点与报错原因 | **最新稳定版** |
+| **`v2.5.75`** | **2026-11-24** | • **初检执行期页面抖动（CLS）彻底治理**：移除实时看板与进度条 `transition-all` 布局动画，全面启用 `contain: layout style paint` 与中英混排固定行高/等宽数字槽位，进度条升级为 GPU 合成层 `transform: scaleX(...)` 零重排渲染，同步消除启动首包延迟与背景重绘抖动 | **最新稳定版** |
+| **`v2.5.74`** | **2026-11-24** | • **豆瓣主备自动切换与 Cloudflare 反代 / Cookie-Editor 一键导入**：MoviePilot 豆瓣主通道异常时自动熔断切换至 Cloudflare Workers 反代（`cloudflare-douban-proxy/`）或个人 Cookie 直连，恢复后自动回切；前端顶栏「豆瓣」状态灯新增青色 `豆瓣 (备选)` 态并可点击热配置与三通道实测 | 历史里程碑 |
+| **`v2.5.73`** | **2026-11-24** | • **「待复核清理」目录组独立行卡片重构与零重叠去重**：废除嵌套折叠外框，每组待确认归档目标以独立 `app-card` 行卡片平铺展示（行内直出全部关联路径与集数摘要），与下方单季清理列表职责彻底切分并分开计数<br/>• **覆盖矩阵逻辑纠偏**：消除多季目录组笛卡尔积 `0集` 假行与历史季膨胀；归档库未含本季如实标注 `本季未归档` 与 `—` | 历史里程碑 |
+| **`v2.5.72`** | **2026-11-24** | • **种子缓存 4 小时 TTL + 失败自动换种**：为可下载种子缓存增加 4h 有效期防 PT 签名直链过期；推送失败自动触发实时重搜并切换其他站点活种重试，同步清理 MP 转移记录；前后端完整透出每部失败作品的站点与报错原因 | 历史里程碑 |
 | **`v2.5.71`** | **2026-11-24** | • **CD2 零集纠偏与路径直出**：0 集剧集统一标注灰色 `CD2 未收录`，卡片与弹窗直接展示 `源目录` / `归档库` 路径并支持一键复制、明示仅归档库保护<br/>• **诚实进度条 + 队列防重**：批量动作严格从 `0%` 按真实完成数计进；新增剧集活跃下载队列双重防重并自动清理 MP 本季旧转移记录 | 历史里程碑 |
 | **`v2.5.69`** | **2026-11-24** | • **订阅视图高性能交互重构**：主列表与弹窗改用首屏分批 + `IntersectionObserver` 懒追加、`content-visibility: auto` 与 O(1) 分类桶索引，标签切换首帧从 `58~96ms` 降至 `8.7~30.3ms`<br/>• 疑似短剧更名并支持剧集批量「退订+删源」（自动回查 CD2 源季目录，绝对隔离归档成品库） | 历史里程碑 |
 | **`v2.5.68`** | 2026-11-23 | • **剧集与电影独立统一查询流水线**：`/subscriptions/query-unified` 支持 `media_type` 精准分流（`tv` / `movie`），CD2 实盘增量合并免全盘重扫，阶段 3 站点搜寻引入 3 并发批次流水线<br/>• **严格 CD2 实盘唯一真相源**：未核验 CD2 严格标记「CD2 未核验」，绝不因 MP 记录误判已完结；目录索引加固防止跨作品误穿透；电影未发售状态严控入库判定<br/>• **彻底删源与剧根空目录自动收尾**：退订并删源彻底清理源视频、字幕、NFO 元数据，无其它季度时深度自动清理剧集外层空目录并刷新 CD2 缓存，即时剔除快照残留<br/>• **复杂前缀与衍生花絮解析防护**：`episode_parser.py` 增强独立花絮/特辑前缀（Clip/Extra/Vlog/Diary/先导片/纯享版/加更版等）识别，14 项专项测试 100% 通过 | 历史里程碑 |
@@ -265,13 +268,14 @@ MediaFlow 所有配置项均以 `MF_` 前缀开头，大小写不敏感：
 media-tools/
 ├── mediaflow-win/          # 【主力推荐】MediaFlow Windows 原生免环境运行版 (FastAPI + Tailwind)
 ├── mediaflow-docker/       # 【主力推荐】MediaFlow Docker 容器化编排版 (Docker Compose)
+├── cloudflare-douban-proxy/# Cloudflare Workers 豆瓣只读元数据反代 (可选备选通道)
 ├── tv-season-workflow/     # 剧集整理工作流 (Chrome 油猴脚本版，基于 Excel 流转)
 ├── tv-workflow-win/        # 早期剧集整理 Windows 工具集
 ├── tv-workflow-Python/     # 早期剧集整理 Python 自动化脚本
 ├── 剧集整理docker页面设计/    # UI 原型设计与前端视觉规范稿
 ├── 媒体整理需求/             # 历史基线需求与 MoviePilot 接口接入技术白皮书
 ├── README.md               # 仓库主说明文档
-└── VERSIONING.md           # 完整版本全量变更日志 (v1.0 ~ v2.5.72)
+└── VERSIONING.md           # 完整版本全量变更日志 (v1.0 ~ v2.5.75)
 ```
 
 ---
