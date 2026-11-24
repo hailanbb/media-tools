@@ -1286,6 +1286,7 @@ async def refresh_task_summary(task_id: str, db: AsyncSession) -> dict[str, Any]
     summary = {
         "archive_ready": counts["archive"],
         "review_needed": counts["review"],
+        "review_clean_seasons": counts.get("review_clean", 0),
         "download_needed": max(0, counts["download"] - counts["download_pushed"]),
         "download_pushed": counts["download_pushed"],
         "download_no_resource": counts["download_no_resource"],

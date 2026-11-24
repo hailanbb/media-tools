@@ -669,8 +669,8 @@
             </div>
           </div>
 
-          <!-- 同一 TMDB ID 多目录 / 异名目录组级确认区（每组仅展示 1 张汇总卡） -->
-          <div id="directoryGroupsContainer" class="space-y-2.5 hidden"></div>
+          <!-- 同一 TMDB ID 多目录 / 异名目录组级确认区（每组独立行卡片，与下方剧季卡片视觉对齐） -->
+          <div id="directoryGroupsContainer" class="space-y-3 hidden"></div>
 
           <!-- 剧集清单容器 -->
           <div class="space-y-3" id="episodeItemContainer"></div>
@@ -2296,6 +2296,7 @@
             counts: t.summary ? {
               archive: t.summary.archive_ready || 0,
               review: t.summary.review_needed || 0,
+              review_clean: t.summary.review_clean_seasons ?? null,
               download: t.summary.download_needed || 0,
               download_pushed: t.summary.download_pushed || 0,
               download_no_resource: t.summary.download_no_resource ?? null,
@@ -2303,7 +2304,7 @@
               archive_check: t.summary.archive_check || 0,
               already_archived: t.summary.already_archived || 0,
               pending_directory_groups: t.summary.pending_directory_groups || 0,
-            } : { archive: 0, review: 0, download: 0, download_pushed: 0, airing: 0, archive_check: 0, already_archived: 0, pending_directory_groups: 0 },
+            } : { archive: 0, review: 0, review_clean: 0, download: 0, download_pushed: 0, airing: 0, archive_check: 0, already_archived: 0, pending_directory_groups: 0 },
             _seasonsLoaded: isSameStatus ? (old._seasonsLoaded || false) : false,
             _seasonsLoadError: isSameStatus ? (old._seasonsLoadError || false) : false,
             categories: isSameStatus && old.categories ? old.categories : { archive: [], review: [], download: [], download_pushed: [], airing: [], anomaly: [], archive_check: [] },
@@ -2540,9 +2541,10 @@
       }
 
       document.getElementById('catCountArchive').innerHTML = `${task.counts.archive} <span class="text-xs font-normal">季已齐</span>`;
-      document.getElementById('catCountReview').innerHTML = `${task.counts.review} <span class="text-xs font-normal">季</span>`;
-      const alreadyEl = document.getElementById('catCountAnomaly');
+      const initReviewClean = (task.counts.review_clean != null) ? task.counts.review_clean : task.counts.review;
       const initPendingDg = task.counts.pending_directory_groups || 0;
+      document.getElementById('catCountReview').innerHTML = formatReviewCategoryCount(initReviewClean, initPendingDg);
+      const alreadyEl = document.getElementById('catCountAnomaly');
       const initHeld = (task.summary && task.summary.held_seasons) || 0;
       const initDec = (task.summary && task.summary.anomaly_decision) || 0;
       const initCln = (task.summary && task.summary.anomaly_cleanable) || 0;
@@ -2791,17 +2793,17 @@
       if (task._seasonsLoaded) {
         const archSeasons = (task.categories && Array.isArray(task.categories.archive)) ? task.categories.archive.length : (task.counts.archive || 0);
         document.getElementById('catCountArchive').innerHTML = `${archSeasons} <span class="text-xs font-normal">季已齐</span>`;
-        const revSeasons = (task.categories && Array.isArray(task.categories.review)) ? task.categories.review.length : 0;
-        document.getElementById('catCountReview').innerHTML = `${revSeasons} <span class="text-xs font-normal">季</span>`;
+        const pendingDgCount = (task && Array.isArray(task.directoryGroups))
+          ? task.directoryGroups.filter(g => g.status === 'pending_confirm').length
+          : (task.counts.pending_directory_groups || 0);
+        const revCleanSeasons = getReviewSingleSeasonItems(task).length;
+        document.getElementById('catCountReview').innerHTML = formatReviewCategoryCount(revCleanSeasons, pendingDgCount);
         const anomList = (task.categories && Array.isArray(task.categories.anomaly)) ? task.categories.anomaly : [];
         const anomCount = anomList.length || (task.counts.archive_check || 0);
         const cleanableCount = anomList.filter(it => it.actionType === 'clean_redundant' || it.raw?.status === 'already_archived').length;
         const pendingEvCount = anomList.filter(it => it.actionType === 'system_tracking' || it.raw?.status === 'period_review' || it.raw?.status === 'unknown').length;
         const decisionCount = Math.max(0, anomCount - cleanableCount - pendingEvCount);
 
-        const pendingDgCount = (task && Array.isArray(task.directoryGroups))
-          ? task.directoryGroups.filter(g => g.status === 'pending_confirm').length
-          : (task.counts.pending_directory_groups || 0);
         const anomEl = document.getElementById('catCountAnomaly');
         if (anomEl) {
           let extraHtml = '';
@@ -3390,6 +3392,43 @@
       renderEpisodesList();
     }
 
+    function getReviewSingleSeasonItems(task) {
+      const allReview = (task && task.categories && Array.isArray(task.categories.review))
+        ? task.categories.review
+        : [];
+      const pendingGroupIds = new Set(
+        ((task && Array.isArray(task.directoryGroups)) ? task.directoryGroups : [])
+          .filter(g => g && g.status === 'pending_confirm' && g.id)
+          .map(g => String(g.id))
+      );
+      if (pendingGroupIds.size === 0) return allReview;
+      return allReview.filter(item => {
+        if (!item) return false;
+        const ev = item.evidence || (item.raw && item.raw.evidence) || {};
+        const dirGrp = ev.directory_group || null;
+        const dgId = String((dirGrp && dirGrp.id) || '');
+        if (!dgId || !pendingGroupIds.has(dgId)) return true;
+        const actions = Array.isArray(item.reviewActions) && item.reviewActions.length > 0
+          ? item.reviewActions
+          : (Array.isArray(item.raw && item.raw.review_actions) ? item.raw.review_actions : []);
+        const hasOtherReviewAction = actions.some(a => a && a !== 'merge_directory')
+          || item.actionType === 'clean_redundant'
+          || (item.raw && item.raw.status === 'already_archived')
+          || (Array.isArray(item.duplicates) && item.duplicates.length > 0)
+          || Boolean(ev.review_plan_preview && ev.review_plan_preview.can_clean);
+        return hasOtherReviewAction;
+      });
+    }
+
+    function formatReviewCategoryCount(cleanSeasons, pendingDgCount) {
+      const clean = Number(cleanSeasons) || 0;
+      const dg = Number(pendingDgCount) || 0;
+      if (dg > 0) {
+        return `${clean} <span class="text-xs font-normal">季清理</span><div class="text-[11px] font-normal mt-1">另待归并 ${dg} 组目录</div>`;
+      }
+      return `${clean} <span class="text-xs font-normal">季</span>`;
+    }
+
     function renderDirectoryGroupsPanel(task) {
       const panel = document.getElementById('directoryGroupsContainer');
       if (!panel) return;
@@ -3408,7 +3447,14 @@
 
       const pendingGroups = allGroups.filter(g => g.status === 'pending_confirm');
       const reviewCountEl = document.getElementById('catCountReview');
-      if (reviewCountEl) reviewCountEl.innerHTML = `${task.categories?.review?.length || 0} <span class="text-xs font-normal">季</span><div class="text-[11px] font-normal mt-1">另列 ${pendingGroups.length} 个目录组（可能涉及上述季）</div>`;
+      if (reviewCountEl) {
+        const cleanCount = (typeof getReviewSingleSeasonItems === 'function')
+          ? getReviewSingleSeasonItems(task).length
+          : (task.categories?.review?.length || 0);
+        reviewCountEl.innerHTML = (typeof formatReviewCategoryCount === 'function')
+          ? formatReviewCategoryCount(cleanCount, pendingGroups.length)
+          : `${cleanCount} <span class="text-xs font-normal">季清理</span><div class="text-[11px] font-normal mt-1">另待归并 ${pendingGroups.length} 组目录</div>`;
+      }
 
       const resolvedGroups = allGroups.filter(g => g.status !== 'pending_confirm');
 
@@ -3424,20 +3470,78 @@
       const itemsHtml = displayGroups.map(g => {
         const isPending = g.status === 'pending_confirm';
         const isExpanded = _expandedGroupIds.has(g.id);
-        const borderCls = isPending
-          ? 'border-amber-200 dark:border-amber-800/60 bg-white dark:bg-slate-900'
-          : 'border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-900/40';
-        const statusText = isPending
-          ? '待确认归档目标（已暂停自动归档/清理/退订）'
-          : (g.status === 'confirmed'
-              ? `已确认目标：${g.confirmed_target_path || '-'}`
-              : '已标记有意共存');
-        const showTitle = g.canonical_tmdb_title
-          ? `${g.canonical_tmdb_title} · 确认归档目标`
-          : (g.title || '同一作品有多个目录');
+        const accentColor = isPending ? 'amber' : 'emerald';
+        const showTitle = g.canonical_tmdb_title || g.title || '同一作品有多个目录';
+        const showCanonicalBadge = Boolean(
+          g.canonical_tmdb_title && g.canonical_tmdb_title !== showTitle
+        );
+        const entries = Array.isArray(g.entries) ? g.entries : [];
+        const entriesCount = entries.length;
 
-        const entriesCount = (g.entries || []).length;
-        const entriesHtml = (g.entries || []).map(ent => {
+        // 汇总本组源端涉及季号（用于卡片主胶囊直观展示）
+        const srcSeasonsSet = new Set();
+        entries.forEach(ent => {
+          if (ent && ent.side === 'source') {
+            (ent.seasons || []).forEach(s => {
+              if (s !== null && s !== undefined && String(s).trim() !== '') srcSeasonsSet.add(Number(s));
+            });
+          }
+        });
+        const sortedSrcSeasons = Array.from(srcSeasonsSet).filter(n => !Number.isNaN(n)).sort((a, b) => a - b);
+        const seasonPillPrefix = sortedSrcSeasons.length > 0
+          ? `${sortedSrcSeasons.map(s => `S${String(s).padStart(2, '0')}`).join(' / ')} · `
+          : '';
+        const statusPillText = isPending
+          ? `${seasonPillPrefix}${entriesCount} 处关联目录`
+          : (g.status === 'confirmed'
+              ? `${seasonPillPrefix}已确认目标`
+              : `${seasonPillPrefix}已标记有意共存`);
+
+        const confirmedTargetNorm = String(g.confirmed_target_path || '').replace(/\/+$/, '');
+        const inlinePathsHtml = entries.map(ent => {
+          const isArchive = ent.side === 'archive';
+          const normPath = String(ent.norm_path || '').replace(/\/+$/, '');
+          const isConfirmedArc = Boolean(isArchive && confirmedTargetNorm && normPath === confirmedTargetNorm);
+          const tagCls = isArchive
+            ? (isConfirmedArc
+                ? 'bg-emerald-100 dark:bg-emerald-900/50 text-emerald-700 dark:text-emerald-300'
+                : 'bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-300')
+            : 'bg-sky-100 dark:bg-sky-900/50 text-sky-700 dark:text-sky-300';
+          const tagLabel = isArchive ? (isConfirmedArc ? '已选目标' : '归档库') : '源端';
+          const epCov = ent.episodes_by_season || {};
+          const entSeasons = Array.isArray(ent.seasons) ? ent.seasons : [];
+          let covSummary = '';
+          if (isArchive) {
+            const matchedArcParts = sortedSrcSeasons
+              .map(s => {
+                const eps = epCov[String(s)] || epCov[s] || [];
+                return eps.length ? `S${String(s).padStart(2, '0')}: ${eps.length}集` : '';
+              })
+              .filter(Boolean);
+            if (matchedArcParts.length > 0) {
+              covSummary = matchedArcParts.join(' · ');
+            } else {
+              const otherSeasons = entSeasons
+                .map(Number)
+                .filter(s => !Number.isNaN(s) && !srcSeasonsSet.has(s))
+                .sort((a, b) => a - b);
+              covSummary = otherSeasons.length > 0
+                ? `本季未归档 · 已存 ${otherSeasons.slice(0, 4).map(s => `S${String(s).padStart(2, '0')}`).join('、')}${otherSeasons.length > 4 ? ' 等' : ''}`
+                : '本季未归档';
+            }
+          } else {
+            covSummary = entSeasons.map(s => {
+              const eps = epCov[String(s)] || epCov[s] || [];
+              return `S${String(s).padStart(2, '0')}${eps.length ? `: ${eps.length}集` : ''}`;
+            }).join(' · ');
+          }
+          return `
+            <span class="block break-all leading-relaxed">
+              <span class="inline-block px-1.5 py-0.5 rounded font-sans font-semibold text-[10px] mr-1.5 align-middle ${tagCls}">${tagLabel}</span><span class="align-middle">${escapeHtml(ent.norm_path || '')}</span>${covSummary ? ` <span class="font-sans text-[11px] text-slate-400 dark:text-slate-500 align-middle">(${escapeHtml(covSummary)})</span>` : ''}
+            </span>`;
+        }).join('');
+
+        const entriesHtml = entries.map(ent => {
           const sideLabel = ent.side === 'archive' ? '归档库' : '源端';
           const sideCls = ent.side === 'archive'
             ? 'bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-300'
@@ -3523,31 +3627,51 @@
           detailsContentHtml = `<div class="space-y-1.5">${entriesHtml}</div>`;
         }
 
+        const hintHtml = g.invalidated_reason
+          ? `<span class="text-rose-600 dark:text-rose-400 font-medium">👉 ${escapeHtml(g.invalidated_reason)}</span>`
+          : (isPending
+              ? `<span class="text-amber-600 dark:text-amber-400 font-medium">👉 同 TMDB ID 存在多个目录，已暂停自动归档/清理/退订；请确认统一归档目标</span>`
+              : (g.status === 'confirmed'
+                  ? `<span class="text-emerald-600 dark:text-emerald-400 font-medium">👉 已确认归档目标：${escapeHtml(g.confirmed_target_path || '-')}</span>`
+                  : `<span class="text-slate-500 dark:text-slate-400 font-medium">👉 已标记有意共存，各目录独立保留</span>`));
+
         return `
-          <div id="dir-group-card-${escapeHtml(g.id)}" class="rounded-xl p-3 border ${borderCls} shadow-xs transition space-y-2.5">
-            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-              <div class="min-w-0 flex-1 space-y-1">
-                <div class="flex flex-wrap items-center gap-2">
-                  <i class="fa-solid fa-folder-tree text-amber-600 dark:text-amber-400 text-xs flex-shrink-0"></i>
-                  <span class="text-xs font-bold text-slate-900 dark:text-white">${escapeHtml(showTitle)}</span>
-                  <span class="text-[11px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-mono">TMDB: ${escapeHtml(g.tmdb_id || '')}</span>
-                  ${g.canonical_tmdb_title ? `<span class="text-[11px] px-1.5 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800">TMDB 页面显示：「${escapeHtml(g.canonical_tmdb_title)}」</span>` : ''}
-                  <span class="text-[11px] font-semibold ${isPending ? 'text-amber-700 dark:text-amber-300' : 'text-emerald-700 dark:text-emerald-300'}">${escapeHtml(statusText)}</span>
+          <div id="dir-group-card-${escapeHtml(g.id)}" class="app-card rounded-xl p-4 transition border-l-4 border-l-${accentColor}-500 space-y-3">
+            <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+              <div class="flex items-start space-x-3.5 flex-1 min-w-0">
+                <div class="w-10 h-14 rounded bg-${accentColor}-50 dark:bg-${accentColor}-950/40 flex-shrink-0 flex items-center justify-center text-${accentColor}-500 border border-${accentColor}-200 dark:border-${accentColor}-800/70">
+                  <i class="fa-solid fa-folder-tree text-lg"></i>
+                </div>
+                <div class="min-w-0 flex-1 space-y-1.5">
+                  <div class="flex items-center gap-2 flex-wrap">
+                    <span class="text-sm font-bold text-slate-900 dark:text-white">${escapeHtml(showTitle)}</span>
+                    <span class="text-xs px-2 py-0.5 rounded-full bg-${accentColor}-100 dark:bg-${accentColor}-950/70 text-${accentColor}-700 dark:text-${accentColor}-400 font-semibold border border-${accentColor}-300 dark:border-${accentColor}-800">
+                      ${escapeHtml(statusPillText)}
+                    </span>
+                    <span class="text-xs px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 font-mono">TMDB: ${escapeHtml(g.tmdb_id || '')}</span>
+                    ${showCanonicalBadge ? `<span class="text-[11px] px-1.5 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800">TMDB 页面显示：「${escapeHtml(g.canonical_tmdb_title)}」</span>` : ''}
+                  </div>
+                  <div class="text-xs text-slate-500 dark:text-slate-400 font-mono flex flex-col gap-1">
+                    ${inlinePathsHtml}
+                  </div>
+                  <div class="text-[11px] text-slate-600 dark:text-slate-400 flex items-center gap-2 flex-wrap">
+                    ${hintHtml}
+                  </div>
                 </div>
               </div>
-              <div class="flex items-center gap-2 flex-shrink-0">
-                <button type="button" onclick="toggleDirectoryGroupItemDetail('${escapeHtml(g.id)}')" class="px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-slate-100 text-xs font-medium transition flex items-center gap-1.5">
-                  <i class="fa-solid fa-chevron-${isExpanded ? 'up' : 'down'} text-[10px]"></i>
-                  <span>${isExpanded ? '收起目录' : `查看目录 (${entriesCount})`}</span>
+              <div class="flex items-center space-x-2 flex-shrink-0 self-end sm:self-center flex-wrap gap-y-1">
+                <button type="button" onclick="toggleDirectoryGroupItemDetail('${escapeHtml(g.id)}')" class="px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-semibold hover:bg-slate-50 dark:hover:bg-slate-700 transition flex items-center gap-1.5 shadow-sm">
+                  <i class="fa-solid fa-${isExpanded ? 'chevron-up' : 'table-list'} text-xs text-amber-500"></i>
+                  <span>${isExpanded ? '收起对比' : '集数对比'}</span>
                 </button>
-                <button type="button" onclick="openDirectoryGroupDialog('${escapeHtml(g.id)}')" class="px-3 py-1.5 rounded-lg ${isPending ? 'bg-amber-600 hover:bg-amber-700 text-white shadow-xs' : 'border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200'} text-xs font-semibold transition">
-                  ${isPending ? '确认归档目标' : '修改目录确认'}
+                <button type="button" onclick="openDirectoryGroupDialog('${escapeHtml(g.id)}')" class="px-3 py-1.5 rounded-lg ${isPending ? 'bg-amber-600 hover:bg-amber-700 text-white shadow-sm' : 'border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700'} text-xs font-semibold transition flex items-center gap-1.5">
+                  <i class="fa-solid fa-folder-tree text-xs"></i>
+                  <span>${isPending ? '确认归档目标' : '修改目录确认'}</span>
                 </button>
               </div>
             </div>
             ${isExpanded ? `
-              <div class="pt-2 border-t border-slate-100 dark:border-slate-800/80 space-y-2">
-                ${g.invalidated_reason ? `<div class="text-[11px] text-rose-600 dark:text-rose-400 font-medium">${escapeHtml(g.invalidated_reason)}</div>` : ''}
+              <div class="pt-3 border-t border-slate-100 dark:border-slate-800/80 space-y-2">
                 ${detailsContentHtml}
               </div>
             ` : ''}
@@ -3555,44 +3679,33 @@
       }).join('');
 
       panel.innerHTML = `
-        <div class="border border-amber-200 dark:border-amber-800/80 bg-amber-50/50 dark:bg-amber-950/20 rounded-2xl p-3.5 space-y-3 shadow-xs">
-          <div class="flex flex-wrap items-center justify-between gap-3">
-            <div class="flex flex-wrap items-center gap-2.5">
-              <button type="button" onclick="toggleDirectoryGroupsSection()" class="flex items-center gap-2 text-slate-900 dark:text-white hover:text-amber-600 dark:hover:text-amber-400 font-bold text-xs transition cursor-pointer">
-                <i class="fa-solid fa-chevron-${_directoryGroupCollapsed ? 'right' : 'down'} text-[11px] text-amber-600 dark:text-amber-400"></i>
-                <span>待确认归档目标（${pendingGroups.length} 组待办）</span>
-              </button>
-              <div role="tablist" class="inline-flex items-center gap-1 rounded-lg bg-amber-100/70 dark:bg-amber-900/40 p-0.5 text-[11px]">
-                <button type="button" role="tab" onclick="setDirectoryGroupViewTab('pending')" class="px-2.5 py-0.5 rounded-md font-semibold transition ${_directoryGroupActiveTab === 'pending' ? 'bg-white dark:bg-slate-800 text-amber-800 dark:text-amber-200 shadow-xs' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'}">
-                  待处理 (${pendingGroups.length})
-                </button>
-                <button type="button" role="tab" onclick="setDirectoryGroupViewTab('resolved')" class="px-2.5 py-0.5 rounded-md font-semibold transition ${_directoryGroupActiveTab === 'resolved' ? 'bg-white dark:bg-slate-800 text-amber-800 dark:text-amber-200 shadow-xs' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'}">
-                  查看已处理 (${resolvedGroups.length})
-                </button>
-              </div>
+        <div class="flex flex-wrap items-center justify-between gap-2 pt-0.5">
+          <div class="flex flex-wrap items-center gap-2.5">
+            <div class="flex items-center gap-1.5 text-xs font-bold text-slate-800 dark:text-slate-100">
+              <i class="fa-solid fa-folder-tree text-amber-500"></i>
+              <span>待确认归档目标（${pendingGroups.length} 组待办）</span>
             </div>
-            <div class="flex items-center gap-2">
-              ${_dirGroupReturnCategory ? `
-                <button type="button" onclick="returnFromDirectoryGroupSection()" class="px-2.5 py-1 rounded-lg bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 border border-indigo-200 dark:border-indigo-800 text-xs font-semibold shadow-xs transition flex items-center gap-1.5">
-                  <i class="fa-solid fa-arrow-left text-[10px]"></i>
-                  <span>返回「${escapeHtml(getCategoryName(_dirGroupReturnCategory))}」</span>
-                </button>
-              ` : ''}
-              <button type="button" onclick="toggleDirectoryGroupsSection()" class="text-xs text-slate-500 dark:text-slate-400 hover:text-amber-600 dark:hover:text-amber-400 font-medium">
-                ${_directoryGroupCollapsed ? '展开区块' : '折叠收起'}
+            <div role="tablist" class="inline-flex items-center gap-1 rounded-lg bg-slate-100 dark:bg-slate-800/80 p-0.5 text-[11px]">
+              <button type="button" role="tab" onclick="setDirectoryGroupViewTab('pending')" class="px-2.5 py-0.5 rounded-md font-semibold transition ${_directoryGroupActiveTab === 'pending' ? 'bg-white dark:bg-slate-900 text-amber-700 dark:text-amber-300 shadow-xs' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'}">
+                待处理 (${pendingGroups.length})
+              </button>
+              <button type="button" role="tab" onclick="setDirectoryGroupViewTab('resolved')" class="px-2.5 py-0.5 rounded-md font-semibold transition ${_directoryGroupActiveTab === 'resolved' ? 'bg-white dark:bg-slate-900 text-emerald-700 dark:text-emerald-300 shadow-xs' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'}">
+                查看已处理 (${resolvedGroups.length})
               </button>
             </div>
           </div>
-          ${!_directoryGroupCollapsed ? `
-            <div class="space-y-2 pt-0.5">
-              ${displayGroups.length === 0 ? `
-                <div class="py-4 text-center text-xs text-slate-500 dark:text-slate-400">
-                  ${_directoryGroupActiveTab === 'resolved' ? '暂无已处理的目录组记录' : '当前无待确认目录组'}
-                </div>
-              ` : itemsHtml}
-            </div>
+          ${_dirGroupReturnCategory ? `
+            <button type="button" onclick="returnFromDirectoryGroupSection()" class="px-2.5 py-1 rounded-lg bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 border border-indigo-200 dark:border-indigo-800 text-xs font-semibold shadow-xs transition flex items-center gap-1.5">
+              <i class="fa-solid fa-arrow-left text-[10px]"></i>
+              <span>返回「${escapeHtml(getCategoryName(_dirGroupReturnCategory))}」</span>
+            </button>
           ` : ''}
-        </div>`;
+        </div>
+        ${displayGroups.length === 0 ? `
+          <div class="app-card rounded-xl py-4 text-center text-xs text-slate-500 dark:text-slate-400">
+            ${_directoryGroupActiveTab === 'resolved' ? '暂无已处理的目录组记录' : '当前无待确认目录组'}
+          </div>
+        ` : itemsHtml}`;
     }
 
     async function confirmCleanDirectoryGroupSourceSeason(groupId, recordId, srcPath, seasonLabel, targetPath) {
@@ -3746,8 +3859,8 @@
         banner.innerHTML = `
           <i class="fa-solid fa-broom text-amber-500 text-sm mt-0.5"></i>
           <div class="flex-1 space-y-1">
-            <div class="font-bold text-amber-900 dark:text-amber-300">待复核清理（清理优先）：集中处理同内容副本清理、同 ID 目录规范化归并、归档已齐清源</div>
-            <div class="text-slate-600 dark:text-slate-300">点击「执行推荐处理」可一次预览全部可执行项（含保留理由、删留清单与完成后去向）；加长版、Vlog、加更等独立内容版本默认保全。</div>
+            <div class="font-bold text-amber-900 dark:text-amber-300">待复核清理（清理优先）：上方按作品处理同 ID 目录规范化归并，下方处理单季副本清理与归档已齐清源</div>
+            <div class="text-slate-600 dark:text-slate-300">两组待办不重复计数；点击「执行推荐处理」可一次预览全部可执行项（加长版、Vlog、加更等独立内容版本默认保全）。</div>
           </div>`;
       } else if (currentCategory === 'anomaly' || currentCategory === 'already_archived') {
         if (selectAllLabel) selectAllLabel.textContent = "全选当前异常";
@@ -3904,7 +4017,9 @@
                    : curGapSub === 'partial' ? partialGapItems
                    : curGapSub === 'error' ? errorGapItems
                    : downloadTodoItems))
-            : (task.categories[currentCategory] || []))
+            : (currentCategory === 'review' && typeof getReviewSingleSeasonItems === 'function')
+                ? getReviewSingleSeasonItems(task)
+                : (task.categories[currentCategory] || []))
         : [];
 
       if (currentCategory === 'anomaly' || currentCategory === 'already_archived') {
@@ -3948,10 +4063,17 @@
           emptyIcon = 'fa-circle-exclamation text-amber-500';
           retryBtn = `<button onclick="retryLoadSeasons('${task.id}')" class="mt-2.5 px-3 py-1 text-xs rounded bg-indigo-50 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-100">重试加载</button>`;
         } else {
+          const reviewPendingDg = (currentCategory === 'review' && task && Array.isArray(task.directoryGroups))
+            ? task.directoryGroups.filter(g => g && g.status === 'pending_confirm').length
+            : 0;
+          if (currentCategory === 'review' && selectAll) selectAll.disabled = true;
           const totalSeasons = (task.counts && typeof task.counts.total === 'number')
             ? task.counts.total
-            : (task.summary ? (task.summary.total_seasons || 0) : 0);
-          if (totalSeasons === 0) {
+            : (task.summary ? (task.summary.total_seasons || 0) : (task.raw && task.raw.summary ? (task.raw.summary.total_seasons || 0) : 0));
+          if (currentCategory === 'review' && reviewPendingDg > 0) {
+            emptyMsg = '当前无单季副本或冗余清理项，请在上方「待确认归档目标」区块完成目录归并';
+            emptyIcon = 'fa-folder-tree text-amber-500';
+          } else if (totalSeasons === 0) {
             const prevTimeNote = task.time ? `（上次结果时间: ${task.time}）` : '';
             emptyMsg = task.status === 'stopped' ? `本次初检已中止，尚无已分析剧季${prevTimeNote}，未扫描范围不解释为零` : '本轮尚无已分析剧季，可点击重新初检';
             emptyIcon = 'fa-inbox text-slate-400';
@@ -3979,7 +4101,15 @@
       }
 
       try {
-        container.innerHTML = items.map(item => {
+        const hasDirGroupsAbove = currentCategory === 'review' && task && Array.isArray(task.directoryGroups) && task.directoryGroups.length > 0;
+        const reviewSectionHeaderHtml = hasDirGroupsAbove ? `
+          <div class="flex items-center justify-between gap-2 pt-2">
+            <div class="flex items-center gap-1.5 text-xs font-bold text-slate-800 dark:text-slate-100">
+              <i class="fa-solid fa-broom text-amber-500"></i>
+              <span>单季副本与冗余清理（${items.length} 季待办）</span>
+            </div>
+          </div>` : '';
+        container.innerHTML = reviewSectionHeaderHtml + items.map(item => {
           let badgeColor = 'emerald', actionBtnClass = 'bg-emerald-600 hover:bg-emerald-700 text-white', actionIcon = 'fa-box-archive';
         if (currentCategory === 'review') { badgeColor = 'amber'; actionBtnClass = 'bg-amber-600 hover:bg-amber-700 text-white'; actionIcon = 'fa-broom'; }
         else if (currentCategory === 'anomaly' || currentCategory === 'already_archived') { badgeColor = 'rose'; actionBtnClass = 'bg-rose-600 hover:bg-rose-700 text-white'; actionIcon = 'fa-triangle-exclamation'; }

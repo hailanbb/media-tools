@@ -456,6 +456,135 @@ class TestV2539DirectoryMerge(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(plan_c["source_target_show_path"].endswith("/劲辣专访特别篇 (2026) [tmdbid=326194]"))
         self.assertEqual(plan_c["chosen_prefix"], "劲辣专访特别篇 - ")
 
+    def test_06_coverage_matrix_no_cartesian_fake_rows_and_honest_archive(self):
+        """覆盖矩阵不得为不含该季的源端目录生成 0 集假行，且归档端未含本季时不标全缺。"""
+        from types import SimpleNamespace
+        from app.core.directory_governance import build_group_coverage_matrix
+
+        group_dict = {
+            "id": "grp-spidey",
+            "tmdb_id": "127635",
+            "status": "pending_confirm",
+            "entries": [
+                {
+                    "side": "source",
+                    "norm_path": "/src/小蜘蛛和他的神奇伙伴 (2021) [tmdbid=127635]",
+                    "seasons": [4],
+                    "episodes_by_season": {"4": list(range(1, 13))},
+                },
+                {
+                    "side": "source",
+                    "norm_path": "/src/小蜘蛛和他的神奇小伙伴们 (2021) [tmdbid=127635]",
+                    "seasons": [4, 5],
+                    "episodes_by_season": {"4": list(range(1, 39)), "5": list(range(3, 11))},
+                },
+                {
+                    "side": "archive",
+                    "norm_path": "/dst/小蜘蛛和他的神奇小伙伴们 (2021) [tmdbid=127635]",
+                    "seasons": [1, 2],
+                    "episodes_by_season": {},
+                },
+            ],
+        }
+        records = [
+            SimpleNamespace(
+                id="r-a-s4",
+                tmdb_id="127635",
+                show_path="/src/小蜘蛛和他的神奇伙伴 (2021) [tmdbid=127635]",
+                season_number=4,
+                total_episodes=38,
+                recognized_episodes_json=json.dumps(list(range(1, 13))),
+            ),
+            SimpleNamespace(
+                id="r-b-s4",
+                tmdb_id="127635",
+                show_path="/src/小蜘蛛和他的神奇小伙伴们 (2021) [tmdbid=127635]",
+                season_number=4,
+                total_episodes=38,
+                recognized_episodes_json=json.dumps(list(range(1, 39))),
+            ),
+            SimpleNamespace(
+                id="r-b-s5",
+                tmdb_id="127635",
+                show_path="/src/小蜘蛛和他的神奇小伙伴们 (2021) [tmdbid=127635]",
+                season_number=5,
+                total_episodes=20,
+                recognized_episodes_json=json.dumps(list(range(3, 11))),
+            ),
+        ]
+
+        matrix = build_group_coverage_matrix(group_dict, records)
+        self.assertEqual([sec["season_number"] for sec in matrix], [4, 5])
+
+        # S04 应有 2 个源端行 + 1 个归档端行
+        s4_rows = matrix[0]["rows"]
+        s4_sources = [r for r in s4_rows if r["side"] == "source"]
+        self.assertEqual(len(s4_sources), 2)
+        self.assertEqual(s4_sources[0]["delete_block_reason"], "点击右侧「确认归档目标」")
+
+        # S05 只能有 1 个源端行（不含 S05 的源端目录被过滤，绝无 0/20 集假行）
+        s5_rows = matrix[1]["rows"]
+        s5_sources = [r for r in s5_rows if r["side"] == "source"]
+        self.assertEqual(len(s5_sources), 1)
+        self.assertEqual(s5_sources[0]["path"], "/src/小蜘蛛和他的神奇小伙伴们 (2021) [tmdbid=127635]")
+
+        # 归档端未收录本季时应标「本季未归档（已存 S01、S02）」且缺号为「—」
+        s5_arc = next(r for r in s5_rows if r["side"] == "archive")
+        self.assertEqual(s5_arc["coverage_text"], "本季未归档（已存 S01、S02）")
+        self.assertEqual(s5_arc["missing_text"], "—")
+
+    def test_07_review_clean_count_excludes_pure_merge_directory(self):
+        """review_clean 统计仅计入含单季清理动作的条目，不与待归并目录组重复计数。"""
+        from app.core.season_classifier import consolidate_seasons_to_work_records
+
+        records = [
+            {
+                "id": "pure-merge",
+                "tmdb_id": "231394",
+                "show_name": "忍者神龟",
+                "show_path": "/src/忍者神龟",
+                "season_path": "/src/忍者神龟/Season 2",
+                "season_number": 2,
+                "status": "download_needed",
+                "total_episodes": 12,
+                "recognized_episodes": list(range(1, 12)),
+                "missing_episodes": [12],
+                "duplicate_episodes": [],
+                "evidence": {"directory_group": {"id": "grp-tmnt", "status": "pending_confirm", "requires_confirm": True}},
+            },
+            {
+                "id": "hybrid-merge-dup",
+                "tmdb_id": "231395",
+                "show_name": "混合剧",
+                "show_path": "/src/混合剧",
+                "season_path": "/src/混合剧/Season 1",
+                "season_number": 1,
+                "status": "review_needed",
+                "total_episodes": 10,
+                "recognized_episodes": list(range(1, 11)),
+                "missing_episodes": [],
+                "duplicate_episodes": [1],
+                "evidence": {"directory_group": {"id": "grp-hybrid", "status": "pending_confirm", "requires_confirm": True}},
+            },
+            {
+                "id": "pure-clean",
+                "tmdb_id": "225320",
+                "show_name": "乐高梦想",
+                "show_path": "/src/乐高梦想",
+                "season_path": "/src/乐高梦想/Season 3",
+                "season_number": 3,
+                "status": "review_needed",
+                "total_episodes": 20,
+                "recognized_episodes": list(range(1, 21)),
+                "missing_episodes": [],
+                "duplicate_episodes": [1, 2],
+                "evidence": {},
+            },
+        ]
+        _, counts = consolidate_seasons_to_work_records(records, pending_dir_group_ids={"grp-tmnt", "grp-hybrid"})
+        self.assertEqual(counts["review"], 3)
+        self.assertEqual(counts["review_clean"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

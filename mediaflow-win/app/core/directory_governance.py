@@ -469,15 +469,21 @@ def build_group_coverage_matrix(
         if (group_tmdb_id and r_tid == group_tmdb_id) or (r_sp and r_sp in group_show_paths):
             matched_records.append(rec)
 
-    # 汇总所有涉及到的季度
+    # 汇总本次任务源端涉及的季度（优先按源端目录与匹配记录，不因归档库历史季膨胀；源端全空时才兜底取归档季）
     seasons_set: set[int] = set()
     for ent in entries:
-        for s in ent.get("seasons") or []:
-            if str(s).isdigit():
-                seasons_set.add(int(s))
+        if ent.get("side") == "source":
+            for s in ent.get("seasons") or []:
+                if str(s).isdigit():
+                    seasons_set.add(int(s))
     for rec in matched_records:
         if getattr(rec, "season_number", None) is not None:
             seasons_set.add(int(rec.season_number))
+    if not seasons_set:
+        for ent in entries:
+            for s in ent.get("seasons") or []:
+                if str(s).isdigit():
+                    seasons_set.add(int(s))
 
     if not seasons_set:
         seasons_set.add(1)
@@ -521,6 +527,7 @@ def build_group_coverage_matrix(
             src_path = normalize_dir_path(ent.get("norm_path") or "")
             rec = rec_by_show_and_sn.get((src_path, sn))
             ep_map = ent.get("episodes_by_season") or {}
+            ent_seasons = {int(s) for s in (ent.get("seasons") or []) if str(s).isdigit()}
             ent_eps = set(int(x) for x in (ep_map.get(str(sn)) or ep_map.get(sn) or []) if str(x).isdigit())
             if rec and not ent_eps:
                 try:
@@ -529,10 +536,14 @@ def build_group_coverage_matrix(
                 except Exception:
                     pass
 
+            # 该源端目录本身不含本季（无季记录且无本季集号），跳过，避免多季目录组产生笛卡尔积假行
+            if rec is None and sn not in ent_seasons and not ent_eps:
+                continue
+
             can_delete = False
             delete_reason = ""
             if status != "confirmed":
-                delete_reason = "请先在上方确认归档目标"
+                delete_reason = "点击右侧「确认归档目标」"
             elif confirmation_mode == "intentional_coexist":
                 delete_reason = "已标记有意共存，保留源端"
             elif not confirmed_target_found:
@@ -575,14 +586,25 @@ def build_group_coverage_matrix(
             arc_path = normalize_dir_path(ent.get("norm_path") or "")
             is_confirmed = bool(confirmed_target and arc_path == confirmed_target)
             ep_map = ent.get("episodes_by_season") or {}
+            arc_seasons = sorted({int(s) for s in (ent.get("seasons") or []) if str(s).isdigit()})
             arc_eps = set(int(x) for x in (ep_map.get(str(sn)) or ep_map.get(sn) or []) if str(x).isdigit())
 
             cov_count = len(arc_eps)
-            cov_str = f"{cov_count}/{tot_eps or '?'}集"
-            if arc_eps:
-                cov_str += f"，{format_episodes_range(list(arc_eps))}"
+            if cov_count > 0:
+                cov_str = f"{cov_count}/{tot_eps or '?'}集，{format_episodes_range(list(arc_eps))}"
+                missing_eps = [ep for ep in range(1, tot_eps + 1) if ep not in arc_eps] if tot_eps > 0 else []
+                missing_str = format_episodes_range(missing_eps) if tot_eps > 0 else "未知"
+            else:
+                other_seasons = [s for s in arc_seasons if s != sn]
+                if other_seasons:
+                    other_lbl = "、".join(f"S{s:02d}" for s in other_seasons[:4])
+                    if len(other_seasons) > 4:
+                        other_lbl += " 等"
+                    cov_str = f"本季未归档（已存 {other_lbl}）"
+                else:
+                    cov_str = "本季未归档"
+                missing_str = "—"
 
-            missing_eps = [ep for ep in range(1, tot_eps + 1) if ep not in arc_eps] if tot_eps > 0 else []
             rows.append({
                 "side": "archive",
                 "label": "已确认归档目标" if is_confirmed else "归档库实存目录",
@@ -592,7 +614,7 @@ def build_group_coverage_matrix(
                 "covered_count": cov_count,
                 "total_episodes": tot_eps,
                 "coverage_text": cov_str,
-                "missing_text": format_episodes_range(missing_eps) if tot_eps > 0 else "未知",
+                "missing_text": missing_str,
                 "is_confirmed_target": is_confirmed,
                 "can_delete": False,
                 "delete_block_reason": "已确认归档库实存目标" if is_confirmed else "归档库候补目录",

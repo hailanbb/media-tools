@@ -417,6 +417,7 @@ console.log("===================================================================
       'getCategoryName', 'toggleDirectoryGroupsSection', 'setDirectoryGroupViewTab',
       'toggleDirectoryGroupItemDetail', 'locateDirectoryGroupInAnomaly', 'locateDirectoryGroupInReview',
       'returnFromDirectoryGroupSection', 'filterResultCategory',
+      'getReviewSingleSeasonItems', 'formatReviewCategoryCount',
       'renderDirectoryGroupsPanel', 'getGapFillLists', 'renderEpisodesList'
     ].map(sourceWithCr).join(';\n');
 
@@ -451,18 +452,76 @@ console.log("===================================================================
     assert.strictEqual(dgContext._directoryGroupCollapsed, false, '目录组区块必须确保处于展开状态');
     assert(dgContext._expandedGroupIds.has('grp-104716'), '目标组必须处于展开明细状态');
 
-    // 4. 验证待复核清理 (review) 分类下目录组面板正常渲染且包含作品名与返回按钮
+    // 4. 验证待复核清理 (review) 分类下目录组面板以独立行卡片形式平铺渲染（与下方剧季卡对齐，无嵌套大外框或折叠箭头）
     const reviewPanel = getDgNode('directoryGroupsContainer');
     assert(!reviewPanel.classList.contains('hidden'), '待复核清理分类下目录组面板不得含有 hidden 类');
     const reviewPanelHtml = reviewPanel.innerHTML;
     assert(reviewPanelHtml.includes('待确认归档目标（1 组待办）'), '面板标题必须显示待处理组数');
-    assert(reviewPanelHtml.includes('乘风 · 确认归档目标'), '必须直接使用作品名作为卡片标题');
+    assert(reviewPanelHtml.includes('app-card rounded-xl p-4 transition border-l-4'), '每组目录必须以独立 app-card 行卡片呈现，对齐下方剧季卡片');
+    assert(!reviewPanelHtml.includes('toggleDirectoryGroupsSection'), '不再存在把所有组框在一起折叠的外层折叠按钮');
+    assert(reviewPanelHtml.includes('/src/乘风 (2025)/Season 6'), '关联目录物理路径应直接行内展示，无需二次展开');
+    assert(reviewPanelHtml.includes('>乘风<'), '必须直接使用干净的作品名作为卡片标题');
+    assert(!reviewPanelHtml.includes('乘风 · 确认归档目标'), '卡片标题不再重复拼接「· 确认归档目标」');
     assert(reviewPanelHtml.includes('TMDB: 104716'), '卡片必须显示 TMDB ID');
-    assert(reviewPanelHtml.includes('TMDB 页面显示：「乘风」'), '卡片必须显示 TMDB 官网页面当前名称');
+    assert(!reviewPanelHtml.includes('TMDB 页面显示：「乘风」'), '规范名与标题完全一致时不再重复贴同名徽章');
+    assert(!reviewPanelHtml.includes('折叠收起') && !reviewPanelHtml.includes('展开区块'), '不应存在与左侧箭头重复的右侧折叠按钮');
     assert(reviewPanelHtml.includes('返回「缺集待补」'), '跨页跳转后顶部必须显示返回原清单按钮');
     assert(reviewPanelHtml.includes("openDirectoryGroupDialog('grp-104716')"), '卡片必须挂载确认归档目标弹窗按钮');
     // 目录组面板绝对不包含 itemCheck checkbox，保证不参与“全选清理冗余”
     assert(!reviewPanelHtml.includes('name="itemCheck"'), '目录组面板绝不可包含 itemCheck checkbox，防止误入批量清理');
+
+    // 4b. 验证方案 A：待复核清理下方列表剔除纯目录归并项，仅保留单季清理项与混合项，统计不重叠
+    sampleTask.categories.review = [
+      {
+        id: 'rev-pure-merge',
+        show: '乘风 (2025)',
+        season: 'S06',
+        statusText: '10/12集',
+        actionType: 'merge_directory',
+        reviewActions: ['merge_directory'],
+        duplicates: [],
+        evidence: { directory_group: { id: 'grp-104716', requires_confirm: true, status: 'pending_confirm' } },
+        raw: { status: 'download_needed', review_actions: ['merge_directory'] }
+      },
+      {
+        id: 'rev-hybrid-merge-dup',
+        show: '乘风混合 (2025)',
+        season: 'S05',
+        statusText: '10/10集，第 1 集有多个版本',
+        actionType: 'merge_directory',
+        reviewActions: ['merge_directory', 'clean_duplicates'],
+        duplicates: [1],
+        evidence: { directory_group: { id: 'grp-104716', requires_confirm: true, status: 'pending_confirm' } },
+        raw: { status: 'review_needed', review_actions: ['merge_directory', 'clean_duplicates'] }
+      },
+      {
+        id: 'rev-pure-clean',
+        show: '单季重复剧 (2024)',
+        season: 'S01',
+        statusText: '8/8集，第 2 集有多个版本',
+        actionType: 'clean',
+        reviewActions: ['clean_duplicates'],
+        duplicates: [2],
+        evidence: {},
+        raw: { status: 'review_needed', review_actions: ['clean_duplicates'] }
+      }
+    ];
+    vm.runInContext('renderEpisodesList()', dgContext);
+    const reviewListHtml = getDgNode('episodeItemContainer').innerHTML;
+    assert(reviewListHtml.includes('单季副本与冗余清理（2 季待办）'), '下方单季清理清单应有清晰平铺分段标题');
+    assert(!reviewListHtml.includes('rev-pure-merge'), '纯目录归并项应仅在顶部目录组面板展示，不得在下方剧季列表重复出现');
+    assert(reviewListHtml.includes('rev-hybrid-merge-dup'), '同时含重复版本清理的混合项仍需保留在下方列表');
+    assert(reviewListHtml.includes('rev-pure-clean'), '纯单季副本清理项必须正常展示在下方列表');
+    const reviewCountHtml = getDgNode('catCountReview').innerHTML;
+    assert(reviewCountHtml.includes('2 <span class="text-xs font-normal">季清理</span>'), '待复核清理主计数应仅统计下方非重叠的单季清理项');
+    assert(reviewCountHtml.includes('另待归并 1 组目录'), '待复核清理副计数应清晰标出另待归并的目录组数');
+
+    // 4c. 验证下方无单季清理项但上方有待归并目录组时的友好空态提示
+    sampleTask.categories.review = [sampleTask.categories.review[0]];
+    vm.runInContext('renderEpisodesList()', dgContext);
+    const reviewEmptyHtml = getDgNode('episodeItemContainer').innerHTML;
+    assert(reviewEmptyHtml.includes('当前无单季副本或冗余清理项，请在上方「待确认归档目标」区块完成目录归并'), '仅有目录归并待办时下方应给出明确引导文案');
+    sampleTask.categories.review = [];
 
     // 5. 点击“返回「缺集待补」”按钮：顺利切回 download 分类，目录组面板重新隐藏
     vm.runInContext('returnFromDirectoryGroupSection()', dgContext);

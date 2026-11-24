@@ -379,6 +379,7 @@ def consolidate_seasons_to_work_records(
         return [], {
             "archive": 0,
             "review": 0,
+            "review_clean": 0,
             "download": 0,
             "download_pushed": 0,
             "download_no_resource": 0,
@@ -403,6 +404,7 @@ def consolidate_seasons_to_work_records(
     counts = {
         "archive": 0,
         "review": 0,
+        "review_clean": 0,
         "download": 0,
         "download_pushed": 0,
         "download_no_resource": 0,
@@ -746,6 +748,8 @@ def consolidate_seasons_to_work_records(
 
         # 计入统计
         counts[best_cat] += 1
+        if best_cat == "review" and any(act != "merge_directory" for act in review_actions):
+            counts["review_clean"] += 1
         if is_pushed_pending:
             counts["download_pushed"] += 1
         if best_cat == "download" and gap_state.get("view_bucket") == "no_resource":
