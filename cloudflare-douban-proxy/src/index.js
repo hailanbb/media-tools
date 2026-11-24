@@ -73,7 +73,7 @@ function jsonResponse(payload, status = 200, extraHeaders = {}) {
   });
 }
 
-function buildUpstreamHeaders(kind, subjectId, cookieHeader) {
+function buildUpstreamHeaders(kind, subjectId, cookieHeader, extra = {}) {
   const cookie = ensureBidInCookie(cookieHeader);
   if (kind === "frodo") {
     return {
@@ -81,23 +81,205 @@ function buildUpstreamHeaders(kind, subjectId, cookieHeader) {
       "Referer": "https://servicewechat.com/wx2f9b06c1de1ccfca/91/page-frame.html",
       "Accept": "application/json",
       "Cookie": cookie,
+      ...extra,
     };
   }
-  if (kind === "rexxar") {
+  if (kind === "rexxar" || kind === "rexxar_search") {
+    const referer =
+      kind === "rexxar_search"
+        ? `https://m.douban.com/search/?query=${encodeURIComponent(subjectId || "")}&type=movie`
+        : (subjectId ? `https://m.douban.com/movie/subject/${subjectId}/` : "https://movie.douban.com/");
     return {
       "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
-      "Referer": subjectId ? `https://m.douban.com/movie/subject/${subjectId}/` : "https://movie.douban.com/",
+      "Referer": referer,
       "Accept": "application/json, text/plain, */*",
+      "X-Requested-With": "XMLHttpRequest",
       "Cookie": cookie,
+      ...extra,
     };
   }
   return {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-    "Referer": "https://movie.douban.com/",
-    "Accept": kind === "suggest" ? "application/json, text/plain, */*" : "text/html,application/xhtml+xml",
+    "Referer": kind === "classic_search" ? "https://www.douban.com/search?cat=1002" : "https://movie.douban.com/",
+    "Accept": kind === "suggest" || kind === "classic_search" ? "application/json, text/plain, */*" : "text/html,application/xhtml+xml",
     "Accept-Language": "zh-CN,zh;q=0.9",
     "Cookie": cookie,
+    ...extra,
   };
+}
+
+function decodeHtmlEntities(text) {
+  return String(text || "")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, " ");
+}
+
+function normalizeRexxarSearchItems(payload) {
+  const rawList = [];
+  if (Array.isArray(payload)) {
+    rawList.push(...payload);
+  } else if (payload && typeof payload === "object") {
+    if (Array.isArray(payload.subjects?.items)) rawList.push(...payload.subjects.items);
+    if (Array.isArray(payload.subjects)) rawList.push(...payload.subjects);
+    if (Array.isArray(payload.items)) rawList.push(...payload.items);
+    if (Array.isArray(payload.data)) rawList.push(...payload.data);
+  }
+  const seen = new Set();
+  const out = [];
+  for (const entry of rawList) {
+    if (!entry || typeof entry !== "object") continue;
+    const item = entry.target && typeof entry.target === "object" ? entry.target : entry;
+    const id = String(item.id || "").trim();
+    if (!/^\d+$/.test(id) || seen.has(id)) continue;
+    const title = String(item.title || item.name || "").trim();
+    if (!title) continue;
+    const yearMatch = String(item.year || item.card_subtitle || "").match(/\b((?:19|20)\d{2})\b/);
+    const epRaw = item.episodes_count ?? item.episode ?? "";
+    seen.add(id);
+    out.push({
+      id,
+      title,
+      sub_title: String(item.original_title || item.sub_title || "").trim(),
+      year: yearMatch ? yearMatch[1] : "",
+      type: String(item.type || entry.target_type || "").trim(),
+      episode: /^\d+$/.test(String(epRaw)) ? String(epRaw) : "",
+    });
+  }
+  return out;
+}
+
+function extractSubjectsFromHtml(htmlText) {
+  const text = String(htmlText || "");
+  const seen = new Set();
+  const out = [];
+  // 匹配豆瓣 link2 跳转链接与 /movie/subject/{id} 或 /subject/{id}
+  const anchorRe = /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = anchorRe.exec(text)) !== null) {
+    const rawHref = decodeHtmlEntities(m[1] || "");
+    let decodedHref = rawHref;
+    try {
+      decodedHref = decodeURIComponent(rawHref);
+    } catch {
+      decodedHref = rawHref;
+    }
+    const idMatch = decodedHref.match(/\/subject\/(\d+)/);
+    if (!idMatch) continue;
+    const id = idMatch[1];
+    const cleanTitle = decodeHtmlEntities(String(m[2] || "").replace(/<[^>]+>/g, " "))
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!cleanTitle || seen.has(id)) continue;
+    seen.add(id);
+    out.push({
+      id,
+      title: cleanTitle,
+      sub_title: "",
+      year: "",
+      type: "",
+      episode: "",
+    });
+    if (out.length >= 25) break;
+  }
+  return out;
+}
+
+async function handleFullSearch(query, cookieHeader) {
+  const attempts = [
+    {
+      name: "rexxar_search_movie",
+      url: `https://m.douban.com/rexxar/api/v2/search/movie?q=${encodeURIComponent(query)}&start=0&count=20`,
+      kind: "rexxar_search",
+      mode: "rexxar_json",
+    },
+    {
+      name: "rexxar_search",
+      url: `https://m.douban.com/rexxar/api/v2/search?q=${encodeURIComponent(query)}&type=movie&start=0&count=20`,
+      kind: "rexxar_search",
+      mode: "rexxar_json",
+    },
+    {
+      name: "classic_j_search",
+      url: `https://www.douban.com/j/search?q=${encodeURIComponent(query)}&start=0&cat=1002`,
+      kind: "classic_search",
+      mode: "classic_json",
+    },
+    {
+      name: "mobile_search_html",
+      url: `https://m.douban.com/search/?query=${encodeURIComponent(query)}&type=movie`,
+      kind: "rexxar_search",
+      mode: "html",
+    },
+  ];
+
+  let blockedStatus = 0;
+  let lastChannel = "none";
+  for (const step of attempts) {
+    try {
+      const resp = await fetch(step.url, {
+        method: "GET",
+        headers: buildUpstreamHeaders(step.kind, query, cookieHeader),
+        redirect: "manual",
+      });
+      lastChannel = step.name;
+      if (resp.status === 302 || resp.status === 403) {
+        blockedStatus = resp.status;
+        await resp.body?.cancel();
+        continue;
+      }
+      if (!resp.ok) {
+        await resp.body?.cancel();
+        continue;
+      }
+      const text = await resp.text();
+      let items = [];
+      if (step.mode === "rexxar_json") {
+        try {
+          items = normalizeRexxarSearchItems(JSON.parse(text));
+        } catch {
+          items = [];
+        }
+      } else if (step.mode === "classic_json") {
+        try {
+          const parsed = JSON.parse(text);
+          const joined = Array.isArray(parsed?.items) ? parsed.items.join("\n") : text;
+          items = extractSubjectsFromHtml(joined);
+        } catch {
+          items = [];
+        }
+      } else {
+        items = extractSubjectsFromHtml(text);
+      }
+      if (items.length > 0) {
+        return jsonResponse(items, 200, {
+          "Cache-Control": "public, max-age=300",
+          "X-Douban-Upstream-Channel": step.name,
+          "X-Douban-Upstream-Status": "200",
+        });
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  if (blockedStatus) {
+    return jsonResponse(
+      { ok: false, error: `Douban upstream blocked (${blockedStatus})` },
+      blockedStatus,
+      {
+        "X-Douban-Upstream-Channel": lastChannel,
+        "X-Douban-Upstream-Status": String(blockedStatus),
+      }
+    );
+  }
+  return jsonResponse([], 200, {
+    "X-Douban-Upstream-Channel": lastChannel,
+    "X-Douban-Upstream-Status": "200",
+  });
 }
 
 function buildProxyResponse(upstreamResp, channelName) {
@@ -236,6 +418,14 @@ export async function handleRequest(request, env) {
 
   if (path === "/probe") {
     return handleProbe(reqCookie);
+  }
+
+  if (path === "/search") {
+    const q = (url.searchParams.get("q") || "").trim();
+    if (!q || q.length > 120) {
+      return jsonResponse({ ok: false, error: "Missing or invalid query parameter q" }, 400);
+    }
+    return handleFullSearch(q, reqCookie);
   }
 
   if (path === "/suggest") {

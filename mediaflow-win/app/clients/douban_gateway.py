@@ -20,6 +20,7 @@ from app.core.douban_lookup import (
     lookup_error_reason,
     normalize_detail,
     search_items,
+    search_page_candidates,
     subject_page_detail,
 )
 
@@ -309,30 +310,83 @@ def save_runtime_config(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _build_cf_headers(cfg: dict[str, Any]) -> dict[str, str]:
+def _build_cf_headers(cfg: dict[str, Any], *, include_cookie: bool = True) -> dict[str, str]:
     headers: dict[str, str] = {"Accept": "application/json, text/plain, */*"}
     if cfg["proxy_token"]:
         headers["X-Proxy-Token"] = cfg["proxy_token"]
-    if cfg["cookie_header"]:
+    if include_cookie and cfg["cookie_header"]:
         headers["X-Douban-Cookie"] = cfg["cookie_header"]
     return headers
 
 
-def _build_direct_headers(kind: str, cookie_header: str, subject_id: str = "") -> dict[str, str]:
-    if kind == "rexxar":
+def _build_direct_headers(kind: str, cookie_header: str, subject_id: str = "", query: str = "") -> dict[str, str]:
+    if kind in ("rexxar", "rexxar_search"):
+        from urllib.parse import quote
+
+        referer = (
+            f"https://m.douban.com/search/?query={quote(query)}&type=movie"
+            if kind == "rexxar_search"
+            else (f"https://m.douban.com/movie/subject/{subject_id}/" if subject_id else "https://movie.douban.com/")
+        )
         return {
             "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
-            "Referer": f"https://m.douban.com/movie/subject/{subject_id}/" if subject_id else "https://movie.douban.com/",
+            "Referer": referer,
             "Accept": "application/json, text/plain, */*",
+            "X-Requested-With": "XMLHttpRequest",
             "Cookie": cookie_header,
         }
     return {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-        "Referer": "https://movie.douban.com/",
-        "Accept": "application/json, text/plain, */*" if kind == "suggest" else "text/html,application/xhtml+xml",
+        "Referer": "https://www.douban.com/search?cat=1002" if kind == "classic_search" else "https://movie.douban.com/",
+        "Accept": "application/json, text/plain, */*" if kind in ("suggest", "classic_search") else "text/html,application/xhtml+xml",
         "Accept-Language": "zh-CN,zh;q=0.9",
         "Cookie": cookie_header,
     }
+
+
+def _extract_flexible_search_items(payload: Any) -> list[dict[str, Any]]:
+    """兼容 /suggest 数组、CF /search 标准数组、Rexxar 嵌套 subjects/items/target 与经典 j/search HTML 片段。"""
+    if isinstance(payload, list):
+        return [it for it in payload if isinstance(it, dict)]
+    if not isinstance(payload, dict):
+        return []
+
+    raw_items: list[Any] = []
+    subjects = payload.get("subjects")
+    if isinstance(subjects, dict) and isinstance(subjects.get("items"), list):
+        raw_items.extend(subjects["items"])
+    elif isinstance(subjects, list):
+        raw_items.extend(subjects)
+    if isinstance(payload.get("items"), list):
+        raw_items.extend(payload["items"])
+    if isinstance(payload.get("data"), list):
+        raw_items.extend(payload["data"])
+
+    # 兼容 www.douban.com/j/search 返回的 HTML 片段列表
+    if raw_items and all(isinstance(x, str) for x in raw_items):
+        cand_map, _ = search_page_candidates("\n".join(raw_items))
+        return [{"id": sid, "title": title} for sid, title in cand_map.items()]
+
+    out: list[dict[str, Any]] = []
+    for entry in raw_items:
+        if not isinstance(entry, dict):
+            continue
+        item = entry["target"] if isinstance(entry.get("target"), dict) else entry
+        sid = str(item.get("id") or "").strip()
+        title = str(item.get("title") or item.get("name") or "").strip()
+        if sid.isdigit() and title:
+            ep = item.get("episodes_count") or item.get("episode") or ""
+            out.append(
+                {
+                    "id": sid,
+                    "title": title,
+                    "sub_title": str(item.get("original_title") or item.get("sub_title") or ""),
+                    "year": str(item.get("year") or ""),
+                    "episode": str(ep) if str(ep).isdigit() else "",
+                    "type": str(item.get("type") or entry.get("target_type") or ""),
+                }
+            )
+    return out
 
 
 def _is_blocked_response(status_code: int, text: str) -> bool:
@@ -445,7 +499,7 @@ async def search_fallback(
     throttle_seconds: float = _DIRECT_COOKIE_MIN_INTERVAL,
     cf_throttle_seconds: float = _CF_PROXY_MIN_INTERVAL,
 ) -> dict[str, str]:
-    """按优先级通过备选通道检索豆瓣候选 {subject_id: title}：CF 反代（带平滑限流/缓存/302退避）→ 本机 Cookie 直连。"""
+    """双引擎备选检索 {subject_id: title}：优先全文检索（覆盖多季/新季）并结合 Suggest 联想，规避跨区 Cookie 静默空列表。"""
     cfg = _effective_config()
     diag = diagnostics if diagnostics is not None else []
     q_norm = str(query or "").strip()
@@ -456,7 +510,7 @@ async def search_fallback(
     if isinstance(cached_hits, dict):
         diag.append(
             {
-                "source": "cf_proxy_suggest",
+                "source": "cf_proxy_search",
                 "query": q_norm,
                 "status": "returned" if cached_hits else "empty",
                 "candidate_count": len(cached_hits),
@@ -467,54 +521,152 @@ async def search_fallback(
 
     found: dict[str, str] = {}
 
-    # 1. Cloudflare Workers 反代通道（带全局平滑限流与 302/403 退避，防止并发轰炸同一边缘 IP）
+    # 1. Cloudflare Workers 反代通道：优先 /search 全文检索 → 回退 /suggest 下拉联想
+    # 注意：公开检索默认不附带跨区国内登录态 Cookie，防止“海外 CF IP + 国内 dbcl2”导致豆瓣静默返回空列表 []；
+    # 仅在匿名请求遇 302/403 且配置了 Cookie 时重试一次。
     if cfg["proxy_base"]:
         if is_cf_proxy_in_backoff():
             reason = str(_STATE.get("cf_backoff_reason") or "CF 反代风控退避中，已跳过连续请求")
-            diag.append({"source": "cf_proxy_suggest", "query": q_norm, "status": "blocked", "reason": reason})
+            diag.append({"source": "cf_proxy_search", "query": q_norm, "status": "blocked", "reason": reason})
         else:
+            cf_steps = [
+                ("cf_proxy_search", "/search", "CF 反代全文搜索"),
+                ("cf_proxy_suggest", "/suggest", "CF 反代联想"),
+            ]
+            for src_name, ep_path, label in cf_steps:
+                if is_cf_proxy_in_backoff():
+                    break
+                try:
+                    await _throttle_cf_proxy(cf_throttle_seconds)
+                    resp = await http_client.get(
+                        f"{cfg['proxy_base']}{ep_path}",
+                        params={"q": q_norm},
+                        headers=_build_cf_headers(cfg, include_cookie=False),
+                    )
+                    # 旧版 Worker 尚未部署 /search 时静默回落 /suggest
+                    if resp.status_code == 404 and ep_path == "/search":
+                        continue
+                    if resp.status_code in (302, 403) and cfg["cookie_header"]:
+                        await _throttle_cf_proxy(cf_throttle_seconds)
+                        resp = await http_client.get(
+                            f"{cfg['proxy_base']}{ep_path}",
+                            params={"q": q_norm},
+                            headers=_build_cf_headers(cfg, include_cookie=True),
+                        )
+                    if resp.status_code == 200:
+                        hits = _extract_flexible_search_items(resp.json())
+                        _cache_suggest_items_meta(hits)
+                        diag.append(
+                            {
+                                "source": src_name,
+                                "query": q_norm,
+                                "status": "returned" if hits else "empty",
+                                "candidate_count": len(hits),
+                                "reason": f"{label}返回候选" if hits else f"{label}返回空列表",
+                            }
+                        )
+                        for it in hits:
+                            did = str(it.get("id") or "")
+                            if did.isdigit():
+                                found[did] = it.get("title") or ""
+                        if found:
+                            _STATE["last_active_channel"] = "cf_proxy"
+                            _STATE["last_fallback_error"] = ""
+                            _STATE["cf_backoff_until"] = 0.0
+                            # 全文搜索命中即直接返回，避免多余 /suggest 请求
+                            if ep_path == "/search":
+                                break
+                    elif resp.status_code in (302, 403):
+                        reason = _record_cf_backoff(resp.status_code)
+                        diag.append({"source": src_name, "query": q_norm, "status": "blocked", "reason": reason})
+                        break
+                    else:
+                        reason = f"CF 反代 HTTP {resp.status_code}"
+                        _STATE["last_fallback_error"] = reason
+                        diag.append({"source": src_name, "query": q_norm, "status": "failed", "reason": reason})
+                except Exception as exc:
+                    reason = lookup_error_reason(exc)
+                    _STATE["last_fallback_error"] = reason
+                    diag.append(
+                        {
+                            "source": src_name,
+                            "query": q_norm,
+                            "status": "failed",
+                            "reason": reason,
+                            "error_type": type(exc).__name__,
+                        }
+                    )
+
+            if found:
+                _cache_set(_SEARCH_CACHE, q_norm, dict(found))
+                return found
+
+    # 2. 本机 Cookie 直连通道：优先 Rexxar 全文检索 → 经典影视 j/search → Suggest 下拉联想
+    if cfg["cookie_header"]:
+        direct_steps = [
+            (
+                "douban_cookie_rexxar_search",
+                "https://m.douban.com/rexxar/api/v2/search/movie",
+                {"q": q_norm, "start": 0, "count": 20},
+                "rexxar_search",
+                "Cookie 全文搜索",
+            ),
+            (
+                "douban_cookie_j_search",
+                "https://www.douban.com/j/search",
+                {"q": q_norm, "start": 0, "cat": "1002"},
+                "classic_search",
+                "Cookie 影视搜索",
+            ),
+            (
+                "douban_cookie_suggest",
+                "https://movie.douban.com/j/subject_suggest",
+                {"q": q_norm},
+                "suggest",
+                "Cookie 联想",
+            ),
+        ]
+        for src_name, url, params, hdr_kind, label in direct_steps:
             try:
-                await _throttle_cf_proxy(cf_throttle_seconds)
+                await _throttle_direct_cookie(throttle_seconds)
                 resp = await http_client.get(
-                    f"{cfg['proxy_base']}/suggest",
-                    params={"q": q_norm},
-                    headers=_build_cf_headers(cfg),
+                    url,
+                    params=params,
+                    headers=_build_direct_headers(hdr_kind, cfg["cookie_header"], query=q_norm),
                 )
-                if resp.status_code == 200:
-                    hits = search_items(resp.json())
+                if resp.status_code == 200 and not _is_blocked_response(resp.status_code, resp.text):
+                    hits = _extract_flexible_search_items(resp.json())
                     _cache_suggest_items_meta(hits)
                     diag.append(
                         {
-                            "source": "cf_proxy_suggest",
+                            "source": src_name,
                             "query": q_norm,
                             "status": "returned" if hits else "empty",
                             "candidate_count": len(hits),
-                            "reason": "CF 反代返回候选" if hits else "CF 反代返回空列表",
+                            "reason": f"{label}返回候选" if hits else f"{label}返回空列表",
                         }
                     )
                     for it in hits:
                         did = str(it.get("id") or "")
                         if did.isdigit():
                             found[did] = it.get("title") or ""
-                    _cache_set(_SEARCH_CACHE, q_norm, dict(found))
                     if found:
-                        _STATE["last_active_channel"] = "cf_proxy"
+                        _STATE["last_active_channel"] = "direct_cookie"
                         _STATE["last_fallback_error"] = ""
-                        _STATE["cf_backoff_until"] = 0.0
+                        _cache_set(_SEARCH_CACHE, q_norm, dict(found))
                         return found
-                elif resp.status_code in (302, 403):
-                    reason = _record_cf_backoff(resp.status_code)
-                    diag.append({"source": "cf_proxy_suggest", "query": q_norm, "status": "blocked", "reason": reason})
                 else:
-                    reason = f"CF 反代 HTTP {resp.status_code}"
+                    reason = "Cookie 已失效或触发豆瓣验证/004拦截" if _is_blocked_response(resp.status_code, resp.text) else f"HTTP {resp.status_code}"
                     _STATE["last_fallback_error"] = reason
-                    diag.append({"source": "cf_proxy_suggest", "query": q_norm, "status": "failed", "reason": reason})
+                    diag.append({"source": src_name, "query": q_norm, "status": "blocked", "reason": reason})
+                    if _is_blocked_response(resp.status_code, resp.text):
+                        break
             except Exception as exc:
                 reason = lookup_error_reason(exc)
                 _STATE["last_fallback_error"] = reason
                 diag.append(
                     {
-                        "source": "cf_proxy_suggest",
+                        "source": src_name,
                         "query": q_norm,
                         "status": "failed",
                         "reason": reason,
@@ -522,53 +674,7 @@ async def search_fallback(
                     }
                 )
 
-    # 2. 本机 Cookie 直连通道（带单 IP 限流与 004/验证码熔断）
-    if cfg["cookie_header"]:
-        try:
-            await _throttle_direct_cookie(throttle_seconds)
-            resp = await http_client.get(
-                "https://movie.douban.com/j/subject_suggest",
-                params={"q": q_norm},
-                headers=_build_direct_headers("suggest", cfg["cookie_header"]),
-            )
-            if resp.status_code == 200 and not _is_blocked_response(resp.status_code, resp.text):
-                hits = search_items(resp.json())
-                _cache_suggest_items_meta(hits)
-                diag.append(
-                    {
-                        "source": "douban_cookie_suggest",
-                        "query": q_norm,
-                        "status": "returned" if hits else "empty",
-                        "candidate_count": len(hits),
-                        "reason": "Cookie 通道返回候选" if hits else "Cookie 通道返回空列表",
-                    }
-                )
-                for it in hits:
-                    did = str(it.get("id") or "")
-                    if did.isdigit():
-                        found[did] = it.get("title") or ""
-                _cache_set(_SEARCH_CACHE, q_norm, dict(found))
-                if found:
-                    _STATE["last_active_channel"] = "direct_cookie"
-                    _STATE["last_fallback_error"] = ""
-                    return found
-            else:
-                reason = "Cookie 已失效或触发豆瓣验证/004拦截" if _is_blocked_response(resp.status_code, resp.text) else f"HTTP {resp.status_code}"
-                _STATE["last_fallback_error"] = reason
-                diag.append({"source": "douban_cookie_suggest", "query": q_norm, "status": "blocked", "reason": reason})
-        except Exception as exc:
-            reason = lookup_error_reason(exc)
-            _STATE["last_fallback_error"] = reason
-            diag.append(
-                {
-                    "source": "douban_cookie_suggest",
-                    "query": q_norm,
-                    "status": "failed",
-                    "reason": reason,
-                    "error_type": type(exc).__name__,
-                }
-            )
-
+    _cache_set(_SEARCH_CACHE, q_norm, dict(found))
     return found
 
 
@@ -604,14 +710,22 @@ async def fetch_detail_fallback(
             reason = str(_STATE.get("cf_backoff_reason") or "CF 反代风控退避中")
             diag.append({"source": "cf_proxy_rexxar", "subject_id": sid, "status": "blocked", "reason": reason})
         else:
-            cf_headers = _build_cf_headers(cfg)
             cf_channels: list[tuple[str, str, bool]] = [("cf_proxy_rexxar", f"/rexxar/tv/{sid}", False)]
             if cfg["cookie_header"]:
                 cf_channels.append(("cf_proxy_subject", f"/subject/{sid}", True))
             for ch_name, path, is_html in cf_channels:
                 try:
                     await _throttle_cf_proxy(cf_throttle_seconds)
-                    resp = await http_client.get(f"{cfg['proxy_base']}{path}", headers=cf_headers)
+                    resp = await http_client.get(
+                        f"{cfg['proxy_base']}{path}",
+                        headers=_build_cf_headers(cfg, include_cookie=is_html),
+                    )
+                    if not is_html and resp.status_code in (302, 403) and cfg["cookie_header"]:
+                        await _throttle_cf_proxy(cf_throttle_seconds)
+                        resp = await http_client.get(
+                            f"{cfg['proxy_base']}{path}",
+                            headers=_build_cf_headers(cfg, include_cookie=True),
+                        )
                     if resp.status_code == 404:
                         diag.append({"source": ch_name, "subject_id": sid, "status": "unavailable", "reason": "非剧集条目 (HTTP 404)"})
                         break

@@ -1,6 +1,14 @@
 # MediaFlow 版本管理
 
-## v2.5.76（2026-11-24，本地实现，已同步本地 media-tools）
+## v2.5.77（2026-11-24，本地实现，已同步本地 media-tools）
+
+- **豆瓣备选通道升级为「全文检索 + Suggest 联想」双引擎召回，根治多季/新季漏搜与跨区 Cookie 静默空列表**：
+  - **CF Workers 反代新增 `/search?q=...` 全文检索路由（`cloudflare-douban-proxy/src/index.js`）**：按优先级自动尝试 `m.douban.com/rexxar/api/v2/search/movie` → `rexxar/api/v2/search?type=movie` → `www.douban.com/j/search?cat=1002` → `m.douban.com/search/`，统一输出标准化候选数组（含 `id / title / sub_title / year / episode`），彻底解决仅靠下拉联想 `/j/subject_suggest` 搜不到多季/新季（如《少年泰坦出击 第九季》`37283814`）的根本瓶颈。
+  - **消除「跨区国内 Cookie + 海外 CF IP」引发豆瓣静默返回空列表 `[]`**：`app/clients/douban_gateway.py` 访问 CF `/search`、`/suggest`、`/rexxar/tv/{id}` 时优先使用干净无登录态随机 `bid`，仅当匿名请求遭遇 `302/403` 时才附带 `X-Douban-Cookie` 重试；本机 Cookie 直连通道同步升级为优先 Rexxar 全文检索 → 经典 `j/search` → Suggest 联想。
+  - **修正初检备选搜索过早短路缺陷**：`app/core/inspector.py` 仅在全部目标季号均已命中候选标题时才提前短路（修复旧版 `len(candidates) >= 6` 在第一词只搜出前几季时提前跳过「第九季」精准季词的问题），并放宽至前 6 个查询词。
+  - **回归测试通过**：`cloudflare-douban-proxy/tests/worker.test.mjs`（`8/8`）、`tests/test_douban_gateway.py`（`7/7`）与 `tests/test_v2551_review_closure.py`（`21/21`）全部通过。
+
+## v2.5.76（2026-11-24，本地实现，已同步 GitHub）
 
 - **豆瓣 CF 反代 `HTTP 302 / 403` 防风控治理与检索降噪**：
   - **CF 反代全局平滑限流 + 进程内 TTL 缓存 + 302 短路退避**：在 `app/clients/douban_gateway.py` 为 Cloudflare Workers 反代增加全局 `1.1s` 节流锁、10 分钟查询/详情 TTL 缓存以及遇到 `HTTP 302 / 403` 后的 `20s` 自动退避窗口，彻底消除多协程并发轰炸同一 CF 边缘节点出口 IP 触发豆瓣安全重定向的问题。

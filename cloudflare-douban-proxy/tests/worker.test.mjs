@@ -186,3 +186,76 @@ test("probe aggregates suggest, rexxar_tv, and frodo_tv checks", async () => {
     }
   );
 });
+
+test("GET /search falls back across rexxar full search and classic j/search", async () => {
+  await withMockFetch(
+    async (url) => {
+      if (url.includes("/rexxar/api/v2/search/movie")) {
+        return new Response(
+          JSON.stringify({
+            subjects: {
+              items: [
+                {
+                  target_type: "tv",
+                  target: {
+                    id: "37283814",
+                    title: "少年泰坦出击 第九季",
+                    original_title: "Teen Titans Go! Season 9",
+                    year: "2025",
+                    episodes_count: 52,
+                    type: "tv",
+                  },
+                },
+              ],
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      return new Response("not called", { status: 500 });
+    },
+    async () => {
+      const res = await handleRequest(
+        new Request("https://douban.ubaby.top/search?q=%E5%B0%91%E5%B9%B4%E6%B3%B0%E5%9D%A6%E5%87%BA%E5%87%BB"),
+        {}
+      );
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get("X-Douban-Upstream-Channel"), "rexxar_search_movie");
+      const items = await res.json();
+      assert.equal(items.length, 1);
+      assert.equal(items[0].id, "37283814");
+      assert.equal(items[0].title, "少年泰坦出击 第九季");
+      assert.equal(items[0].episode, "52");
+    }
+  );
+
+  await withMockFetch(
+    async (url) => {
+      if (url.includes("/rexxar/")) {
+        return new Response("blocked", { status: 403 });
+      }
+      if (url.includes("/j/search")) {
+        return new Response(
+          JSON.stringify({
+            items: [
+              '<div class="result"><a href="https://www.douban.com/link2/?url=https%3A%2F%2Fmovie.douban.com%2Fsubject%2F37283814%2F">少年泰坦出击 第九季</a></div>',
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      return new Response("", { status: 404 });
+    },
+    async () => {
+      const res = await handleRequest(
+        new Request("https://douban.ubaby.top/search?q=%E5%B0%91%E5%B9%B4%E6%B3%B0%E5%9D%A6%E5%87%BA%E5%87%BB"),
+        {}
+      );
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get("X-Douban-Upstream-Channel"), "classic_j_search");
+      const items = await res.json();
+      assert.equal(items[0].id, "37283814");
+      assert.equal(items[0].title, "少年泰坦出击 第九季");
+    }
+  );
+});

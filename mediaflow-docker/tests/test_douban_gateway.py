@@ -262,6 +262,48 @@ class TestDoubanGatewayFailoverAndApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(skipped, {})
         self.assertTrue(any(d.get("status") == "blocked" for d in diag2))
 
+    async def test_full_search_prefers_cf_search_without_cross_region_cookie_and_finds_season9(self):
+        douban_gateway.save_runtime_config(
+            {
+                "proxy_base": "https://douban.ubaby.top",
+                "proxy_token": "tok123",
+                "raw_cookie": 'dbcl2="11223344:secret"; bid=abcdefghijk',
+            }
+        )
+        seen_calls = []
+
+        async def _fake_get(url, params=None, headers=None):
+            seen_calls.append((url, dict(params or {}), dict(headers or {})))
+            if url.endswith("/search"):
+                return SimpleNamespace(
+                    status_code=200,
+                    json=lambda: [
+                        {
+                            "id": "37283814",
+                            "title": "少年泰坦出击 第九季",
+                            "sub_title": "Teen Titans Go! Season 9",
+                            "year": "2025",
+                            "episode": "52",
+                            "type": "tv",
+                        }
+                    ],
+                )
+            raise AssertionError(f"unexpected url: {url}")
+
+        hits = await douban_gateway.search_fallback(
+            "少年泰坦出击 第九季",
+            SimpleNamespace(get=_fake_get),
+            cf_throttle_seconds=0.0,
+        )
+        self.assertEqual(hits, {"37283814": "少年泰坦出击 第九季"})
+        self.assertEqual(len(seen_calls), 1)
+        self.assertTrue(seen_calls[0][0].endswith("/search"))
+        # 公开检索首轮不携带跨区国内登录 Cookie，防止豆瓣静默返回空列表
+        self.assertNotIn("X-Douban-Cookie", seen_calls[0][2])
+        cached = douban_gateway.get_suggest_cached_detail("37283814")
+        self.assertEqual(cached["number_of_episodes"], 52)
+        self.assertEqual(cached["year"], "2025")
+
 
 if __name__ == "__main__":
     unittest.main()

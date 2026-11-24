@@ -3158,13 +3158,16 @@ async def _fetch_seasons_via_douban(mp_client, show_name, log=None, needed_seaso
                             diagnostics.append({"source":"moviepilot_douban", "query":q, "status":"failed", "reason":lookup_error_reason(exc), "error_type":type(exc).__name__})
                     return found
             if use_gateway_fallback and douban_gateway.should_skip_mp():
-                # 备选通道下顺序精简查询并提前短路，避免 9 路并发连轰 8 词瞬间触发豆瓣 302 限流
-                for q in queries[:4]:
+                # 备选通道下顺序查询并仅在目标季全部命中时提前短路（避免前 1 词只返回前几季就跳过「第九季」等精准季词）
+                for q in queries[:6]:
                     found = await search(q)
                     candidates.update(found)
                     if douban_gateway.is_cf_proxy_in_backoff() and not candidates:
                         break
-                    if candidates and (not unbound or any(_parse_season_from_text(t) in unbound for t in candidates.values()) or len(candidates) >= 6):
+                    if candidates and (
+                        not unbound
+                        or all(any(_parse_season_from_text(t) == sn for t in candidates.values()) for sn in unbound)
+                    ):
                         break
             else:
                 for found in await asyncio.gather(*(search(q) for q in queries[:8])):
