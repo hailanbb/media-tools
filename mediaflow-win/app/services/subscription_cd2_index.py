@@ -969,6 +969,8 @@ async def enrich_subscriptions_with_cd2_and_cache(
         "cd2_tv_ok": tv_scanned_ok,
         "cd2_movie_ok": movie_scanned_ok,
         "cd2_matched_count": cd2_matched_count,
+        "source_root": (snapshot or {}).get("source_root") or (settings.source_root or "").rstrip("/"),
+        "archive_root": (snapshot or {}).get("archive_root") or (settings.archive_root or settings.library_root or "").rstrip("/"),
         "sync_status": get_cd2_sync_status(),
     }
     return enriched, meta_info

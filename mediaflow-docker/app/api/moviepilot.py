@@ -106,6 +106,7 @@ class BatchDeleteSubscriptionsRequest(BaseModel):
     sub_ids: list[int]
     titles: list[str] | None = None
     force: bool = False  # 是否强制跳过保护检查（用于用户明确确认的人工清理）
+    cleanup_source: bool = False  # 仅限电视剧：退订后联动彻底删除受控源季目录及空剧集目录并刷新 CD2
 
 
 class SubscriptionStatusUpdateRequest(BaseModel):
@@ -351,7 +352,7 @@ async def batch_update_subscription_status(
         processed=0,
         success_count=0,
         fail_count=0,
-        progress_pct=5,
+        progress_pct=0,
         current_title="",
         message=f"正在批量更新 {total_count} 项订阅状态为 {state_name}...",
     )
@@ -361,8 +362,8 @@ async def batch_update_subscription_status(
             update_batch_action_progress(
                 processed=idx,
                 current_title=f"订阅 #{sid}",
-                progress_pct=8 + int(88 * idx / max(1, total_count)),
-                message=f"正在变更状态 ({idx + 1}/{total_count})：订阅 #{sid}...",
+                progress_pct=int(100 * idx / max(1, total_count)),
+                message=f"正在变更第 {idx + 1}/{total_count} 项（已完成 {idx} 项）：订阅 #{sid}...",
             )
             try:
                 await mp.update_subscription_status(sid, body.state)
@@ -374,8 +375,8 @@ async def batch_update_subscription_status(
                 processed=idx + 1,
                 success_count=success_count,
                 fail_count=fail_count,
-                progress_pct=10 + int(88 * (idx + 1) / max(1, total_count)),
-                message=f"已变更状态 ({idx + 1}/{total_count}) · 成功 {success_count} / 失败 {fail_count}",
+                progress_pct=min(99, int(100 * (idx + 1) / max(1, total_count))),
+                message=f"已完成变更 {idx + 1}/{total_count} 项 · 成功 {success_count} / 失败 {fail_count}",
             )
 
         if success_count > 0:
@@ -618,34 +619,48 @@ async def batch_delete_subscriptions(
     body: BatchDeleteSubscriptionsRequest,
     db: AsyncSession = Depends(get_db),
 ) -> StatusResponse:
-    """批量取消指定订阅（自动关联剧名并写入审计日志）。"""
+    """批量取消指定订阅（可选联动彻底清理电视剧受控源季目录与空剧集目录并刷新 CD2）。"""
     if not body.sub_ids:
         return StatusResponse(ok=False, message="未选择任何订阅")
 
     _check_mp_configured()
+    from app.clients.clouddrive2 import CloudDrive2Client
     from app.models.operation import OperationLog
     from app.services.subscription_governance_service import (
         mutate_unified_snapshot_on_delete,
         update_batch_action_progress,
     )
+    from app.services.subscription_service import (
+        cleanup_subscription_source_season,
+        is_movie_sub,
+        subscription,
+    )
     mp = MoviePilotClient()
+    cleanup_source = bool(getattr(body, "cleanup_source", False))
+    disk = CloudDrive2Client() if cleanup_source else None
     success_count = 0
     fail_count = 0
+    cleaned_seasons = 0
+    cleaned_show_dirs = 0
+    deleted_files_total = 0
+    no_source_count = 0
+    source_skipped_count = 0
     deleted_ids: list[int] = []
     errors: list[str] = []
     total_count = len(body.sub_ids)
+    action_label = "批量取消订阅+删源" if cleanup_source else "批量取消订阅"
 
     update_batch_action_progress(
-        action_type="unsubscribe",
-        action_label="批量取消订阅",
+        action_type="unsubscribe_cleanup" if cleanup_source else "unsubscribe",
+        action_label=action_label,
         status="running",
         total=total_count,
         processed=0,
         success_count=0,
         fail_count=0,
-        progress_pct=5,
+        progress_pct=0,
         current_title="",
-        message=f"正在准备批量取消 {total_count} 项订阅，正在同步校验订阅状态...",
+        message=f"正在准备{action_label}（共 {total_count} 项），正在同步校验订阅状态...",
     )
 
     try:
@@ -671,21 +686,43 @@ async def batch_delete_subscriptions(
             update_batch_action_progress(
                 processed=idx,
                 current_title=title,
-                progress_pct=10 + int(86 * idx / max(1, total_count)),
-                message=f"正在取消订阅 ({idx + 1}/{total_count})：《{title}》...",
+                progress_pct=int(100 * idx / max(1, total_count)),
+                message=f"正在执行第 {idx + 1}/{total_count} 项（已完成 {idx} 项）{action_label}：《{title}》...",
             )
             mp_deleted = False
+            cleanup_info: dict | None = None
             try:
-                from app.services.subscription_service import subscription
                 current_sub = sub_obj_map.get(int(sid)) if sub_obj_map else await subscription(mp, sid)
                 if not current_sub or (not getattr(body, "force", False) and diagnose_subscription(current_sub).is_protected):
                     raise ValueError("订阅已不存在或处于保护状态，请重新核查")
                 await mp.delete_subscription(sid)
                 mp_deleted = True
+
+                if cleanup_source and disk is not None and not is_movie_sub(current_sub):
+                    try:
+                        cleanup_info = await cleanup_subscription_source_season(db, disk, current_sub)
+                        c_status = cleanup_info.get("status")
+                        if c_status == "cleaned":
+                            cleaned_seasons += 1
+                            deleted_files_total += int(cleanup_info.get("deleted_files") or 0)
+                            if cleanup_info.get("show_dir_deleted"):
+                                cleaned_show_dirs += 1
+                        elif c_status == "no_source":
+                            no_source_count += 1
+                        else:
+                            source_skipped_count += 1
+                    except Exception as clean_err:
+                        source_skipped_count += 1
+                        cleanup_info = {"status": "error", "reason": str(clean_err)}
+                        log.warning("批量退订后删源失败 (sub_id=%s, title=%s): %s", sid, title, clean_err)
+
                 op_log = OperationLog(
-                    action="unsubscribe",
+                    action="unsubscribe_and_cleanup" if cleanup_source else "unsubscribe",
                     status="completed",
-                    detail_json=json.dumps({"sub_id": sid, "title": title}, ensure_ascii=False),
+                    detail_json=json.dumps(
+                        {"sub_id": sid, "title": title, "cleanup_source": cleanup_source, "cleanup_info": cleanup_info},
+                        ensure_ascii=False,
+                    ),
                 )
                 db.add(op_log)
                 success_count += 1
@@ -694,26 +731,39 @@ async def batch_delete_subscriptions(
                 if mp_deleted:
                     success_count += 1
                     deleted_ids.append(int(sid))
-                    errors.append(f"退订 {title} 在 MP 已生效，但本地审计日志写入失败: {e}")
+                    errors.append(f"退订 {title} 在 MP 已生效，但后续记录写入失败: {e}")
                 else:
                     fail_count += 1
                     errors.append(f"退订 {title} 失败: {e}")
 
+            extra_prog = f" · 已删源 {cleaned_seasons} 季" if cleanup_source else ""
             update_batch_action_progress(
                 processed=idx + 1,
                 success_count=success_count,
                 fail_count=fail_count,
-                progress_pct=12 + int(86 * (idx + 1) / max(1, total_count)),
-                message=f"已取消订阅 ({idx + 1}/{total_count})：《{title}》 (成功 {success_count} · 失败 {fail_count})",
+                progress_pct=min(99, int(100 * (idx + 1) / max(1, total_count))),
+                message=f"已完成 {idx + 1}/{total_count} 项：《{title}》 (退订成功 {success_count}{extra_prog} · 失败 {fail_count})",
             )
 
         if success_count > 0:
             await db.commit()
             await mutate_unified_snapshot_on_delete(db, deleted_ids)
 
-        msg = f"批量清理完成：成功退订 {success_count} 项"
+        if cleanup_source:
+            msg = f"批量退订+删源完成：成功退订 {success_count} 项"
+            if cleaned_seasons > 0:
+                msg += f"，彻底清理 {cleaned_seasons} 个源季目录（共 {deleted_files_total} 个文件"
+                if cleaned_show_dirs > 0:
+                    msg += f"，并移除 {cleaned_show_dirs} 个空剧集目录"
+                msg += "，已刷新 CD2）"
+            if no_source_count > 0:
+                msg += f"；{no_source_count} 项源端原本无文件，已安全仅退订"
+            if source_skipped_count > 0:
+                msg += f"；{source_skipped_count} 项删源因安全核验跳过"
+        else:
+            msg = f"批量清理完成：成功退订 {success_count} 项（本地媒体文件完整保留）"
         if fail_count > 0:
-            msg += f"，失败 {fail_count} 项"
+            msg += f"，退订失败 {fail_count} 项"
 
         update_batch_action_progress(
             status="completed",
@@ -726,6 +776,8 @@ async def batch_delete_subscriptions(
         return StatusResponse(ok=success_count > 0, message=msg)
     finally:
         await mp.close()
+        if disk is not None:
+            await disk.close()
 
 
 @router.delete("/subscriptions/{sub_id}", response_model=StatusResponse)

@@ -956,6 +956,476 @@ class TestV2563SubscriptionGovernance(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(src_season, deleted_paths)
                 self.assertIn(show_dir, deleted_paths)
 
+    def test_15_frontend_tab_switch_performance_guards(self):
+        html = (Path(__file__).resolve().parent.parent / "frontend" / "index.html").read_text(encoding="utf-8")
+        # 1. 清除阻塞 CSSOM 的字体 @import 与 Tailwind v3 非法类名
+        self.assertNotIn("@import url('https://fonts.googleapis.com", html)
+        self.assertNotIn("py-0.2", html)
+        self.assertNotIn("py-0.8", html)
+        self.assertNotIn("shadow-2xs", html)
+        # 2. CSS 渲染隔离与首屏外视口跳过渲染（含回退）
+        self.assertIn("sub-list-viewport", html)
+        self.assertIn("content-visibility: auto", html)
+        self.assertIn("@supports not (content-visibility: auto)", html)
+        # 3. O(1) 预索引、原位切标签高亮、分批渲染与主线程让步
+        self.assertIn("rebuildSubBucketIndex", html)
+        self.assertIn("updateSubFilterActiveStyles", html)
+        self.assertIn("SUB_LIST_INITIAL_BATCH", html)
+        self.assertIn("renderMoreSubscriptions", html)
+        self.assertIn("yieldToMain", html)
+        # 4. 封面懒加载与 w185 缩略图 + 弹窗原位勾选同步 + 防双重刷新
+        self.assertIn("_subPosterUrl", html)
+        self.assertIn('loading="lazy"', html)
+        self.assertIn('decoding="async"', html)
+        self.assertIn("_syncModalCheckboxDom", html)
+        self.assertIn("else if (!reloaded)", html)
+
+    async def test_16_batch_delete_cleanup_source_and_label_rename(self):
+        from unittest.mock import AsyncMock, patch
+        from app.api.moviepilot import BatchDeleteSubscriptionsRequest, batch_delete_subscriptions
+        from app.database import async_session
+        from app.services.subscription_cd2_index import save_cd2_snapshot
+
+        html = (Path(__file__).resolve().parent.parent / "frontend" / "index.html").read_text(encoding="utf-8")
+        self.assertIn("🟣 疑似短剧", html)
+        self.assertNotIn("微短剧停滞", html)
+        self.assertIn("批量取消订阅+删源", html)
+        self.assertIn("isBatchCleanupSourceMode", html)
+        self.assertIn("cleanup_source: cleanupSource", html)
+
+        src_season = "/nas/电视剧/国产剧/测试断更剧 (2025) [tmdbid=88881]/Season 1"
+        show_dir = "/nas/电视剧/国产剧/测试断更剧 (2025) [tmdbid=88881]"
+        vid_file = {"name": "测试断更剧 - S01E01.mkv", "path": f"{src_season}/测试断更剧 - S01E01.mkv", "size": 500, "isDirectory": False}
+        nfo_file = {"name": "season.nfo", "path": f"{src_season}/season.nfo", "size": 80, "isDirectory": False}
+
+        sub_with_src = {"id": 8801, "name": "测试断更剧", "type": "电视剧", "season": 1, "tmdbid": 88881, "total_episode": 12, "completed_episode": 1, "lack_episode": 11, "state": "P", "date": "2025-01-01", "last_update": "2025-02-01"}
+        sub_zero_src = {"id": 8802, "name": "零进度测试剧", "type": "电视剧", "season": 1, "tmdbid": 88882, "total_episode": 12, "completed_episode": 0, "lack_episode": 12, "state": "P", "date": "2025-01-01", "last_update": "2025-02-01"}
+        sub_completed = {"id": 8803, "name": "全季完结测试剧", "type": "电视剧", "season": 1, "tmdbid": 88883, "total_episode": 10, "completed_episode": 10, "lack_episode": 0, "state": "P", "date": "2025-01-01", "last_update": "2025-02-01"}
+
+        fake_settings = type("Settings", (), {
+            "mp_url": "http://mp.local", "mp_token": "tok",
+            "source_root": "/nas", "archive_root": "/nas.finish", "library_root": "/nas.media",
+            "enable_multi_dir_governance": False,
+        })()
+
+        # 场景 A: 全季完结 cleanup_source=False -> 仅退订，绝不删源
+        mp_safe = AsyncMock()
+        mp_safe.list_subscriptions = AsyncMock(return_value=[sub_completed])
+        mp_safe.delete_subscription = AsyncMock(return_value={})
+        mp_safe.close = AsyncMock()
+        disk_safe = AsyncMock()
+        disk_safe.delete_file = AsyncMock(return_value={"success": True})
+        disk_safe.close = AsyncMock()
+
+        with (
+            patch("app.api.moviepilot._check_mp_configured"),
+            patch("app.api.moviepilot.MoviePilotClient", return_value=mp_safe),
+            patch("app.clients.clouddrive2.CloudDrive2Client", return_value=disk_safe),
+        ):
+            async with async_session() as db:
+                res_safe = await batch_delete_subscriptions(
+                    BatchDeleteSubscriptionsRequest(sub_ids=[8803], titles=["全季完结测试剧"], cleanup_source=False),
+                    db=db,
+                )
+                self.assertTrue(res_safe.ok)
+                self.assertIn("本地媒体文件完整保留", res_safe.message)
+                mp_safe.delete_subscription.assert_awaited_once_with(8803)
+                disk_safe.delete_file.assert_not_awaited()
+
+        # 场景 B: 批量退订+删源 cleanup_source=True -> 有源删全季+剧空目录，无源安全仅退订
+        mp_clean = AsyncMock()
+        mp_clean.list_subscriptions = AsyncMock(return_value=[sub_with_src, sub_zero_src])
+        mp_clean.delete_subscription = AsyncMock(return_value={})
+        mp_clean.close = AsyncMock()
+
+        deleted_paths = []
+        async def _mock_del(p):
+            deleted_paths.append(p)
+            return {"success": True}
+
+        disk_clean = AsyncMock()
+        disk_clean.list_files = AsyncMock(side_effect=[
+            [vid_file, nfo_file],  # 列出 Season 1
+            [],                    # 刷新 show_dir -> 为空
+            [],                    # 刷新分类目录
+        ])
+        disk_clean.delete_file = AsyncMock(side_effect=_mock_del)
+        disk_clean.close = AsyncMock()
+
+        with (
+            patch("app.api.moviepilot._check_mp_configured"),
+            patch("app.api.moviepilot.MoviePilotClient", return_value=mp_clean),
+            patch("app.clients.clouddrive2.CloudDrive2Client", return_value=disk_clean),
+            patch("app.services.subscription_service.get_settings", return_value=fake_settings),
+        ):
+            async with async_session() as db:
+                await save_cd2_snapshot(
+                    db,
+                    {
+                        "version": 1, "synced_at": "2026-11-24 10:00:00",
+                        "tv_scanned_ok": True, "movie_scanned_ok": True,
+                        "tv_by_key": {
+                            "88881:1": {
+                                "season": 1, "source_count": 1, "archive_count": 0, "total_count": 1,
+                                "merged_episodes": [1], "paths": [src_season],
+                            }
+                        },
+                        "tv_by_title": {}, "movie_by_tmdb": {}, "movie_by_title": {},
+                    },
+                )
+                res_clean = await batch_delete_subscriptions(
+                    BatchDeleteSubscriptionsRequest(
+                        sub_ids=[8801, 8802],
+                        titles=["测试断更剧", "零进度测试剧"],
+                        cleanup_source=True,
+                    ),
+                    db=db,
+                )
+                self.assertTrue(res_clean.ok)
+                self.assertIn("批量退订+删源完成：成功退订 2 项", res_clean.message)
+                self.assertIn("彻底清理 1 个源季目录", res_clean.message)
+                self.assertIn("移除 1 个空剧集目录", res_clean.message)
+                self.assertIn("1 项源端原本无文件，已安全仅退订", res_clean.message)
+                self.assertIn(vid_file["path"], deleted_paths)
+                self.assertIn(nfo_file["path"], deleted_paths)
+                self.assertIn(src_season, deleted_paths)
+                self.assertIn(show_dir, deleted_paths)
+
+    async def test_17_cd2_zero_episode_label_and_path_display(self):
+        from datetime import datetime
+        from app.core.subscription_cleaner import diagnose_tv_subscription
+        from app.database import async_session
+        from app.services.subscription_cd2_index import (
+            enrich_subscriptions_with_cd2_and_cache,
+            save_cd2_snapshot,
+        )
+
+        now = datetime(2026, 11, 24, 12, 0, 0)
+        # 1. 疑似短剧且 CD2 实盘为 0 集：严禁出现「CD2 已收录」，必须明确「CD2 未收录」
+        d_short_zero = diagnose_tv_subscription(
+            {
+                "id": 9101,
+                "name": "重生的钿女",
+                "year": "2026",
+                "type": "电视剧",
+                "season": 1,
+                "total_episode": 99,
+                "lack_episode": 99,
+                "state": "R",
+                "username": "豆瓣榜单",
+                "date": "2026-09-01 00:00:00",
+                "last_update": "2026-10-01 00:00:00",
+                "cd2_verified": True,
+                "cd2_source_episodes": 0,
+                "cd2_archive_episodes": 0,
+                "cd2_total_episodes": 0,
+                "cd2_paths": [],
+            },
+            now=now,
+        )
+        self.assertEqual(d_short_zero.clean_rule, "short_tv_stalled")
+        self.assertIn("CD2 未收录（0/99 集）", d_short_zero.clean_reason)
+        self.assertNotIn("CD2 已收录", d_short_zero.clean_reason)
+
+        # 2. 疑似短剧且 CD2 归档库实存 60 集：保留「CD2 已收录 60/99 集」
+        d_short_arch = diagnose_tv_subscription(
+            {
+                "id": 9102,
+                "name": "等一场巴黎的风",
+                "year": "2026",
+                "type": "电视剧",
+                "season": 1,
+                "total_episode": 99,
+                "lack_episode": 39,
+                "state": "R",
+                "username": "豆瓣榜单",
+                "date": "2026-01-01 00:00:00",
+                "last_update": "2026-02-01 00:00:00",
+                "cd2_verified": True,
+                "cd2_source_episodes": 0,
+                "cd2_archive_episodes": 60,
+                "cd2_total_episodes": 60,
+                "cd2_avg_video_mb": 12.9,
+                "cd2_paths": ["/nas.finish/电视剧/国产剧/等一场巴黎的风 (2026) [tmdbid=314453]/Season 1"],
+            },
+            now=now,
+        )
+        self.assertEqual(d_short_arch.clean_rule, "short_tv_stalled")
+        self.assertIn("CD2 已收录 60/99 集", d_short_arch.clean_reason)
+
+        # 3. 零进度死种与异常特征 0 集：同样明确「CD2 未收录（实存 0 集）」
+        d_zombie = diagnose_tv_subscription(
+            {
+                "id": 9103,
+                "name": "普通老剧",
+                "year": "2024",
+                "type": "电视剧",
+                "season": 1,
+                "total_episode": 24,
+                "lack_episode": 24,
+                "state": "R",
+                "username": "豆瓣榜单",
+                "date": "2026-08-01 00:00:00",
+                "last_update": "2026-09-01 00:00:00",
+                "cd2_verified": True,
+                "cd2_source_episodes": 0,
+                "cd2_archive_episodes": 0,
+                "cd2_total_episodes": 0,
+                "cd2_paths": [],
+            },
+            now=now,
+        )
+        self.assertEqual(d_zombie.clean_rule, "zombie")
+        self.assertIn("CD2 未收录（实存 0 集）", d_zombie.clean_reason)
+        self.assertNotIn("CD2 已收录", d_zombie.clean_reason)
+
+        # 4. cd2_meta 透传 source_root 与 archive_root
+        async with async_session() as db:
+            await save_cd2_snapshot(
+                db,
+                {
+                    "version": 1,
+                    "synced_at": "2026-11-24 12:00:00",
+                    "source_root": "/115/Library_incs/nas",
+                    "archive_root": "/115/Library_incs/nas.finish",
+                    "tv_scanned_ok": True,
+                    "movie_scanned_ok": True,
+                    "tv_by_key": {},
+                    "tv_by_title": {},
+                    "movie_by_tmdb": {},
+                    "movie_by_title": {},
+                },
+            )
+            _, meta = await enrich_subscriptions_with_cd2_and_cache(db, [])
+            self.assertEqual(meta.get("source_root"), "/115/Library_incs/nas")
+            self.assertEqual(meta.get("archive_root"), "/115/Library_incs/nas.finish")
+
+        # 5. 前端徽章、归档库提示与路径一键复制守卫
+        html = (Path(__file__).resolve().parent.parent / "frontend" / "index.html").read_text(encoding="utf-8")
+        self.assertIn("CD2 未收录", html)
+        self.assertIn("仅在归档库", html)
+        self.assertIn("退订后保留归档文件", html)
+        self.assertIn("_classifyCd2Path", html)
+        self.assertIn("_renderSubCd2PathsHtml", html)
+        self.assertIn("copySubCd2Path", html)
+
+    async def test_18_batch_gap_fill_progress_active_dedup_and_clear_transfer(self):
+        from unittest.mock import AsyncMock, patch
+        from app.database import async_session
+        from app.services import subscription_governance_service as sgs
+
+        # 1. 校验电视剧活跃下载队列匹配：按 TMDB+季精确匹配、忽略纯做种、不混淆季号
+        active_list = [
+            {"state": "downloading", "tmdb_id": 77001, "season": 1, "title": "已在途断更剧 S01"},
+            {"state": "seeding", "tmdb_id": 77002, "season": 1, "title": "仅做种剧集 S01"},
+            {"state": "downloading", "title": "喜剧之王单口季 S02E03.mkv"},
+        ]
+        self.assertTrue(sgs._is_tv_season_in_active_downloads(active_list, "77001", "已在途断更剧", 1))
+        self.assertFalse(sgs._is_tv_season_in_active_downloads(active_list, "77001", "已在途断更剧", 2))
+        self.assertFalse(sgs._is_tv_season_in_active_downloads(active_list, "77002", "仅做种剧集", 1))
+        self.assertTrue(sgs._is_tv_season_in_active_downloads(active_list, "", "喜剧之王单口季", 2))
+        self.assertFalse(sgs._is_tv_season_in_active_downloads(active_list, "", "喜剧之王单口季", 1))
+
+        # 2. 校验批量补缺推送：无虚高起点偏置、跳过活跃队列条目、TV 推送成功后自动清 MP 转移记录
+        fake_audit_id = "audit-test-v2571"
+        sgs._audit_jobs[fake_audit_id] = {
+            "items": [
+                {
+                    "id": 9201,
+                    "name": "测试补缺剧A",
+                    "media_type": "tv",
+                    "tmdb_id": 77002,
+                    "season": 1,
+                    "audit_status": "downloadable",
+                    "_selected_payloads": [
+                        {"media_info": {"title": "测试补缺剧A"}, "torrent_info": {"title": "Test.A.S01.1080p"}}
+                    ],
+                },
+                {
+                    "id": 9202,
+                    "name": "已在途断更剧",
+                    "media_type": "tv",
+                    "tmdb_id": 77001,
+                    "season": 1,
+                    "audit_status": "downloadable",
+                    "_selected_payloads": [
+                        {"media_info": {"title": "已在途断更剧"}, "torrent_info": {"title": "Active.S01.1080p"}}
+                    ],
+                },
+            ]
+        }
+
+        progress_trace = []
+        orig_update = sgs.update_batch_action_progress
+
+        def _capture_progress(**kwargs):
+            snap = orig_update(**kwargs)
+            progress_trace.append((snap["processed"], snap["total"], snap["progress_pct"], snap["message"]))
+            return snap
+
+        mp_mock = AsyncMock()
+        mp_mock.get_active_downloads = AsyncMock(return_value=active_list)
+        mp_mock.submit_download = AsyncMock(return_value={"success": True, "message": "ok"})
+        mp_mock.clear_transfer_history_for_episodes = AsyncMock(return_value={"cleared_count": 3, "records": []})
+        mp_mock.close = AsyncMock()
+
+        try:
+            with (
+                patch("app.services.subscription_governance_service.MoviePilotClient", return_value=mp_mock),
+                patch("app.services.subscription_governance_service.update_batch_action_progress", side_effect=_capture_progress),
+            ):
+                async with async_session() as db:
+                    res = await sgs.execute_batch_subscription_gap_fill(
+                        db, audit_id=fake_audit_id, sub_ids=[9201, 9202]
+                    )
+            self.assertTrue(res["ok"])
+            self.assertEqual(res["pushed_count"], 1)
+            self.assertEqual(res["skipped_active_count"], 1)
+            self.assertEqual(res["cleared_transfer_count"], 3)
+            self.assertIn("同步清理 MP 媒体整理中 3 条历史转移记录", res["message"])
+            self.assertIn("跳过 1 部已在活跃下载队列中", res["message"])
+            mp_mock.submit_download.assert_awaited_once()
+            mp_mock.clear_transfer_history_for_episodes.assert_awaited_once()
+            # 确认进度百分比无 5%/8% 虚高：第 1 部推送前为 0%，完成后为 50%，全部完成为 100%
+            pcts = [p[2] for p in progress_trace]
+            self.assertEqual(pcts[0], 0)
+            self.assertEqual(pcts[1], 0)
+            self.assertIn(50, pcts)
+            self.assertEqual(pcts[-1], 100)
+        finally:
+            sgs._audit_jobs.pop(fake_audit_id, None)
+
+    async def test_19_downloadable_cache_ttl_and_fallback_live_retry(self):
+        from datetime import datetime
+        from unittest.mock import AsyncMock, patch
+        from app.database import async_session
+        from app.services import subscription_governance_service as sgs
+
+        # 1. 校验 downloadable 缓存 4 小时 TTL 判定
+        now = datetime(2026, 11, 24, 14, 0, 0)
+        self.assertTrue(sgs._is_downloadable_cache_fresh({"checked_at": "2026-11-24 11:30:00"}, now=now))
+        self.assertFalse(sgs._is_downloadable_cache_fresh({"checked_at": "2026-11-23 10:39:58"}, now=now))
+        self.assertFalse(sgs._is_downloadable_cache_fresh({}, now=now))
+
+        # 2. 校验推送失败后自动实时重搜：剧 A 换到馒头重试成功并清 MP 转移记录；剧 B 重搜无源记录站点报错并更新缓存
+        fake_audit_id = "audit-test-v2572"
+        sgs._audit_jobs[fake_audit_id] = {
+            "items": [
+                {
+                    "id": 9301,
+                    "name": "冬去春来",
+                    "media_type": "tv",
+                    "tmdb_id": 291470,
+                    "season": 1,
+                    "total_episodes": 32,
+                    "missing_episodes": [31, 32],
+                    "cd2_verified": True,
+                    "audit_status": "downloadable",
+                    "_selected_payloads": [
+                        {
+                            "media_info": {"title": "冬去春来"},
+                            "torrent_info": {"site_name": "天空", "title": "Expired.HDSky.S01", "enclosure": "https://hdsky.me/download.php?id=605328&t=expired"},
+                        }
+                    ],
+                },
+                {
+                    "id": 9302,
+                    "name": "朱迪正义",
+                    "media_type": "tv",
+                    "tmdb_id": 114294,
+                    "season": 4,
+                    "total_episodes": 120,
+                    "missing_episodes": [107],
+                    "cd2_verified": True,
+                    "audit_status": "downloadable",
+                    "_selected_payloads": [
+                        {
+                            "media_info": {"title": "朱迪正义"},
+                            "torrent_info": {"site_name": "天空", "title": "Expired.Judy.S04", "enclosure": "https://hdsky.me/download.php?id=637319&t=expired"},
+                        }
+                    ],
+                },
+            ]
+        }
+
+        async def _mock_submit(m_info, t_info):
+            if "hdsky.me" in str(t_info.get("enclosure") or ""):
+                return {"success": False, "message": "种子下载失败或链接已过期"}
+            return {"success": True, "message": "已入列"}
+
+        async def _mock_reaudit(sub, **kwargs):
+            if int(sub.get("id") or 0) == 9301:
+                return {
+                    "id": 9301,
+                    "name": "冬去春来",
+                    "media_type": "tv",
+                    "tmdb_id": 291470,
+                    "season": 1,
+                    "audit_status": "downloadable",
+                    "plan_summary": "[馒头] 选定 1 个种子",
+                    "selected_torrents": [{"site_name": "馒头", "title": "Fresh.MTeam.S01"}],
+                    "checked_at": "2026-11-24 14:00:00",
+                    "_selected_payloads": [
+                        {
+                            "media_info": {"title": "冬去春来"},
+                            "torrent_info": {"site_name": "馒头", "title": "Fresh.MTeam.S01", "enclosure": "https://m-team.cc/dl?id=999"},
+                        }
+                    ],
+                }
+            return {
+                "id": 9302,
+                "name": "朱迪正义",
+                "media_type": "tv",
+                "tmdb_id": 114294,
+                "season": 4,
+                "audit_status": "no_resource",
+                "reason": "全网补缺站点未搜到 S04 种子",
+                "checked_at": "2026-11-24 14:00:00",
+                "_selected_payloads": [],
+            }
+
+        mp_mock = AsyncMock()
+        mp_mock.get_active_downloads = AsyncMock(return_value=[])
+        mp_mock.submit_download = AsyncMock(side_effect=_mock_submit)
+        mp_mock.clear_transfer_history_for_episodes = AsyncMock(return_value={"cleared_count": 2, "records": []})
+        mp_mock.close = AsyncMock()
+        tmdb_mock = AsyncMock()
+        tmdb_mock.close = AsyncMock()
+
+        try:
+            with (
+                patch("app.services.subscription_governance_service.MoviePilotClient", return_value=mp_mock),
+                patch("app.services.subscription_governance_service.TMDBClient", return_value=tmdb_mock),
+                patch("app.services.subscription_governance_service.resolve_category_gap_fill_sites", new=AsyncMock(return_value={"ready": True})),
+                patch("app.services.subscription_governance_service._audit_single_subscription_item", new=AsyncMock(side_effect=_mock_reaudit)),
+            ):
+                async with async_session() as db:
+                    res = await sgs.execute_batch_subscription_gap_fill(
+                        db, audit_id=fake_audit_id, sub_ids=[9301, 9302]
+                    )
+
+            self.assertTrue(res["ok"])
+            self.assertEqual(res["pushed_count"], 1)
+            self.assertEqual(res["retried_success_count"], 1)
+            self.assertEqual(res["failed_count"], 1)
+            self.assertEqual(res["cleared_transfer_count"], 2)
+            self.assertIn("缓存失效已自动重搜换种成功", res["message"])
+
+            by_id = {d["sub_id"]: d for d in res["details"]}
+            self.assertTrue(by_id[9301]["ok"])
+            self.assertTrue(by_id[9301]["retried_live"])
+            self.assertFalse(by_id[9302]["ok"])
+            self.assertIn("天空", by_id[9302]["sites"])
+            self.assertIn("种子下载失败或链接已过期", by_id[9302]["error"])
+            self.assertIn("实时重搜结果", by_id[9302]["error"])
+
+            # 前端报错透出函数守卫
+            html = (Path(__file__).resolve().parent.parent / "frontend" / "index.html").read_text(encoding="utf-8")
+            self.assertIn("_formatGapFillPushAlert", html)
+            self.assertIn("失败明细：", html)
+        finally:
+            sgs._audit_jobs.pop(fake_audit_id, None)
+
 
 if __name__ == "__main__":
     unittest.main()

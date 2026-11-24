@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timedelta
 from typing import Any
@@ -124,10 +125,12 @@ def update_batch_action_progress(
         _batch_action_state["success_count"] = success_count
     if fail_count is not None:
         _batch_action_state["fail_count"] = fail_count
+    eff_total = _batch_action_state.get("total") or 0
     if progress_pct is not None:
         _batch_action_state["progress_pct"] = max(0, min(100, int(progress_pct)))
-    elif total and processed is not None:
-        _batch_action_state["progress_pct"] = min(99, int(100 * processed / max(1, total)))
+    elif eff_total > 0 and processed is not None:
+        raw_pct = int(100 * processed / max(1, eff_total))
+        _batch_action_state["progress_pct"] = 100 if _batch_action_state.get("status") == "completed" else min(99, max(0, raw_pct))
     if current_title is not None:
         _batch_action_state["current_title"] = current_title
     if message is not None:
@@ -246,6 +249,30 @@ def _store_item_in_resource_cache(
     )
     for k in keys:
         cache_data[k] = entry
+
+
+RESOURCE_DOWNLOADABLE_CACHE_TTL_SECONDS = 4 * 3600  # 4 小时：防止 PT 站短时效签名直链隔天失效
+
+
+def _is_downloadable_cache_fresh(
+    entry: dict[str, Any] | None,
+    *,
+    now: datetime | None = None,
+    ttl_seconds: int = RESOURCE_DOWNLOADABLE_CACHE_TTL_SECONDS,
+) -> bool:
+    """判断 downloadable 种子缓存是否仍在有效期内（防止短时效签名链接过期）。"""
+    if not isinstance(entry, dict):
+        return False
+    checked_raw = str(entry.get("checked_at") or "").strip()
+    if not checked_raw:
+        return False
+    try:
+        checked_dt = datetime.strptime(checked_raw[:19], "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return False
+    cur = now or datetime.now()
+    age = (cur - checked_dt).total_seconds()
+    return 0 <= age <= ttl_seconds
 
 
 def _lookup_item_in_resource_cache(
@@ -747,6 +774,65 @@ def _is_movie_in_active_downloads(
     return False
 
 
+_ACTIVE_TV_SEASON_RE = re.compile(
+    r"(?:^|[^a-z0-9])s0*(\d{1,2})(?:[^0-9]|$)|第\s*0*(\d{1,2})\s*季",
+    re.IGNORECASE,
+)
+
+
+def _is_tv_season_in_active_downloads(
+    active_downloads: list[dict[str, Any]],
+    tmdb_id: str,
+    title: str,
+    season: int,
+) -> bool:
+    """检查指定剧集与季号是否已在 MoviePilot 活跃下载队列中（忽略已完成/纯做种任务）。"""
+    title_cf = (title or "").strip().casefold()
+    for dl in active_downloads:
+        if not isinstance(dl, dict):
+            continue
+        st = str(dl.get("state") or dl.get("status") or "").lower()
+        if st in ("seeding", "uploading", "completed", "finished", "done"):
+            continue
+        media_obj = (
+            dl.get("media")
+            if isinstance(dl.get("media"), dict)
+            else (dl.get("media_info") if isinstance(dl.get("media_info"), dict) else {})
+        )
+        dl_tid = str(
+            dl.get("tmdb_id")
+            or dl.get("tmdbid")
+            or media_obj.get("tmdb_id")
+            or media_obj.get("tmdbid")
+            or ""
+        ).strip()
+        dl_name = str(dl.get("title") or dl.get("name") or media_obj.get("title") or "").strip()
+        dl_name_cf = dl_name.casefold()
+
+        identity_match = False
+        if tmdb_id and dl_tid and dl_tid == tmdb_id:
+            identity_match = True
+        elif not dl_tid and title_cf and len(title_cf) >= 2 and title_cf in dl_name_cf:
+            identity_match = True
+        if not identity_match:
+            continue
+
+        raw_sn = dl.get("season") if dl.get("season") is not None else media_obj.get("season")
+        dl_season: int | None = None
+        if raw_sn is not None and str(raw_sn).strip().isdigit():
+            dl_season = int(str(raw_sn).strip())
+        else:
+            m_sn = _ACTIVE_TV_SEASON_RE.search(dl_name)
+            if m_sn:
+                dl_season = int(m_sn.group(1) or m_sn.group(2))
+        if dl_season is not None:
+            if dl_season == season:
+                return True
+        elif season == 1:
+            return True
+    return False
+
+
 def _sanitize_audit_item_for_response(item: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in item.items() if k != "_selected_payloads"}
 
@@ -888,6 +974,11 @@ async def _audit_single_subscription_item(
                 return base_item
             else:
                 sn = season or 1
+                if _is_tv_season_in_active_downloads(active_downloads, tid_str, name, sn):
+                    base_item["audit_status"] = "already_queued"
+                    base_item["reason"] = f"该剧 S{sn:02d} 当前已在 MoviePilot 活跃下载队列中，已自动跳过防重复推送"
+                    return base_item
+
                 total_eps = diag.total_episodes or 0
                 if total_eps <= 0 or total_eps == 99:
                     try:
@@ -1341,7 +1432,9 @@ async def _run_unified_query_worker(
                 "already_queued",
                 "skipped",
             ):
-                return cached_hit, False
+                # downloadable 含站点下载直链（部分 PT 站带短时效签名），超 TTL 强制重新搜种刷新
+                if cached_hit.get("audit_status") != "downloadable" or _is_downloadable_cache_fresh(cached_hit):
+                    return cached_hit, False
 
             res_item = await _audit_single_subscription_item(
                 sub,
@@ -1705,6 +1798,12 @@ async def execute_batch_subscription_gap_fill(
 
     res_cache = await load_resource_audit_cache(db)
     targets: list[dict[str, Any]] = []
+    snap = await load_unified_snapshot(db)
+    snap_map: dict[int, dict[str, Any]] = {}
+    if snap and isinstance(snap.get("subscriptions"), list):
+        for s in snap["subscriptions"]:
+            if s.get("id") is not None:
+                snap_map[int(s["id"])] = s
 
     if audit_id and audit_id != "unified" and audit_id in _audit_jobs:
         job = _audit_jobs[audit_id]
@@ -1717,13 +1816,6 @@ async def execute_batch_subscription_gap_fill(
         ]
     else:
         # 从统一查询缓存中按 sub_id 查找（结合快照中的 tmdb_id/season 辅助查找）
-        snap = await load_unified_snapshot(db)
-        snap_map: dict[int, dict[str, Any]] = {}
-        if snap and isinstance(snap.get("subscriptions"), list):
-            for s in snap["subscriptions"]:
-                if s.get("id") is not None:
-                    snap_map[int(s["id"])] = s
-
         for sid in target_set:
             s_meta = snap_map.get(sid) or {}
             hit = _lookup_item_in_resource_cache(
@@ -1752,47 +1844,262 @@ async def execute_batch_subscription_gap_fill(
         processed=0,
         success_count=0,
         fail_count=0,
-        progress_pct=5,
+        progress_pct=0,
         current_title="",
         message=f"正在准备向 MoviePilot 批量推送 {total_targets} 部作品的补缺下载任务...",
     )
 
     mp = MoviePilotClient()
+    tmdb_fallback: TMDBClient | None = None
+    fallback_category_plans: dict[str, dict[str, Any]] | None = None
     pushed_count = 0
+    retried_success_count = 0
+    skipped_active_count = 0
     failed_count = 0
+    cleared_transfer_total = 0
+    cache_dirty = False
     details: list[dict[str, Any]] = []
 
+    async def _submit_payloads(
+        payloads: list[dict[str, Any]],
+    ) -> tuple[int, list[str], list[str], list[str], set[tuple[str, str]]]:
+        pushed = 0
+        errs: list[str] = []
+        sites_seen: list[str] = []
+        p_titles: list[str] = []
+        failed_keys: set[tuple[str, str]] = set()
+        for payload in payloads:
+            m_info = payload.get("media_info") or {}
+            t_info = payload.get("torrent_info") or {}
+            site_label = str(t_info.get("site_name") or t_info.get("site") or "PT").strip()
+            if site_label and site_label not in sites_seen:
+                sites_seen.append(site_label)
+            m_title = str(m_info.get("title") or "").strip()
+            if m_title:
+                p_titles.append(m_title)
+            pkey = (str(t_info.get("enclosure") or "").strip(), str(t_info.get("title") or "").strip())
+            try:
+                reply = await mp.submit_download(m_info, t_info)
+                if isinstance(reply, dict) and reply.get("success") is True:
+                    pushed += 1
+                else:
+                    raw_msg = str(reply.get("message") if isinstance(reply, dict) else reply or "MP 未返回成功")
+                    msg = sanitize_text_no_secrets(raw_msg)
+                    errs.append(f"[{site_label}] {msg}")
+                    failed_keys.add(pkey)
+            except Exception as exc:
+                errs.append(f"[{site_label}] {sanitize_text_no_secrets(str(exc))}")
+                failed_keys.add(pkey)
+        return pushed, errs, sites_seen, p_titles, failed_keys
+
     try:
+        active_downloads: list[dict[str, Any]] = []
+        try:
+            dl_res = await mp.get_active_downloads()
+            if isinstance(dl_res, list):
+                active_downloads = dl_res
+        except Exception as dl_err:
+            log.warning("批量补缺推送前获取 MP 活跃下载队列失败（继续执行推送）: %s", dl_err)
+
         for idx, item in enumerate(targets):
             item_name = str(item.get("name") or f"#{item.get('id')}")
+            item_is_movie = str(item.get("media_type") or "").lower() == "movie"
+            item_tid = str(item.get("tmdb_id") or item.get("tmdbid") or "").strip()
+            item_season = int(item.get("season") or 1) if not item_is_movie else None
+
             update_batch_action_progress(
                 processed=idx,
                 current_title=item_name,
-                progress_pct=8 + int(88 * idx / max(1, total_targets)),
-                message=f"正在推送补缺下载 ({idx + 1}/{total_targets})：《{item_name}》...",
+                progress_pct=int(100 * idx / max(1, total_targets)),
+                message=f"正在推送第 {idx + 1}/{total_targets} 部（已完成 {idx} 部）：《{item_name}》...",
             )
-            sub_pushed = 0
-            sub_errs: list[str] = []
-            for payload in item.get("_selected_payloads") or []:
-                m_info = payload.get("media_info") or {}
-                t_info = payload.get("torrent_info") or {}
-                try:
-                    reply = await mp.submit_download(m_info, t_info)
-                    if isinstance(reply, dict) and reply.get("success") is True:
-                        sub_pushed += 1
-                    else:
-                        msg = sanitize_text_no_secrets(
-                            str(reply.get("message") if isinstance(reply, dict) else reply or "MP 未返回成功")
-                        )
-                        sub_errs.append(msg)
-                except Exception as exc:
-                    sub_errs.append(sanitize_text_no_secrets(str(exc)))
 
+            # 推送前活跃队列二次防重：已在下载中的作品直接跳过，避免重复下种
+            already_active = (
+                _is_movie_in_active_downloads(active_downloads, item_tid, item_name)
+                if item_is_movie
+                else _is_tv_season_in_active_downloads(active_downloads, item_tid, item_name, item_season or 1)
+            )
+            if already_active:
+                skipped_active_count += 1
+                item["audit_status"] = "already_queued"
+                item["reason"] = (
+                    "该电影当前已在 MoviePilot 活跃下载队列中，已跳过重复推送"
+                    if item_is_movie
+                    else f"该剧 S{(item_season or 1):02d} 当前已在 MoviePilot 活跃下载队列中，已跳过重复推送"
+                )
+                _store_item_in_resource_cache(res_cache, item)
+                cache_dirty = True
+                details.append({
+                    "sub_id": item["id"],
+                    "name": item["name"],
+                    "ok": True,
+                    "skipped_active": True,
+                    "pushed": 0,
+                    "cleared_transfer_count": 0,
+                })
+                update_batch_action_progress(
+                    processed=idx + 1,
+                    success_count=pushed_count,
+                    fail_count=failed_count,
+                    progress_pct=min(99, int(100 * (idx + 1) / max(1, total_targets))),
+                    message=f"已处理 {idx + 1}/{total_targets} 部：《{item_name}》已在队列中跳过 (已推 {pushed_count} · 跳过 {skipped_active_count} · 失败 {failed_count})",
+                )
+                continue
+
+            sub_pushed, sub_errs, sites_tried, payload_titles, failed_keys = await _submit_payloads(
+                list(item.get("_selected_payloads") or [])
+            )
+            retried_live = False
+
+            # 缓存种子全部推送失败时，自动触发一次实时重搜并换有效活种重试（防范 PT 站短时效签名直链过期或单站临时失效）
+            if sub_pushed == 0 and item_tid.isdigit():
+                log.warning(
+                    "[订阅补缺 %s] 缓存种子提交失败（站点: %s），自动触发实时重搜回退: %s",
+                    item_name,
+                    "/".join(sites_tried) or "未知",
+                    "; ".join(sub_errs),
+                )
+                try:
+                    if fallback_category_plans is None:
+                        fallback_category_plans = {}
+                        for cat_key in ("non_anime", "anime"):
+                            try:
+                                fallback_category_plans[cat_key] = await resolve_category_gap_fill_sites(
+                                    db, cat_key, mp=mp
+                                )
+                            except Exception:
+                                fallback_category_plans[cat_key] = {"ready": False}
+                    if tmdb_fallback is None:
+                        tmdb_fallback = TMDBClient()
+
+                    s_snap = snap_map.get(int(item["id"])) or {}
+                    retry_sub: dict[str, Any] = dict(s_snap)
+                    retry_sub.setdefault("id", item["id"])
+                    retry_sub.setdefault("name", item_name)
+                    retry_sub.setdefault("year", item.get("year") or "")
+                    retry_sub["type"] = "电影" if item_is_movie else "电视剧"
+                    retry_sub["media_type"] = "movie" if item_is_movie else "tv"
+                    retry_sub["tmdbid"] = int(item_tid)
+                    retry_sub["tmdb_id"] = int(item_tid)
+                    if not item_is_movie:
+                        retry_sub["season"] = item_season or 1
+                        if item.get("total_episodes"):
+                            retry_sub["total_episode"] = item["total_episodes"]
+                        if item.get("cd2_verified") is not None:
+                            retry_sub["cd2_verified"] = bool(item["cd2_verified"])
+                        if s_snap.get("cd2_episode_numbers") is not None:
+                            retry_sub["cd2_episode_numbers"] = list(s_snap["cd2_episode_numbers"])
+                        elif item.get("missing_episodes") and item.get("total_episodes"):
+                            miss_set = set(item["missing_episodes"])
+                            retry_sub["cd2_episode_numbers"] = [
+                                e for e in range(1, int(item["total_episodes"]) + 1) if e not in miss_set
+                            ]
+                            retry_sub["cd2_total_episodes"] = len(retry_sub["cd2_episode_numbers"])
+
+                    settings = get_settings()
+                    fresh_item = await _audit_single_subscription_item(
+                        retry_sub,
+                        mp=mp,
+                        tmdb=tmdb_fallback,
+                        category_plans=fallback_category_plans,
+                        active_downloads=active_downloads,
+                        sem=asyncio.Semaphore(1),
+                        is_aborted_fn=lambda: False,
+                        min_seeders=max(1, int(settings.gap_fill_min_seeders or 2)),
+                        tier_ratio=0.10,
+                        min_slack=1,
+                        min_resolution="any",
+                        require_chinese=False,
+                    )
+                    if fresh_item and fresh_item.get("audit_status") == "downloadable" and fresh_item.get("_selected_payloads"):
+                        fresh_payloads = [
+                            p
+                            for p in fresh_item.get("_selected_payloads") or []
+                            if (
+                                str((p.get("torrent_info") or {}).get("enclosure") or "").strip(),
+                                str((p.get("torrent_info") or {}).get("title") or "").strip(),
+                            )
+                            not in failed_keys
+                        ]
+                        if fresh_payloads:
+                            retried_live = True
+                            r_pushed, r_errs, r_sites, r_titles, _ = await _submit_payloads(fresh_payloads)
+                            for s_lbl in r_sites:
+                                if s_lbl not in sites_tried:
+                                    sites_tried.append(s_lbl)
+                            if r_pushed > 0:
+                                sub_pushed = r_pushed
+                                retried_success_count += 1
+                                payload_titles = r_titles or payload_titles
+                                item["selected_torrents"] = fresh_item.get("selected_torrents") or []
+                                item["plan_summary"] = fresh_item.get("plan_summary") or ""
+                                item["_selected_payloads"] = fresh_payloads
+                                item["checked_at"] = fresh_item.get("checked_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            elif r_errs:
+                                sub_errs.append("实时重搜重试仍失败：" + "; ".join(r_errs))
+                    elif fresh_item and fresh_item.get("audit_status") == "no_resource":
+                        retried_live = True
+                        fresh_reason = str(fresh_item.get("reason") or "实时重搜当前无合格可用资源")
+                        sub_errs.append(f"实时重搜结果：{fresh_reason}")
+                        item["audit_status"] = "no_resource"
+                        item["reason"] = fresh_reason
+                        item["plan_summary"] = ""
+                        item["selected_torrents"] = []
+                        item["_selected_payloads"] = []
+                        item["checked_at"] = fresh_item.get("checked_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        _store_item_in_resource_cache(res_cache, item)
+                        cache_dirty = True
+                except Exception as retry_exc:
+                    log.warning("[订阅补缺 %s] 失败后实时重搜异常: %s", item_name, retry_exc)
+
+            item_cleared_transfer = 0
             if sub_pushed > 0:
+                # 对齐独立补缺模块：电视剧推送成功后立即清理 MP「媒体整理」该季旧转移记录（仅删记录，绝不删实体文件）
+                if not item_is_movie and hasattr(mp, "clear_transfer_history_for_episodes"):
+                    try:
+                        aliases = list(dict.fromkeys([t for t in [item_name, *payload_titles] if t]))
+                        try:
+                            clean_res = await mp.clear_transfer_history_for_episodes(
+                                title=item_name,
+                                season=item_season or 1,
+                                episodes=None,
+                                explicit_only=False,
+                                tmdb_id=item_tid or None,
+                                title_aliases=aliases,
+                            )
+                        except TypeError:
+                            clean_res = await mp.clear_transfer_history_for_episodes(
+                                title=item_name,
+                                season=item_season or 1,
+                                episodes=None,
+                            )
+                        if isinstance(clean_res, dict):
+                            item_cleared_transfer = int(clean_res.get("cleared_count") or 0)
+                            cleared_transfer_total += item_cleared_transfer
+                            if item_cleared_transfer > 0:
+                                log.info(
+                                    "[订阅补缺 %s S%02d] 推送下载后已清理 MoviePilot「媒体整理」中 %d 条转移记录（仅删记录，不删实体文件）",
+                                    item_name,
+                                    item_season or 1,
+                                    item_cleared_transfer,
+                                )
+                    except Exception as clean_err:
+                        log.warning(
+                            "[订阅补缺 %s] 推送下载后清理 MoviePilot 转移历史记录异常（不阻断下载）: %s",
+                            item_name,
+                            clean_err,
+                        )
+
                 pushed_count += 1
                 item["audit_status"] = "already_queued"
-                item["reason"] = f"已成功推送 {sub_pushed} 个补缺种子至 MoviePilot 下载队列"
+                item["reason"] = (
+                    f"已成功推送 {sub_pushed} 个补缺种子至 MoviePilot 下载队列"
+                    + ("（原缓存失效，已自动重搜换种成功）" if retried_live else "")
+                    + (f"（已清 {item_cleared_transfer} 条 MP 转移记录）" if item_cleared_transfer > 0 else "")
+                )
                 _store_item_in_resource_cache(res_cache, item)
+                cache_dirty = True
                 db.add(OperationLog(
                     action="subscription_gap_fill_push",
                     status="completed",
@@ -1803,31 +2110,56 @@ async def execute_batch_subscription_gap_fill(
                         "media_type": item["media_type"],
                         "season": item.get("season"),
                         "pushed_torrents": sub_pushed,
+                        "retried_live": retried_live,
+                        "cleared_transfer_count": item_cleared_transfer,
                     }, ensure_ascii=False),
                 ))
-                details.append({"sub_id": item["id"], "name": item["name"], "ok": True, "pushed": sub_pushed})
+                details.append({
+                    "sub_id": item["id"],
+                    "name": item["name"],
+                    "ok": True,
+                    "pushed": sub_pushed,
+                    "sites": sites_tried,
+                    "retried_live": retried_live,
+                    "cleared_transfer_count": item_cleared_transfer,
+                })
             else:
                 failed_count += 1
+                err_text = "; ".join(sub_errs) or "推送失败"
+                log.warning(
+                    "[订阅补缺 %s] 推送最终失败（站点: %s）: %s",
+                    item_name,
+                    "/".join(sites_tried) or "未知",
+                    err_text,
+                )
                 details.append({
                     "sub_id": item["id"],
                     "name": item["name"],
                     "ok": False,
-                    "error": "; ".join(sub_errs) or "推送失败",
+                    "sites": sites_tried,
+                    "retried_live": retried_live,
+                    "error": err_text,
                 })
 
             update_batch_action_progress(
                 processed=idx + 1,
                 success_count=pushed_count,
                 fail_count=failed_count,
-                progress_pct=10 + int(88 * (idx + 1) / max(1, total_targets)),
-                message=f"已完成推送 ({idx + 1}/{total_targets})：《{item_name}》 (成功 {pushed_count} · 失败 {failed_count})",
+                progress_pct=min(99, int(100 * (idx + 1) / max(1, total_targets))),
+                message=f"已完成 {idx + 1}/{total_targets} 部：《{item_name}》 (成功 {pushed_count} · 失败 {failed_count})",
             )
 
-        if pushed_count > 0:
+        if cache_dirty or pushed_count > 0 or skipped_active_count > 0:
             await save_resource_audit_cache(db, res_cache)
             await db.commit()
 
         msg = f"批量补缺下载完成：成功推送 {pushed_count} 部作品至 MoviePilot 下载队列"
+        if retried_success_count > 0:
+            msg += f"（其中 {retried_success_count} 部缓存失效已自动重搜换种成功）"
+        if cleared_transfer_total > 0:
+            msg += f"，并同步清理 MP 媒体整理中 {cleared_transfer_total} 条历史转移记录（仅删记录，绝不删实体文件）"
+        if skipped_active_count > 0:
+            msg += f"，跳过 {skipped_active_count} 部已在活跃下载队列中的作品"
         if failed_count > 0:
             msg += f"，失败 {failed_count} 部"
         update_batch_action_progress(
@@ -1839,8 +2171,11 @@ async def execute_batch_subscription_gap_fill(
             message=msg,
         )
         return {
-            "ok": pushed_count > 0,
+            "ok": pushed_count > 0 or skipped_active_count > 0,
             "pushed_count": pushed_count,
+            "retried_success_count": retried_success_count,
+            "skipped_active_count": skipped_active_count,
+            "cleared_transfer_count": cleared_transfer_total,
             "failed_count": failed_count,
             "message": msg,
             "details": details,
@@ -1853,3 +2188,5 @@ async def execute_batch_subscription_gap_fill(
         raise
     finally:
         await mp.close()
+        if tmdb_fallback is not None:
+            await tmdb_fallback.close()

@@ -27,14 +27,13 @@
     }
   </script>
   <style>
-    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap');
     html {
       overflow-y: scroll;
       scrollbar-gutter: stable;
     }
     body {
       overflow-x: hidden;
-      font-family: 'Plus Jakarta Sans', 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
       transition: background-color 0.25s ease, color 0.25s ease;
     }
     .light .app-card {
@@ -127,6 +126,215 @@
       border-radius: 9999px;
       background: currentColor;
     }
+
+    /* ── 订阅治理高性能渲染隔离与语义卡片样式（消除运行时 Tailwind JIT 全树扫描与全页重排） ── */
+    .sub-list-viewport {
+      contain: layout style paint;
+      overflow-anchor: none;
+    }
+    .sub-card {
+      padding: 0.875rem;
+      border-radius: 0.75rem;
+      background-color: #ffffff;
+      border: 1px solid #e2e8f0;
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 0.75rem;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+      transition: border-color 0.15s ease;
+    }
+    .sub-card:hover { border-color: #a5b4fc; }
+    .dark .sub-card { background-color: #0f172a; border-color: #1e293b; }
+    .dark .sub-card:hover { border-color: #4338ca; }
+
+    .sub-card-deferred {
+      content-visibility: auto;
+      contain-intrinsic-size: auto none auto 116px;
+    }
+    .sub-modal-card-deferred {
+      content-visibility: auto;
+      contain-intrinsic-size: auto none auto 132px;
+    }
+    @supports not (content-visibility: auto) {
+      .sub-card-deferred,
+      .sub-modal-card-deferred {
+        contain: layout style paint;
+      }
+    }
+
+    .sub-card-main { display: flex; align-items: flex-start; gap: 0.875rem; min-width: 0; flex: 1 1 0%; }
+    .sub-poster {
+      width: 3.25rem; height: 4.5rem;
+      border-radius: 0.5rem;
+      background-color: #f1f5f9;
+      border: 1px solid #e2e8f0;
+      flex-shrink: 0;
+      overflow: hidden;
+      position: relative;
+    }
+    @media (min-width: 640px) { .sub-poster { width: 3.5rem; height: 5rem; } }
+    .dark .sub-poster { background-color: #1e293b; border-color: #334155; }
+    .sub-poster img { width: 100%; height: 100%; object-fit: cover; display: block; position: relative; z-index: 1; }
+    .sub-poster-fallback {
+      position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+      color: #94a3b8; font-size: 0.875rem; pointer-events: none;
+    }
+    .sub-info { min-width: 0; flex: 1 1 0%; display: flex; flex-direction: column; gap: 0.375rem; }
+    .sub-title-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.375rem; }
+    .sub-title { font-size: 0.875rem; font-weight: 700; color: #0f172a; line-height: 1.35; overflow-wrap: anywhere; margin: 0; }
+    .dark .sub-title { color: #ffffff; }
+    .sub-year { font-size: 0.75rem; color: #64748b; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 500; }
+    .sub-meta-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; font-size: 0.75rem; color: #64748b; }
+    .dark .sub-meta-row { color: #94a3b8; }
+    .sub-sep { color: #cbd5e1; }
+    .dark .sub-sep { color: #334155; }
+    .sub-ep-text { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #334155; font-weight: 600; }
+    .dark .sub-ep-text { color: #e2e8f0; }
+
+    .sub-chip {
+      display: inline-flex; align-items: center; padding: 0.125rem 0.375rem; border-radius: 0.25rem;
+      font-size: 10px; line-height: 1.3; font-weight: 600;
+    }
+    .sub-chip-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .sub-chip-tv { background: #eef2ff; color: #4f46e5; }
+    .dark .sub-chip-tv { background: rgba(30, 27, 75, 0.75); color: #818cf8; }
+    .sub-chip-mov { background: #fffbeb; color: #d97706; }
+    .dark .sub-chip-mov { background: rgba(69, 26, 3, 0.75); color: #fbbf24; }
+    .sub-chip-short { background: #faf5ff; color: #9333ea; }
+    .dark .sub-chip-short { background: rgba(59, 7, 100, 0.75); color: #c084fc; }
+    .sub-chip-manual { background: #ecfdf5; color: #047857; border: 1px solid rgba(167, 243, 208, 0.7); }
+    .dark .sub-chip-manual { background: rgba(2, 44, 34, 0.75); color: #6ee7b7; border-color: #065f46; }
+    .sub-chip-lq { background: #fff1f2; color: #e11d48; border: 1px solid #fecdd3; font-weight: 500; }
+    .dark .sub-chip-lq { background: rgba(76, 5, 25, 0.6); color: #fda4af; border-color: #9f1239; }
+    .sub-chip-meta { background: #f1f5f9; color: #94a3b8; font-weight: 500; }
+    .dark .sub-chip-meta { background: #1e293b; color: #94a3b8; }
+
+    .sub-pill-ok { background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; font-weight: 700; }
+    .dark .sub-pill-ok { background: rgba(2, 44, 34, 0.65); color: #6ee7b7; border-color: #065f46; }
+    .sub-pill-warn { background: #fffbeb; color: #b45309; border: 1px solid #fde68a; font-weight: 500; }
+    .dark .sub-pill-warn { background: rgba(69, 26, 3, 0.45); color: #fcd34d; border-color: #92400e; }
+    .sub-pill-muted { background: #f1f5f9; color: #64748b; font-weight: 500; }
+    .dark .sub-pill-muted { background: #1e293b; color: #94a3b8; }
+    .sub-pill-arch { background: #eef2ff; color: #4338ca; border: 1px solid #c7d2fe; font-weight: 600; }
+    .dark .sub-pill-arch { background: rgba(30, 27, 75, 0.6); color: #a5b4fc; border-color: #3730a3; }
+
+    .sub-cd2-paths { display: flex; flex-wrap: wrap; align-items: center; gap: 0.375rem; }
+    .sub-cd2-path-btn {
+      display: inline-flex; align-items: center; gap: 0.3rem; max-width: 100%;
+      padding: 0.175rem 0.5rem; border-radius: 0.375rem; font-size: 11px; line-height: 1.35;
+      border: 1px solid #e2e8f0; background: #f8fafc; color: #475569; cursor: pointer;
+      transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+    }
+    .sub-cd2-path-btn:hover { background: #eef2ff; border-color: #c7d2fe; color: #3730a3; }
+    .dark .sub-cd2-path-btn { background: rgba(15, 23, 42, 0.7); border-color: #334155; color: #cbd5e1; }
+    .dark .sub-cd2-path-btn:hover { background: rgba(30, 27, 75, 0.65); border-color: #4f46e5; color: #c7d2fe; }
+    .sub-cd2-path-btn.is-copied { background: #ecfdf5; border-color: #6ee7b7; color: #047857; }
+    .dark .sub-cd2-path-btn.is-copied { background: rgba(2, 44, 34, 0.7); border-color: #059669; color: #6ee7b7; }
+    .sub-cd2-path-tag {
+      flex-shrink: 0; font-size: 10px; font-weight: 700; padding: 0 0.3rem; border-radius: 0.25rem;
+      background: #e2e8f0; color: #334155;
+    }
+    .dark .sub-cd2-path-tag { background: #1e293b; color: #cbd5e1; }
+    .sub-cd2-path-archive .sub-cd2-path-tag { background: #e0e7ff; color: #3730a3; }
+    .dark .sub-cd2-path-archive .sub-cd2-path-tag { background: rgba(49, 46, 129, 0.75); color: #c7d2fe; }
+    .sub-cd2-path-source .sub-cd2-path-tag { background: #d1fae5; color: #065f46; }
+    .dark .sub-cd2-path-source .sub-cd2-path-tag { background: rgba(6, 78, 59, 0.75); color: #6ee7b7; }
+    .sub-cd2-path-text {
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+    }
+    .sub-cd2-path-copy { flex-shrink: 0; font-size: 10px; opacity: 0.65; }
+
+    .sub-conf {
+      display: inline-flex; align-items: center; padding: 0.125rem 0.5rem; border-radius: 9999px;
+      font-size: 10px; font-weight: 600; white-space: nowrap;
+    }
+    .sub-conf-high { background: #d1fae5; color: #047857; border: 1px solid #a7f3d0; }
+    .dark .sub-conf-high { background: #022c22; color: #34d399; border-color: #065f46; }
+    .sub-conf-med { background: #fef3c7; color: #b45309; border: 1px solid #fde68a; }
+    .dark .sub-conf-med { background: #451a03; color: #fbbf24; border-color: #92400e; }
+    .sub-conf-low { background: #dbeafe; color: #1d4ed8; border: 1px solid #bfdbfe; }
+    .dark .sub-conf-low { background: #172554; color: #60a5fa; border-color: #1e40af; }
+
+    .sub-reason {
+      font-size: 0.75rem; color: #475569; display: flex; align-items: flex-start; gap: 0.375rem;
+      background: #f8fafc; padding: 0.375rem 0.5rem; border-radius: 0.5rem; border: 1px solid #f1f5f9;
+      line-height: 1.45;
+    }
+    .dark .sub-reason { color: #cbd5e1; background: rgba(2, 6, 23, 0.45); border-color: rgba(30, 41, 59, 0.7); }
+
+    .sub-res-dl {
+      font-size: 0.75rem; padding: 0.5rem; border-radius: 0.5rem;
+      background: rgba(236, 253, 245, 0.85); border: 1px solid #a7f3d0; color: #065f46;
+      display: flex; flex-direction: column; gap: 0.25rem;
+    }
+    .dark .sub-res-dl { background: rgba(2, 44, 34, 0.45); border-color: rgba(6, 95, 70, 0.7); color: #a7f3d0; }
+    .sub-res-torrent {
+      display: inline-flex; align-items: center; gap: 0.25rem; padding: 0.125rem 0.375rem;
+      border-radius: 0.25rem; background: #ffffff; border: 1px solid #a7f3d0; font-size: 10px;
+    }
+    .dark .sub-res-torrent { background: #0f172a; border-color: #065f46; }
+    .sub-res-queue {
+      font-size: 0.75rem; padding: 0.375rem 0.625rem; border-radius: 0.5rem; font-weight: 500;
+      background: rgba(238, 242, 255, 0.85); border: 1px solid #c7d2fe; color: #4338ca;
+    }
+    .dark .sub-res-queue { background: rgba(30, 27, 75, 0.45); border-color: #3730a3; color: #a5b4fc; }
+    .sub-res-none {
+      font-size: 11px; padding: 0.25rem 0.625rem; border-radius: 0.5rem;
+      background: rgba(255, 251, 235, 0.7); border: 1px solid rgba(253, 230, 138, 0.75); color: #92400e;
+    }
+    .dark .sub-res-none { background: rgba(69, 26, 3, 0.25); border-color: rgba(120, 53, 15, 0.55); color: #fcd34d; }
+
+    .sub-card-side { display: flex; flex-direction: column; align-items: flex-end; gap: 0.5rem; flex-shrink: 0; margin-left: 0.5rem; }
+    .sub-card-actions { display: flex; align-items: center; gap: 0.375rem; padding-top: 0.25rem; }
+    .sub-act-btn {
+      padding: 0.25rem 0.5rem; font-size: 0.75rem; border-radius: 0.5rem; font-weight: 500;
+      cursor: pointer; transition: background-color 0.15s ease; white-space: nowrap;
+    }
+    .sub-act-dl { padding: 0.25rem 0.625rem; background: #059669; color: #ffffff; font-weight: 700; border: 1px solid #059669; }
+    .sub-act-dl:hover { background: #047857; }
+    .sub-act-pause { background: #fffbeb; color: #b45309; border: 1px solid #fcd34d; }
+    .sub-act-pause:hover { background: #fef3c7; }
+    .dark .sub-act-pause { background: rgba(69, 26, 3, 0.45); color: #fcd34d; border-color: #b45309; }
+    .sub-act-resume { background: #eef2ff; color: #4338ca; border: 1px solid #a5b4fc; }
+    .sub-act-resume:hover { background: #e0e7ff; }
+    .dark .sub-act-resume { background: rgba(30, 27, 75, 0.45); color: #a5b4fc; border-color: #4338ca; }
+    .sub-act-unsub { background: #fff1f2; color: #be123c; border: 1px solid #fda4af; }
+    .sub-act-unsub:hover { background: #ffe4e6; }
+    .dark .sub-act-unsub { background: rgba(76, 5, 25, 0.45); color: #fda4af; border-color: #be123c; }
+    .dark .sub-act-unsub:hover { background: rgba(136, 19, 55, 0.6); }
+
+    .sub-filter-tab {
+      padding: 0.25rem 0.625rem; border-radius: 0.375rem; font-size: 0.75rem; font-weight: 600;
+      transition: background-color 0.15s ease, color 0.15s ease; cursor: pointer;
+    }
+    .sub-filter-tab.is-active {
+      background-color: #ffffff;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+    }
+    .dark .sub-filter-tab.is-active {
+      background-color: #334155;
+    }
+
+    .sub-modal-card {
+      padding: 0.875rem; border-radius: 0.75rem; background: #ffffff; border: 1px solid #e2e8f0;
+      display: flex; flex-direction: column; justify-content: space-between; gap: 0.875rem;
+      transition: border-color 0.15s ease;
+    }
+    @media (min-width: 768px) { .sub-modal-card { flex-direction: row; align-items: center; } }
+    .sub-modal-card.is-checked { border-color: #a5b4fc; box-shadow: 0 1px 3px rgba(99, 102, 241, 0.12); }
+    .sub-modal-card:hover { border-color: #818cf8; }
+    .dark .sub-modal-card { background: #0f172a; border-color: #1e293b; }
+    .dark .sub-modal-card.is-checked { border-color: #4338ca; }
+    .dark .sub-modal-card:hover { border-color: #4f46e5; }
+
+    .sub-load-footer {
+      padding: 0.625rem 0.875rem; border-radius: 0.75rem; background: #f8fafc;
+      border: 1px dashed #cbd5e1; display: flex; flex-wrap: wrap; align-items: center;
+      justify-content: space-between; gap: 0.5rem; font-size: 0.75rem; color: #64748b;
+    }
+    .dark .sub-load-footer { background: rgba(15, 23, 42, 0.65); border-color: #334155; color: #94a3b8; }
   </style>
 </head>
 <body class="bg-slate-50 text-slate-800 dark:bg-[#0b0f19] dark:text-slate-100 min-h-screen flex flex-col antialiased selection:bg-indigo-500 selection:text-white">
@@ -225,7 +433,7 @@
           <h2 class="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
             <i class="fa-solid fa-list-check text-indigo-500"></i>
             初检任务列表
-            <span class="px-1.5 py-0.2 rounded-full bg-slate-200 dark:bg-slate-800 text-[10px] text-slate-700 dark:text-slate-300 font-mono" id="taskCountBadge">0</span>
+            <span class="px-1.5 py-0.5 rounded-full bg-slate-200 dark:bg-slate-800 text-[10px] text-slate-700 dark:text-slate-300 font-mono" id="taskCountBadge">0</span>
           </h2>
           <!-- 批量清理已完成任务 -->
           <button onclick="clearCompletedTasks()" class="text-[11px] text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 transition" title="清理已完结任务">
@@ -252,7 +460,7 @@
             <i class="fa-solid fa-robot text-indigo-500"></i>
             MoviePilot 运维
           </span>
-          <span class="text-[10px] font-mono px-1.5 py-0.2 rounded bg-indigo-50 dark:bg-indigo-950/70 text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800">v2.15.6</span>
+          <span class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950/70 text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800">v2.15.6</span>
         </h2>
 
         <div class="space-y-1 text-xs font-medium">
@@ -546,7 +754,7 @@
           <div id="subContextBanner" class="hidden px-4 py-3 rounded-xl text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3"></div>
 
           <!-- 真实订阅动态渲染容器 -->
-          <div class="space-y-2 max-h-[600px] overflow-y-auto pr-1" id="subListContainer">
+          <div class="sub-list-viewport space-y-2 max-h-[600px] overflow-y-auto pr-1" id="subListContainer">
             <!-- 动态生成 -->
           </div>
         </div>
@@ -642,16 +850,16 @@
           <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-200 dark:border-slate-800 pt-1">
             <div class="flex items-center gap-1 flex-wrap">
               <button onclick="switchTransferRepairTab('pending')" id="trTab-pending" class="px-3.5 py-2 text-xs font-semibold text-indigo-600 border-b-2 border-indigo-600 dark:text-indigo-400 dark:border-indigo-400 transition">
-                待处理 <span id="trBadge-pending" class="ml-1 px-1.5 py-0.2 rounded-full bg-indigo-100 text-indigo-700 dark:bg-indigo-900/60 dark:text-indigo-300 text-[10px]">0</span>
+                待处理 <span id="trBadge-pending" class="ml-1 px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700 dark:bg-indigo-900/60 dark:text-indigo-300 text-[10px]">0</span>
               </button>
               <button onclick="switchTransferRepairTab('executing')" id="trTab-executing" class="px-3.5 py-2 text-xs font-semibold text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 transition">
-                执行与核验中 <span id="trBadge-executing" class="ml-1 px-1.5 py-0.2 rounded-full bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400 text-[10px]">0</span>
+                执行与核验中 <span id="trBadge-executing" class="ml-1 px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400 text-[10px]">0</span>
               </button>
               <button onclick="switchTransferRepairTab('resolved')" id="trTab-resolved" class="px-3.5 py-2 text-xs font-semibold text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 transition">
-                已解决 <span id="trBadge-resolved" class="ml-1 px-1.5 py-0.2 rounded-full bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400 text-[10px]">0</span>
+                已解决 <span id="trBadge-resolved" class="ml-1 px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400 text-[10px]">0</span>
               </button>
               <button onclick="switchTransferRepairTab('rules_records')" id="trTab-rules_records" class="px-3.5 py-2 text-xs font-semibold text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 transition">
-                规则与记录 <span id="trBadge-skipped" class="ml-1 px-1.5 py-0.2 rounded-full bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400 text-[10px]">0</span>
+                规则与记录 <span id="trBadge-skipped" class="ml-1 px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400 text-[10px]">0</span>
               </button>
             </div>
             <div class="flex items-center gap-2 pb-1.5">
@@ -1352,7 +1560,7 @@
       </div>
 
       <!-- 清理清单列表容器（自适应高视窗，清晰卡片布局） -->
-      <div class="flex-1 overflow-y-auto pr-1 space-y-2.5 p-3 rounded-xl bg-slate-50/80 dark:bg-slate-950/40 border border-slate-200 dark:border-slate-800 min-h-[320px] max-h-[56vh]" id="modalCleanList">
+      <div class="sub-list-viewport flex-1 overflow-y-auto pr-1 space-y-2.5 p-3 rounded-xl bg-slate-50/80 dark:bg-slate-950/40 border border-slate-200 dark:border-slate-800 min-h-[320px] max-h-[56vh]" id="modalCleanList">
         <!-- 动态注入待退订项 -->
       </div>
 
@@ -1445,7 +1653,7 @@
       </div>
 
       <!-- 结果列表 -->
-      <div id="subAuditResultList" class="flex-1 overflow-y-auto pr-1 space-y-2.5 p-3 rounded-xl bg-slate-50/80 dark:bg-slate-950/40 border border-slate-200 dark:border-slate-800 min-h-[280px] max-h-[50vh]">
+      <div id="subAuditResultList" class="sub-list-viewport flex-1 overflow-y-auto pr-1 space-y-2.5 p-3 rounded-xl bg-slate-50/80 dark:bg-slate-950/40 border border-slate-200 dark:border-slate-800 min-h-[280px] max-h-[50vh]">
         <div class="p-10 text-center text-slate-400 text-xs">
           <i class="fa-solid fa-magnifying-glass-chart text-3xl mb-3 text-indigo-300 dark:text-indigo-800 block"></i>
           <p class="font-semibold text-slate-600 dark:text-slate-300">选择梳理范围并点击「开始批量梳理」</p>
@@ -2193,7 +2401,7 @@
             <div class="flex items-start justify-between gap-1.5">
               <div class="flex-1 min-w-0">
                 <div class="flex items-center gap-1.5 mb-0.5">
-                  <span class="text-xs px-1.5 py-0.2 rounded bg-indigo-50 dark:bg-indigo-950/70 text-indigo-600 dark:text-indigo-400 font-mono text-[10px]">${task.tag}</span>
+                  <span class="text-xs px-1.5 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950/70 text-indigo-600 dark:text-indigo-400 font-mono text-[10px]">${task.tag}</span>
                   <span class="text-slate-400 text-[10px]">${task.time}</span>
                 </div>
                 <h3 class="text-xs font-semibold text-slate-900 dark:text-white truncate">${task.title}</h3>
@@ -2967,10 +3175,13 @@
       triggerReInspect(currentTaskId);
     }
 
-    // ── 全局任务心跳同步器（彻底根治无需按F5刷新的问题）────────────
+    // ── 全局任务心跳同步器（彻底根治无需按F5刷新的问题；隐藏标签页与并发重入自动节流）────────────
+    let heartbeatPolling = false;
     function startGlobalTaskHeartbeat() {
       if (heartbeatTimer) clearInterval(heartbeatTimer);
       heartbeatTimer = setInterval(async () => {
+        if (document.hidden || heartbeatPolling) return;
+        heartbeatPolling = true;
         try {
           const tasks = await api('/api/tasks/');
           if (!tasks || !Array.isArray(tasks)) return;
@@ -2991,6 +3202,8 @@
           if (hasChange && !activeInspectTaskId) await loadTasks();
         } catch (e) {
           // 忽略心跳网络瞬断
+        } finally {
+          heartbeatPolling = false;
         }
       }, 2000);
     }
@@ -6347,8 +6560,8 @@
         const domain = s ? (s.domain || s.url || '') : '';
         const isActive = s ? (s.is_active !== false) : true;
         const statusTag = isActive
-          ? '<span class="text-[10px] text-emerald-600 bg-emerald-50 dark:bg-emerald-950/60 px-1.5 py-0.2 rounded border border-emerald-200 dark:border-emerald-800">正常可用</span>'
-          : '<span class="text-[10px] text-rose-600 bg-rose-50 dark:bg-rose-950/60 px-1.5 py-0.2 rounded border border-rose-200 dark:border-rose-800">已停用/失效</span>';
+          ? '<span class="text-[10px] text-emerald-600 bg-emerald-50 dark:bg-emerald-950/60 px-1.5 py-0.5 rounded border border-emerald-200 dark:border-emerald-800">正常可用</span>'
+          : '<span class="text-[10px] text-rose-600 bg-rose-50 dark:bg-rose-950/60 px-1.5 py-0.5 rounded border border-rose-200 dark:border-rose-800">已停用/失效</span>';
 
         return `
           <div class="flex items-center justify-between p-2 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs hover:border-blue-300 dark:hover:border-blue-700 transition">
@@ -7965,7 +8178,7 @@
         if (sNum < curIdx) {
           return `<div class="px-2.5 py-1 rounded-lg bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 font-bold flex items-center justify-between"><span>${s.label}</span><i class="fa-solid fa-circle-check text-emerald-500"></i></div>`;
         } else if (sNum === curIdx) {
-          return `<div class="px-2.5 py-1 rounded-lg bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-300 dark:border-indigo-700 text-indigo-700 dark:text-indigo-300 font-bold flex items-center justify-between shadow-2xs"><span>${s.label}</span><i class="fa-solid fa-spinner fa-spin text-indigo-500"></i></div>`;
+          return `<div class="px-2.5 py-1 rounded-lg bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-300 dark:border-indigo-700 text-indigo-700 dark:text-indigo-300 font-bold flex items-center justify-between shadow-sm"><span>${s.label}</span><i class="fa-solid fa-spinner fa-spin text-indigo-500"></i></div>`;
         } else {
           return `<div class="px-2.5 py-1 rounded-lg bg-slate-100 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700 text-slate-400 flex items-center justify-between"><span>${s.label}</span><i class="fa-regular fa-clock"></i></div>`;
         }
@@ -8016,7 +8229,9 @@
       if (wrapEl) { wrapEl.classList.add('hidden'); wrapEl.classList.remove('flex'); }
       if (pctEl) pctEl.classList.add('hidden');
       if (queryBtn) { queryBtn.disabled = false; queryBtn.classList.remove('opacity-60', 'cursor-not-allowed'); }
-      if (queryBtnTxt) queryBtnTxt.textContent = '查询最新订阅数据';
+      if (queryBtnTxt) {
+        queryBtnTxt.textContent = currentMediaTab === 'movie' ? '查询最新电影订阅' : '查询最新电视剧订阅';
+      }
       if (abortBtn) abortBtn.classList.add('hidden');
 
       if (st.status === 'failed') {
@@ -8086,17 +8301,19 @@
         const st = await api('/api/moviepilot/subscriptions/unified-query/status');
         subUnifiedQueryState = st;
         const ver = st.snapshot_version || 0;
+        let reloaded = false;
         if (st.data_ready && ver !== lastRenderedSnapshotVersion) {
           lastRenderedSnapshotVersion = ver;
-          await loadSubscriptions({ cachedOnly: true, silent: true });
+          await loadSubscriptions({ cachedOnly: true, silent: true, preserveScroll: true });
+          reloaded = true;
         } else {
           renderUnifiedQueryBanner(st, subCd2Meta);
         }
 
         if (st.status === 'running') {
           subUnifiedPollTimer = setTimeout(pollUnifiedSubscriptionQuery, 2000);
-        } else {
-          await loadSubscriptions({ cachedOnly: true, silent: true });
+        } else if (!reloaded) {
+          await loadSubscriptions({ cachedOnly: true, silent: true, preserveScroll: true });
         }
       } catch (e) {
         console.warn('统一查询轮询异常:', e);
@@ -8120,11 +8337,120 @@
       await startUnifiedSubscriptionQuery();
     }
 
-    async function loadSubscriptions(opts = { cachedOnly: true, silent: false }) {
+    // ── 高性能订阅治理辅助：主线程让步、轻量封面图、O(1) 分类预索引与分批渲染 ──
+    const SUB_LIST_INITIAL_BATCH = 24;
+    const SUB_LIST_PAGE_SIZE = 30;
+    let subListActiveItems = [];
+    let subListRenderedCount = 0;
+    let subListObserver = null;
+    let subListRenderSeq = 0;
+    let subSearchDebounceTimer = null;
+    let subSearchComposing = false;
+    let subSearchImeBound = false;
+    let lastRenderedFilterTabType = null;
+    let subBucketIndex = null;
+
+    async function yieldToMain() {
+      if (typeof window !== 'undefined' && 'scheduler' in window && 'yield' in window.scheduler) {
+        return await window.scheduler.yield();
+      }
+      return new Promise(resolve => setTimeout(resolve, 0));
+    }
+
+    function _subPosterUrl(url) {
+      if (!url) return '';
+      return String(url).replace('https://image.tmdb.org/t/p/w500/', 'https://image.tmdb.org/t/p/w185/');
+    }
+
+    function _isNoResourceStatus(st) {
+      return st === 'no_resource' || st === 'skipped' || st === 'error';
+    }
+
+    function rebuildSubBucketIndex() {
+      const idx = {
+        tv: {
+          all: [], safe: [], partial_stalled: [], never_downloaded: [],
+          short_tv: [], low_quality: [], protected: [],
+          low_quality_cleanable_count: 0,
+          stalled_meta: { dl: [], noRes: [], queuedCount: 0, uncheckedCount: 0 },
+        },
+        movie: {
+          all: [], safe: [], old_zombie: [], low_quality: [], upcoming: [],
+          low_quality_cleanable_count: 0,
+          stalled_meta: { dl: [], noRes: [], queuedCount: 0, uncheckedCount: 0 },
+        },
+      };
+
+      for (let i = 0; i < allSubscriptions.length; i++) {
+        const s = allSubscriptions[i];
+        // 预计算小写检索键，避免搜索时每次重复拼接与转小写
+        s._searchKey = (
+          (s.name || '') + ' ' +
+          (s.year || '') + ' ' +
+          (s.tmdb_id || '') + ' ' +
+          ((s.low_quality_reasons && s.low_quality_reasons.length) ? s.low_quality_reasons.join(' ') : '') + ' ' +
+          (s.clean_reason || '') + ' ' +
+          (s.resource_plan_summary || '')
+        ).toLowerCase();
+
+        if (s.media_type === 'tv') {
+          const b = idx.tv;
+          b.all.push(s);
+          if (s.clean_rule === 'completed') b.safe.push(s);
+          else if (s.clean_rule === 'stalled') {
+            b.partial_stalled.push(s);
+            if (s.resource_status === 'downloadable') b.stalled_meta.dl.push(s);
+            else if (_isNoResourceStatus(s.resource_status)) b.stalled_meta.noRes.push(s);
+            else if (s.resource_status === 'already_queued') b.stalled_meta.queuedCount++;
+            else b.stalled_meta.uncheckedCount++;
+          } else if (s.clean_rule === 'zombie') b.never_downloaded.push(s);
+          else if (s.clean_rule === 'short_tv_stalled') b.short_tv.push(s);
+          if (s.is_low_quality) {
+            b.low_quality.push(s);
+            if (!s.is_protected && s.clean_rule !== 'completed') b.low_quality_cleanable_count++;
+          }
+          if (s.clean_confidence === 'low') b.protected.push(s);
+        } else {
+          const b = idx.movie;
+          b.all.push(s);
+          if (s.clean_rule === 'completed') b.safe.push(s);
+          else if (s.clean_rule === 'zombie' || s.clean_rule === 'douban_stale') {
+            b.old_zombie.push(s);
+            if (s.resource_status === 'downloadable') b.stalled_meta.dl.push(s);
+            else if (_isNoResourceStatus(s.resource_status)) b.stalled_meta.noRes.push(s);
+            else if (s.resource_status === 'already_queued') b.stalled_meta.queuedCount++;
+            else b.stalled_meta.uncheckedCount++;
+          } else if (s.clean_rule === 'upcoming_protect') b.upcoming.push(s);
+          if (s.is_low_quality) {
+            b.low_quality.push(s);
+            if (!s.is_protected && s.clean_rule !== 'completed') b.low_quality_cleanable_count++;
+          }
+        }
+      }
+      subBucketIndex = idx;
+      return idx;
+    }
+
+    function _ensureSubSearchImeHook() {
+      if (subSearchImeBound) return;
+      const input = document.getElementById('subSearchInput');
+      if (!input) return;
+      subSearchImeBound = true;
+      input.addEventListener('compositionstart', () => { subSearchComposing = true; });
+      input.addEventListener('compositionend', () => {
+        subSearchComposing = false;
+        filterSubList();
+      });
+    }
+
+    async function loadSubscriptions(opts = { cachedOnly: true, silent: false, preserveScroll: false }) {
       const cachedOnly = opts && opts.cachedOnly !== undefined ? Boolean(opts.cachedOnly) : true;
       const silent = Boolean(opts && opts.silent);
+      const preserveScroll = Boolean(opts && opts.preserveScroll);
       const container = document.getElementById('subListContainer');
       if (!container) return;
+
+      _ensureSubSearchImeHook();
 
       if (!silent && allSubscriptions.length === 0) {
         container.innerHTML = `
@@ -8149,6 +8475,7 @@
           subStatsData.movie = resp.movie || {};
         }
 
+        const bucketIdx = rebuildSubBucketIndex();
         renderUnifiedQueryBanner(subUnifiedQueryState, subCd2Meta);
 
         // 更新侧边栏/导航徽标
@@ -8160,12 +8487,12 @@
 
         // 更新大 Tab 计数
         const tvBadge = document.getElementById('subCountTvBadge');
-        if (tvBadge) tvBadge.textContent = subStatsData.tv.total || allSubscriptions.filter(s => s.media_type === 'tv').length;
+        if (tvBadge) tvBadge.textContent = subStatsData.tv.total || bucketIdx.tv.all.length;
         const movBadge = document.getElementById('subCountMovieBadge');
-        if (movBadge) movBadge.textContent = subStatsData.movie.total || allSubscriptions.filter(s => s.media_type === 'movie').length;
+        if (movBadge) movBadge.textContent = subStatsData.movie.total || bucketIdx.movie.all.length;
 
-        renderSubFilters();
-        renderSubscriptionList();
+        renderSubFilters(true);
+        renderSubscriptionList({ preserveScroll });
       } catch (e) {
         container.innerHTML = `<div class="p-8 text-center text-red-500 text-xs">加载订阅数据失败: ${e.message}</div>`;
       }
@@ -8178,7 +8505,7 @@
       const tabMovie = document.getElementById('mediaTabMovie');
 
       const queryBtnText = document.getElementById('subUnifiedQueryBtnText');
-      if (queryBtnText) {
+      if (queryBtnText && (!subUnifiedQueryState || subUnifiedQueryState.status !== 'running')) {
         queryBtnText.textContent = tab === 'tv' ? '查询最新电视剧订阅' : '查询最新电影订阅';
       }
       const queryBtn = document.getElementById('subUnifiedQueryBtn');
@@ -8196,35 +8523,69 @@
         if (tabMovie) tabMovie.className = "flex items-center gap-2 px-4 py-1.5 rounded-lg text-xs font-bold transition bg-white dark:bg-slate-700 text-indigo-600 dark:text-white shadow-sm";
       }
 
-      renderSubFilters();
+      renderSubFilters(true);
       renderSubscriptionList();
     }
 
-    function renderSubFilters() {
+    function updateSubFilterActiveStyles() {
       const container = document.getElementById('subFilterBtnContainer');
       if (!container) return;
+      const activeKey = currentMediaTab === 'tv' ? currentTvFilter : currentMovieFilter;
+      const buttons = container.querySelectorAll('button[data-filter-key]');
+      for (let i = 0; i < buttons.length; i++) {
+        const btn = buttons[i];
+        const key = btn.getAttribute('data-filter-key');
+        const isActive = key === activeKey;
+        btn.classList.toggle('is-active', isActive);
+        btn.setAttribute('aria-selected', isActive ? 'true' : 'false');
+        if (key === 'all') {
+          btn.classList.toggle('text-indigo-600', isActive);
+          btn.classList.toggle('dark:text-white', isActive);
+          btn.classList.toggle('text-slate-600', !isActive);
+          btn.classList.toggle('dark:text-slate-400', !isActive);
+        } else if (key === 'never_downloaded') {
+          btn.classList.toggle('text-slate-800', isActive);
+          btn.classList.toggle('dark:text-slate-200', isActive);
+          btn.classList.toggle('text-slate-600', !isActive);
+          btn.classList.toggle('dark:text-slate-400', !isActive);
+        }
+      }
+    }
+
+    function renderSubFilters(forceRebuild = false) {
+      const container = document.getElementById('subFilterBtnContainer');
+      if (!container) return;
+
+      if (!forceRebuild && lastRenderedFilterTabType === currentMediaTab && container.children.length > 0) {
+        updateSubFilterActiveStyles();
+        return;
+      }
+
+      lastRenderedFilterTabType = currentMediaTab;
+      container.setAttribute('role', 'tablist');
 
       if (currentMediaTab === 'tv') {
         const s = subStatsData.tv;
         container.innerHTML = `
-          <button onclick="switchSubFilter('all')" id="btn-tv-all" class="px-2.5 py-1 rounded-md text-xs font-semibold ${currentTvFilter === 'all' ? 'bg-white dark:bg-slate-700 shadow-sm text-indigo-600 dark:text-white' : 'text-slate-600 dark:text-slate-400'}">全部 (${s.total || 0})</button>
-          <button onclick="switchSubFilter('safe')" id="btn-tv-safe" title="本季全部集数已在 CD2 实存齐备且播完，可一键批量取消订阅" class="px-2.5 py-1 rounded-md text-xs font-semibold ${currentTvFilter === 'safe' ? 'bg-white dark:bg-slate-700 shadow-sm text-emerald-600 dark:text-emerald-400' : 'text-emerald-600 dark:text-emerald-400'}">🟢 全季完结 (${s.high || 0})</button>
-          <button onclick="switchSubFilter('partial_stalled')" id="btn-tv-partial_stalled" title="曾经下载过部分集数但后续断更：提供「批量补缺下载」与「批量取消订阅」" class="px-2.5 py-1 rounded-md text-xs font-semibold ${currentTvFilter === 'partial_stalled' ? 'bg-white dark:bg-slate-700 shadow-sm text-amber-600 dark:text-amber-400' : 'text-amber-600 dark:text-amber-400'}">🟡 部分已下·断更 (${s.partial_stalled || 0})</button>
-          <button onclick="switchSubFilter('never_downloaded')" id="btn-tv-never_downloaded" title="自订阅起至今实存 0 集，长期无资源入库，提供「批量取消订阅」" class="px-2.5 py-1 rounded-md text-xs font-semibold ${currentTvFilter === 'never_downloaded' ? 'bg-white dark:bg-slate-700 shadow-sm text-slate-800 dark:text-slate-200' : 'text-slate-600 dark:text-slate-400'}">⚫ 零进度死种 (${s.never_downloaded || 0})</button>
-          <button onclick="switchSubFilter('short_tv')" id="btn-tv-short_tv" title="多维识别的停滞微短剧（已排除国漫与多季综艺），提供「批量取消订阅」" class="px-2.5 py-1 rounded-md text-xs font-semibold ${currentTvFilter === 'short_tv' ? 'bg-white dark:bg-slate-700 shadow-sm text-purple-600 dark:text-purple-400' : 'text-purple-600 dark:text-purple-400'}">🟣 微短剧停滞 (${s.short_tv_stalled || 0})</button>
-          <button onclick="switchSubFilter('low_quality')" id="btn-tv-low_quality" title="无封面图片、繁体字标题、小语种/纯外文或占位词条，提供「批量取消订阅」" class="px-2.5 py-1 rounded-md text-xs font-semibold ${currentTvFilter === 'low_quality' ? 'bg-white dark:bg-slate-700 shadow-sm text-rose-600 dark:text-rose-400' : 'text-rose-600 dark:text-rose-400'}">⚠️ 异常特征 (${s.low_quality || 0})</button>
-          <button onclick="switchSubFilter('protected')" id="btn-tv-protected" class="px-2.5 py-1 rounded-md text-xs font-medium ${currentTvFilter === 'protected' ? 'bg-white dark:bg-slate-700 shadow-sm text-blue-600 dark:text-blue-400' : 'text-blue-600 dark:text-blue-400'}">🔵 活跃连载 (${s.protected || 0})</button>
+          <button type="button" role="tab" data-filter-key="all" onclick="switchSubFilter('all')" id="btn-tv-all" class="sub-filter-tab text-slate-600 dark:text-slate-400">全部 (${s.total || 0})</button>
+          <button type="button" role="tab" data-filter-key="safe" onclick="switchSubFilter('safe')" id="btn-tv-safe" title="本季全部集数已在 CD2 实存齐备且播完，可一键批量取消订阅" class="sub-filter-tab text-emerald-600 dark:text-emerald-400">🟢 全季完结 (${s.high || 0})</button>
+          <button type="button" role="tab" data-filter-key="partial_stalled" onclick="switchSubFilter('partial_stalled')" id="btn-tv-partial_stalled" title="曾经下载过部分集数但后续断更：提供「批量补缺下载」与「批量取消订阅+删源」" class="sub-filter-tab text-amber-600 dark:text-amber-400">🟡 部分已下·断更 (${s.partial_stalled || 0})</button>
+          <button type="button" role="tab" data-filter-key="never_downloaded" onclick="switchSubFilter('never_downloaded')" id="btn-tv-never_downloaded" title="自订阅起至今实存 0 集，长期无资源入库，提供「批量取消订阅+删源」" class="sub-filter-tab text-slate-600 dark:text-slate-400">⚫ 零进度死种 (${s.never_downloaded || 0})</button>
+          <button type="button" role="tab" data-filter-key="short_tv" onclick="switchSubFilter('short_tv')" id="btn-tv-short_tv" title="多维识别的疑似短剧（已排除国漫与多季综艺），提供「批量取消订阅+删源」" class="sub-filter-tab text-purple-600 dark:text-purple-400">🟣 疑似短剧 (${s.short_tv_stalled || 0})</button>
+          <button type="button" role="tab" data-filter-key="low_quality" onclick="switchSubFilter('low_quality')" id="btn-tv-low_quality" title="无封面图片、繁体字标题、小语种/纯外文或占位词条，提供「批量取消订阅+删源」" class="sub-filter-tab text-rose-600 dark:text-rose-400">⚠️ 异常特征 (${s.low_quality || 0})</button>
+          <button type="button" role="tab" data-filter-key="protected" onclick="switchSubFilter('protected')" id="btn-tv-protected" class="sub-filter-tab text-blue-600 dark:text-blue-400">🔵 活跃连载 (${s.protected || 0})</button>
         `;
       } else {
         const m = subStatsData.movie;
         container.innerHTML = `
-          <button onclick="switchSubFilter('all')" id="btn-mov-all" class="px-2.5 py-1 rounded-md text-xs font-semibold ${currentMovieFilter === 'all' ? 'bg-white dark:bg-slate-700 shadow-sm text-indigo-600 dark:text-white' : 'text-slate-600 dark:text-slate-400'}">全部 (${m.total || 0})</button>
-          <button onclick="switchSubFilter('safe')" id="btn-mov-safe" title="CD2 源目录或归档库已核实存在有效电影视频文件，提供「批量一键取消订阅」" class="px-2.5 py-1 rounded-md text-xs font-semibold ${currentMovieFilter === 'safe' ? 'bg-white dark:bg-slate-700 shadow-sm text-emerald-600 dark:text-emerald-400' : 'text-emerald-600 dark:text-emerald-400'}">🟢 已入库完成(CD2) (${m.high || 0})</button>
-          <button onclick="switchSubFilter('old_zombie')" id="btn-mov-old_zombie" title="往年老片或长期未入库电影：提供「批量补缺下载」与「批量取消订阅」" class="px-2.5 py-1 rounded-md text-xs font-semibold ${currentMovieFilter === 'old_zombie' ? 'bg-white dark:bg-slate-700 shadow-sm text-amber-600 dark:text-amber-400' : 'text-amber-600 dark:text-amber-400'}">🟠 往年老片死种 (${m.old_zombie || 0})</button>
-          <button onclick="switchSubFilter('low_quality')" id="btn-mov-low_quality" title="无封面图片、繁体字标题、小语种/纯外文或占位词条，提供「批量取消订阅」" class="px-2.5 py-1 rounded-md text-xs font-semibold ${currentMovieFilter === 'low_quality' ? 'bg-white dark:bg-slate-700 shadow-sm text-rose-600 dark:text-rose-400' : 'text-rose-600 dark:text-rose-400'}">⚠️ 异常特征 (${m.low_quality || 0})</button>
-          <button onclick="switchSubFilter('upcoming')" id="btn-mov-upcoming" class="px-2.5 py-1 rounded-md text-xs font-semibold ${currentMovieFilter === 'upcoming' ? 'bg-white dark:bg-slate-700 shadow-sm text-blue-600 dark:text-blue-400' : 'text-blue-600 dark:text-blue-400'}">🔵 待映预订保护 (${m.upcoming_protected || 0})</button>
+          <button type="button" role="tab" data-filter-key="all" onclick="switchSubFilter('all')" id="btn-mov-all" class="sub-filter-tab text-slate-600 dark:text-slate-400">全部 (${m.total || 0})</button>
+          <button type="button" role="tab" data-filter-key="safe" onclick="switchSubFilter('safe')" id="btn-mov-safe" title="CD2 源目录或归档库已核实存在有效电影视频文件，提供「批量一键取消订阅」" class="sub-filter-tab text-emerald-600 dark:text-emerald-400">🟢 已入库完成(CD2) (${m.high || 0})</button>
+          <button type="button" role="tab" data-filter-key="old_zombie" onclick="switchSubFilter('old_zombie')" id="btn-mov-old_zombie" title="往年老片或长期未入库电影：提供「批量补缺下载」与「批量取消订阅」" class="sub-filter-tab text-amber-600 dark:text-amber-400">🟠 往年老片死种 (${m.old_zombie || 0})</button>
+          <button type="button" role="tab" data-filter-key="low_quality" onclick="switchSubFilter('low_quality')" id="btn-mov-low_quality" title="无封面图片、繁体字标题、小语种/纯外文或占位词条，提供「批量取消订阅」" class="sub-filter-tab text-rose-600 dark:text-rose-400">⚠️ 异常特征 (${m.low_quality || 0})</button>
+          <button type="button" role="tab" data-filter-key="upcoming" onclick="switchSubFilter('upcoming')" id="btn-mov-upcoming" class="sub-filter-tab text-blue-600 dark:text-blue-400">🔵 待映预订保护 (${m.upcoming_protected || 0})</button>
         `;
       }
+      updateSubFilterActiveStyles();
     }
 
     function switchSubFilter(key) {
@@ -8234,7 +8595,7 @@
       } else {
         currentMovieFilter = key;
       }
-      renderSubFilters();
+      updateSubFilterActiveStyles();
       renderSubscriptionList();
     }
 
@@ -8244,11 +8605,22 @@
     }
 
     function filterSubList() {
-      renderSubscriptionList();
+      _ensureSubSearchImeHook();
+      if (subSearchComposing) return;
+      if (subSearchDebounceTimer) clearTimeout(subSearchDebounceTimer);
+      const q = (document.getElementById('subSearchInput')?.value || '').trim();
+      if (!q) {
+        renderSubscriptionList();
+        return;
+      }
+      subSearchDebounceTimer = setTimeout(() => {
+        subSearchDebounceTimer = null;
+        renderSubscriptionList();
+      }, 180);
     }
 
-    // ── 每个类别下专属的数据摘要与对应功能按钮栏 ────────────────────
-    function renderSubContextBanner(categoryList) {
+    // ── 每个类别下专属的数据摘要与对应功能按钮栏（直接复用 O(1) 预索引） ────────────────────
+    function renderSubContextBanner(categoryList, bucketScope) {
       const el = document.getElementById('subContextBanner');
       if (!el) return;
       if (!hasSubSnapshot || allSubscriptions.length === 0) {
@@ -8280,10 +8652,11 @@
 
       // 2. 🟡 部分已下·断更 (TV) / 🟠 往年老片死种 (Movie) -> 功能按钮：“批量补缺下载”、“批量取消订阅”
       if ((currentMediaTab === 'tv' && f === 'partial_stalled') || (currentMediaTab === 'movie' && f === 'old_zombie')) {
-        const dlItems = categoryList.filter(s => s.resource_status === 'downloadable');
-        const noResItems = categoryList.filter(s => s.resource_status === 'no_resource' || s.resource_status === 'skipped' || s.resource_status === 'error');
-        const queuedItems = categoryList.filter(s => s.resource_status === 'already_queued');
-        const uncheckedItems = categoryList.filter(s => !s.resource_status || s.resource_status === 'unchecked');
+        const sm = bucketScope ? bucketScope.stalled_meta : null;
+        const dlCount = sm ? sm.dl.length : categoryList.filter(s => s.resource_status === 'downloadable').length;
+        const noResCount = sm ? sm.noRes.length : categoryList.filter(s => _isNoResourceStatus(s.resource_status)).length;
+        const queuedCount = sm ? sm.queuedCount : categoryList.filter(s => s.resource_status === 'already_queued').length;
+        const uncheckedCount = sm ? sm.uncheckedCount : categoryList.filter(s => !s.resource_status || s.resource_status === 'unchecked').length;
         const modeKey = currentMediaTab === 'tv' ? 'partial_stalled' : 'old_zombie';
         const labelTitle = currentMediaTab === 'tv' ? '🟡 部分已下·断更' : '🟠 往年老片死种';
 
@@ -8292,30 +8665,30 @@
           <div class="space-y-1.5">
             <div>
               <span class="font-bold">${labelTitle}（共 ${count} 部）：</span>
-              <span>已搜到合格补缺站点资源 <b class="text-emerald-600 dark:text-emerald-400">${dlItems.length}</b> 部 · 暂无合格资源 <b class="text-amber-700 dark:text-amber-400">${noResItems.length}</b> 部${queuedItems.length > 0 ? ` · 已在下载队列 <b>${queuedItems.length}</b> 部` : ''}${uncheckedItems.length > 0 ? ` · 待搜寻 <b class="text-slate-500">${uncheckedItems.length}</b> 部` : ''}</span>
+              <span>已搜到合格补缺站点资源 <b class="text-emerald-600 dark:text-emerald-400">${dlCount}</b> 部 · 暂无合格资源 <b class="text-amber-700 dark:text-amber-400">${noResCount}</b> 部${queuedCount > 0 ? ` · 已在下载队列 <b>${queuedCount}</b> 部` : ''}${uncheckedCount > 0 ? ` · 待搜寻 <b class="text-slate-500">${uncheckedCount}</b> 部` : ''}</span>
             </div>
             <div class="flex flex-wrap items-center gap-1.5">
               <span class="text-[11px] text-slate-500">快速筛选：</span>
               <button onclick="switchStalledResourceSubFilter('all')" class="px-2 py-0.5 rounded text-[11px] font-semibold ${currentStalledResourceSubFilter === 'all' ? 'bg-indigo-600 text-white' : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700'}">全部 (${count})</button>
-              <button onclick="switchStalledResourceSubFilter('downloadable')" class="px-2 py-0.5 rounded text-[11px] font-semibold ${currentStalledResourceSubFilter === 'downloadable' ? 'bg-emerald-600 text-white' : 'bg-white dark:bg-slate-800 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800'}">🎯 有源可补缺 (${dlItems.length})</button>
-              <button onclick="switchStalledResourceSubFilter('no_resource')" class="px-2 py-0.5 rounded text-[11px] font-semibold ${currentStalledResourceSubFilter === 'no_resource' ? 'bg-amber-600 text-white' : 'bg-white dark:bg-slate-800 text-amber-700 dark:text-amber-400 border border-amber-200 dark:border-amber-800'}">⚪ 无合格资源 (${noResItems.length})</button>
+              <button onclick="switchStalledResourceSubFilter('downloadable')" class="px-2 py-0.5 rounded text-[11px] font-semibold ${currentStalledResourceSubFilter === 'downloadable' ? 'bg-emerald-600 text-white' : 'bg-white dark:bg-slate-800 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800'}">🎯 有源可补缺 (${dlCount})</button>
+              <button onclick="switchStalledResourceSubFilter('no_resource')" class="px-2 py-0.5 rounded text-[11px] font-semibold ${currentStalledResourceSubFilter === 'no_resource' ? 'bg-amber-600 text-white' : 'bg-white dark:bg-slate-800 text-amber-700 dark:text-amber-400 border border-amber-200 dark:border-amber-800'}">⚪ 无合格资源 (${noResCount})</button>
             </div>
           </div>
           <div class="flex flex-wrap items-center gap-2 flex-shrink-0">
-            <button onclick="openUnifiedGapFillModal()" ${dlItems.length === 0 ? 'disabled' : ''} class="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white font-bold transition shadow-sm flex items-center gap-1.5" title="对前面已经通过 MoviePilot 搜寻出的合格站点资源一键批量推送补缺下载">
+            <button onclick="openUnifiedGapFillModal()" ${dlCount === 0 ? 'disabled' : ''} class="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white font-bold transition shadow-sm flex items-center gap-1.5" title="对前面已经通过 MoviePilot 搜寻出的合格站点资源一键批量推送补缺下载">
               <i class="fa-solid fa-cloud-arrow-down text-[11px]"></i>
-              <span>批量补缺下载 (${dlItems.length})</span>
+              <span>批量补缺下载 (${dlCount})</span>
             </button>
-            <button onclick="openCategoryBatchUnsubModal('${modeKey}')" ${count === 0 ? 'disabled' : ''} class="px-3.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 disabled:opacity-40 text-white font-bold transition shadow-sm flex items-center gap-1.5" title="对该分类下无源或不再需要的订阅批量取消订阅">
-              <i class="fa-solid fa-ban text-[11px]"></i>
-              <span>批量取消订阅 (${noResItems.length > 0 ? noResItems.length : count})</span>
+            <button onclick="openCategoryBatchUnsubModal('${modeKey}')" ${count === 0 ? 'disabled' : ''} class="px-3.5 py-1.5 rounded-lg ${currentMediaTab === 'tv' ? 'bg-rose-600 hover:bg-rose-700' : 'bg-amber-600 hover:bg-amber-700'} disabled:opacity-40 text-white font-bold transition shadow-sm flex items-center gap-1.5" title="${currentMediaTab === 'tv' ? '对该分类下无源或不再需要的剧集执行批量取消订阅并彻底清理受控源季目录' : '对该分类下无源或不再需要的电影批量取消订阅'}">
+              <i class="fa-solid fa-${currentMediaTab === 'tv' ? 'trash-can' : 'ban'} text-[11px]"></i>
+              <span>${currentMediaTab === 'tv' ? '批量取消订阅+删源' : '批量取消订阅'} (${noResCount > 0 ? noResCount : count})</span>
             </button>
           </div>
         `;
         return;
       }
 
-      // 3. ⚫ 零进度死种 (TV) -> 功能按钮：“批量取消订阅”
+      // 3. ⚫ 零进度死种 (TV) -> 功能按钮：“批量取消订阅+删源”
       if (currentMediaTab === 'tv' && f === 'never_downloaded') {
         el.className = "px-4 py-3 rounded-xl text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-100 dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-slate-800 dark:text-slate-200";
         el.innerHTML = `
@@ -8324,36 +8697,39 @@
             <span>自订阅起至今 CD2 实盘 0 集入库，长期无匹配资源。</span>
           </div>
           <div class="flex items-center gap-2 flex-shrink-0">
-            <button onclick="openCategoryBatchUnsubModal('never_downloaded')" ${count === 0 ? 'disabled' : ''} class="px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-900 dark:bg-slate-700 dark:hover:bg-slate-600 disabled:opacity-40 text-white font-bold transition shadow-sm flex items-center gap-1.5">
-              <i class="fa-solid fa-ban text-[11px]"></i>
-              <span>批量取消订阅 (${count})</span>
+            <button onclick="openCategoryBatchUnsubModal('never_downloaded')" ${count === 0 ? 'disabled' : ''} class="px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-900 dark:bg-slate-700 dark:hover:bg-slate-600 disabled:opacity-40 text-white font-bold transition shadow-sm flex items-center gap-1.5" title="批量取消订阅并清理源端残留目录（无源文件的条目将安全仅退订）">
+              <i class="fa-solid fa-trash-can text-[11px]"></i>
+              <span>批量取消订阅+删源 (${count})</span>
             </button>
           </div>
         `;
         return;
       }
 
-      // 4. 🟣 微短剧停滞 (TV) -> 功能按钮：“批量取消订阅”
+      // 4. 🟣 疑似短剧 (TV) -> 功能按钮：“批量取消订阅+删源”
       if (currentMediaTab === 'tv' && f === 'short_tv') {
         el.className = "px-4 py-3 rounded-xl text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-purple-50/80 dark:bg-purple-950/30 border border-purple-200 dark:border-purple-800/70 text-purple-900 dark:text-purple-200";
         el.innerHTML = `
           <div>
-            <span class="font-bold">🟣 微短剧停滞（共 ${count} 部）：</span>
-            <span>结合 TMDB 单集时长（≤15分钟）、微短剧特征与 CD2 单集体积多维识别（已严格排除动漫、纪录片与多季综艺）。</span>
+            <span class="font-bold">🟣 疑似短剧（共 ${count} 部）：</span>
+            <span>结合 TMDB 单集时长（≤15分钟）、短剧特征与 CD2 单集体积多维识别（已严格排除动漫、纪录片与多季综艺）。</span>
           </div>
           <div class="flex items-center gap-2 flex-shrink-0">
-            <button onclick="openCategoryBatchUnsubModal('short_tv')" ${count === 0 ? 'disabled' : ''} class="px-3.5 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-700 disabled:opacity-40 text-white font-bold transition shadow-sm flex items-center gap-1.5">
-              <i class="fa-solid fa-ban text-[11px]"></i>
-              <span>批量取消订阅 (${count})</span>
+            <button onclick="openCategoryBatchUnsubModal('short_tv')" ${count === 0 ? 'disabled' : ''} class="px-3.5 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-700 disabled:opacity-40 text-white font-bold transition shadow-sm flex items-center gap-1.5" title="批量取消订阅并彻底删除受控源季目录与空剧集目录">
+              <i class="fa-solid fa-trash-can text-[11px]"></i>
+              <span>批量取消订阅+删源 (${count})</span>
             </button>
           </div>
         `;
         return;
       }
 
-      // 5. ⚠️ 异常特征 (TV & Movie) -> 功能按钮：“批量取消订阅”
+      // 5. ⚠️ 异常特征 (TV: 批量取消订阅+删源 / Movie: 批量取消订阅)
       if (f === 'low_quality') {
-        const cleanableCount = categoryList.filter(s => !s.is_protected && s.clean_rule !== 'completed').length;
+        const cleanableCount = bucketScope
+          ? bucketScope.low_quality_cleanable_count
+          : categoryList.filter(s => !s.is_protected && s.clean_rule !== 'completed').length;
+        const isTvCleanup = currentMediaTab === 'tv';
         el.className = "px-4 py-3 rounded-xl text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-rose-50/80 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-800/70 text-rose-900 dark:text-rose-200";
         el.innerHTML = `
           <div>
@@ -8361,9 +8737,9 @@
             <span>命中「无封面图片 / 繁体字标题 / 小语种文字 / 无中文译名 / 垃圾占位词条」特征。</span>
           </div>
           <div class="flex items-center gap-2 flex-shrink-0">
-            <button onclick="openCategoryBatchUnsubModal('low_quality')" ${cleanableCount === 0 ? 'disabled' : ''} class="px-3.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 disabled:opacity-40 text-white font-bold transition shadow-sm flex items-center gap-1.5">
-              <i class="fa-solid fa-ban text-[11px]"></i>
-              <span>批量取消订阅 (${cleanableCount})</span>
+            <button onclick="openCategoryBatchUnsubModal('low_quality')" ${cleanableCount === 0 ? 'disabled' : ''} class="px-3.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 disabled:opacity-40 text-white font-bold transition shadow-sm flex items-center gap-1.5" title="${isTvCleanup ? '批量取消订阅并彻底清理受控源季目录（绝不删归档库）' : '批量取消订阅（绝不删本地电影文件）'}">
+              <i class="fa-solid fa-${isTvCleanup ? 'trash-can' : 'ban'} text-[11px]"></i>
+              <span>${isTvCleanup ? '批量取消订阅+删源' : '批量取消订阅'} (${cleanableCount})</span>
             </button>
           </div>
         `;
@@ -8383,12 +8759,304 @@
       el.innerHTML = "";
     }
 
-    function renderSubscriptionList() {
+    function _classifyCd2Path(rawPath) {
+      const p = String(rawPath || '').trim();
+      const srcRoot = String((subCd2Meta && subCd2Meta.source_root) || '').replace(/\/+$/, '');
+      const archRoot = String((subCd2Meta && subCd2Meta.archive_root) || '').replace(/\/+$/, '');
+
+      // 优先按长度降序匹配根目录（避免 /nas 误匹配 /nas.finish 前缀）
+      const candidates = [];
+      if (archRoot) candidates.push({ kind: 'archive', label: '归档库', root: archRoot });
+      if (srcRoot && srcRoot !== archRoot) candidates.push({ kind: 'source', label: '源目录', root: srcRoot });
+      candidates.sort((a, b) => b.root.length - a.root.length);
+
+      for (const c of candidates) {
+        if (p === c.root || p.startsWith(c.root + '/')) {
+          return {
+            kind: c.kind,
+            label: c.label,
+            relPath: p === c.root ? p : p.slice(c.root.length + 1),
+          };
+        }
+      }
+      if (/\.finish(\/|$)/i.test(p)) {
+        return { kind: 'archive', label: '归档库', relPath: p };
+      }
+      return { kind: 'cd2', label: 'CD2', relPath: p };
+    }
+
+    function _renderSubCd2PathsHtml(paths) {
+      if (!Array.isArray(paths) || paths.length === 0) return '';
+      const cleanPaths = [...new Set(paths.map(x => String(x || '').trim()).filter(Boolean))];
+      if (cleanPaths.length === 0) return '';
+
+      const shown = cleanPaths.slice(0, 3);
+      const btns = shown.map(raw => {
+        const info = _classifyCd2Path(raw);
+        return `<button type="button" class="sub-cd2-path-btn sub-cd2-path-${info.kind}" data-copy-path="${escapeHtml(raw)}" title="点击复制完整 CD2 路径：${escapeHtml(raw)}" onclick="copySubCd2Path(this)"><i class="fa-regular fa-folder-open flex-shrink-0"></i><span class="sub-cd2-path-tag">${info.label}</span><span class="sub-cd2-path-text">${escapeHtml(info.relPath)}</span><i class="fa-regular fa-copy sub-cd2-path-copy"></i></button>`;
+      }).join('');
+      const more = cleanPaths.length > shown.length
+        ? `<span class="sub-chip sub-chip-meta">+${cleanPaths.length - shown.length} 处</span>`
+        : '';
+      return `<div class="sub-cd2-paths">${btns}${more}</div>`;
+    }
+
+    function copySubCd2Path(btn) {
+      if (!btn) return;
+      const fullPath = btn.getAttribute('data-copy-path') || '';
+      if (!fullPath) return;
+
+      const markCopied = () => {
+        btn.classList.add('is-copied');
+        const copyIcon = btn.querySelector('.sub-cd2-path-copy');
+        if (copyIcon) copyIcon.className = 'fa-solid fa-check sub-cd2-path-copy';
+        clearTimeout(btn._copyResetTimer);
+        btn._copyResetTimer = setTimeout(() => {
+          btn.classList.remove('is-copied');
+          if (copyIcon) copyIcon.className = 'fa-regular fa-copy sub-cd2-path-copy';
+        }, 1600);
+      };
+
+      const fallbackCopy = () => {
+        try {
+          const ta = document.createElement('textarea');
+          ta.value = fullPath;
+          ta.style.position = 'fixed';
+          ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand('copy');
+          document.body.removeChild(ta);
+          markCopied();
+        } catch (err) {
+          console.warn('复制 CD2 路径失败:', err);
+        }
+      };
+
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        navigator.clipboard.writeText(fullPath).then(markCopied).catch(fallbackCopy);
+      } else {
+        fallbackCopy();
+      }
+    }
+
+    function _buildSubscriptionCardHtml(s, idx) {
+      let typeBadge = '';
+      if (s.media_type === 'tv') {
+        typeBadge = `<span class="sub-chip sub-chip-mono sub-chip-tv">S${String(s.season || 1).padStart(2, '0')}</span>`;
+        if (s.is_short_tv) {
+          typeBadge += `<span class="sub-chip sub-chip-mono sub-chip-short" title="${escapeHtml(s.short_drama_reason || '微短剧特征')}">短剧</span>`;
+        }
+      } else {
+        typeBadge = `<span class="sub-chip sub-chip-mono sub-chip-mov">电影</span>`;
+      }
+      if (s.username && s.username !== '豆瓣榜单') {
+        typeBadge += `<span class="sub-chip sub-chip-manual">👤 手动订阅</span>`;
+      }
+
+      const lqBadges = (s.low_quality_reasons && s.low_quality_reasons.length)
+        ? s.low_quality_reasons.map(r => `<span class="sub-chip sub-chip-lq">⚠️ ${escapeHtml(r)}</span>`).join('')
+        : '';
+
+      let confBadge = '';
+      if (s.clean_confidence === 'high') {
+        confBadge = `<span class="sub-conf sub-conf-high">🟢 ${escapeHtml(s.clean_rule_name)}</span>`;
+      } else if (s.clean_confidence === 'medium') {
+        confBadge = `<span class="sub-conf sub-conf-med">🟡 ${escapeHtml(s.clean_rule_name)}</span>`;
+      } else {
+        confBadge = `<span class="sub-conf sub-conf-low">🔵 ${escapeHtml(s.clean_rule_name)}</span>`;
+      }
+
+      const stateColor = s.state === 'R' ? 'text-emerald-500' : (s.state === 'P' ? 'text-amber-500' : 'text-slate-400');
+      const stateName = s.state === 'R' ? '运行中' : (s.state === 'P' ? '已暂停' : '已停止');
+
+      let progressHtml = '';
+      if (s.media_type === 'tv') {
+        if (s.cd2_verified) {
+          const curEp = Number(s.current_episodes ?? 0);
+          const srcEp = Number(s.cd2_source_episodes ?? 0);
+          const archEp = Number(s.cd2_archive_episodes ?? 0);
+          let epText = `${curEp} / ${s.total_episodes || '?'} 集`;
+          if (s.lack_episodes != null) epText += ` (缺 ${s.lack_episodes} 集)`;
+          if (s.cd2_source_episodes != null || s.cd2_archive_episodes != null) {
+            epText += ` [源${srcEp}·归档${archEp}]`;
+          }
+          const statusPill = curEp > 0
+            ? `<span class="sub-chip sub-pill-ok">CD2 已收录</span>`
+            : `<span class="sub-chip sub-pill-muted">CD2 未收录</span>`;
+          const archOnlyPill = (curEp > 0 && srcEp === 0 && archEp > 0)
+            ? ` <span class="sub-chip sub-pill-arch" title="该剧集文件仅位于受保护的归档库，执行退订+删源时将仅退订并保留归档文件">仅在归档库</span>`
+            : '';
+          progressHtml = `${statusPill}${archOnlyPill} <span class="sub-ep-text">${epText}</span>`;
+        } else {
+          progressHtml = `<span class="sub-chip sub-pill-warn">CD2 未核验</span> <span class="text-slate-400 text-[11px]">请点击「查询最新订阅数据」（总 ${s.total_episodes || '?'} 集）</span>`;
+        }
+      } else {
+        const movLibPill = s.cd2_verified
+          ? (s.cd2_in_library
+              ? `<span class="sub-chip sub-pill-ok" title="${escapeHtml((s.cd2_paths || []).join(' ; '))}">🟢 CD2 已入库</span>`
+              : `<span class="sub-chip sub-pill-muted">⚪ CD2 未入库</span>`)
+          : `<span class="sub-chip sub-pill-muted">待查 CD2</span>`;
+        progressHtml = `${movLibPill} <span class="sub-ep-text">${s.year ? `${s.year} 年公映` : '电影'}</span>`;
+      }
+
+      let resourceBoxHtml = '';
+      if (s.resource_status === 'downloadable') {
+        const tList = (s.resource_torrents || []).slice(0, 2).map(t =>
+          `<span class="sub-res-torrent"><b class="text-emerald-700 dark:text-emerald-400">[${escapeHtml(t.site_name || 'PT')}]</b> 做种${t.seeders} · ${escapeHtml(t.size_display)} · <span class="truncate max-w-xs" title="${escapeHtml(t.title)}">${escapeHtml(t.title)}</span></span>`
+        ).join(' ');
+        resourceBoxHtml = `
+          <div class="sub-res-dl">
+            <div class="sub-title-row">
+              <span class="font-bold">🎯 站点有源可补缺：</span>
+              <span>${escapeHtml(s.resource_plan_summary || s.resource_reason || '')}</span>
+            </div>
+            ${tList ? `<div class="sub-title-row">${tList}</div>` : ''}
+          </div>`;
+      } else if (s.resource_status === 'already_queued') {
+        resourceBoxHtml = `<div class="sub-res-queue">⏬ 已推送至 MoviePilot 下载队列：${escapeHtml(s.resource_reason || '')}</div>`;
+      } else if (
+        (s.clean_rule === 'stalled' || (s.media_type === 'movie' && (s.clean_rule === 'zombie' || s.clean_rule === 'douban_stale'))) &&
+        _isNoResourceStatus(s.resource_status)
+      ) {
+        resourceBoxHtml = `<div class="sub-res-none">⚪ 站点搜寻结论：${escapeHtml(s.resource_reason || '全网补缺站点暂无合格资源（建议取消订阅）')}</div>`;
+      }
+
+      const cd2PathsHtml = _renderSubCd2PathsHtml(s.cd2_paths);
+      const posterUrl = _subPosterUrl(s.poster);
+      const isDeferred = idx >= 8;
+      const imgLoadingAttr = idx < 6 ? 'loading="eager"' : 'loading="lazy" fetchpriority="low"';
+
+      return `
+        <div class="sub-card${isDeferred ? ' sub-card-deferred' : ''}">
+          <div class="sub-card-main">
+            <div class="sub-poster">
+              ${posterUrl ? `<img src="${posterUrl}" alt="" width="56" height="80" decoding="async" ${imgLoadingAttr} onerror="this.style.display='none'">` : ''}
+              <div class="sub-poster-fallback"><i class="fa-solid fa-${s.media_type === 'movie' ? 'film' : 'tv'}"></i></div>
+            </div>
+            <div class="sub-info">
+              <div class="sub-title-row">
+                <h4 class="sub-title">${escapeHtml(s.name)}</h4>
+                ${s.year ? `<span class="sub-year">(${s.year})</span>` : ''}
+                ${typeBadge}
+                ${lqBadges}
+                ${s.tmdb_id ? `<span class="sub-chip sub-chip-mono sub-chip-meta">TMDB: ${s.tmdb_id}</span>` : ''}
+                <span class="sub-chip sub-chip-mono sub-chip-meta">ID: ${s.id}</span>
+              </div>
+              <div class="sub-meta-row">
+                <span class="inline-flex items-center gap-1 font-medium"><i class="fa-solid fa-circle text-[6px] ${stateColor}"></i>${stateName}</span>
+                <span class="sub-sep">|</span>
+                <span class="inline-flex items-center gap-1.5 flex-wrap">${progressHtml}</span>
+              </div>
+              ${cd2PathsHtml}
+              <div class="sub-reason">
+                <i class="fa-solid fa-circle-info text-indigo-400 text-xs mt-0.5 flex-shrink-0"></i>
+                <span>${escapeHtml(s.clean_reason)}</span>
+              </div>
+              ${resourceBoxHtml}
+            </div>
+          </div>
+          <div class="sub-card-side">
+            ${confBadge}
+            <div class="sub-card-actions">
+              ${s.resource_status === 'downloadable' ? `<button onclick="pushSingleSubGapFill(${s.id})" class="sub-act-btn sub-act-dl" title="一键推送已搜出的补缺种子至 MoviePilot">📥 补缺下载</button>` : ''}
+              ${s.state === 'R' ? `<button onclick="toggleSubStatus(${s.id}, 'S')" class="sub-act-btn sub-act-pause" title="置为暂停观察">暂停</button>` : `<button onclick="toggleSubStatus(${s.id}, 'R')" class="sub-act-btn sub-act-resume" title="恢复活跃追更">恢复</button>`}
+              <button onclick="triggerDeleteSingleSub(${s.id})" class="sub-act-btn sub-act-unsub" title="取消此条订阅（绝不删除本地媒体文件）">取消订阅</button>
+            </div>
+          </div>
+        </div>`;
+    }
+
+    function _updateSubListLoadFooter() {
+      const footer = document.getElementById('subListLoadFooter');
+      if (!footer) return;
+      const total = subListActiveItems.length;
+      const shown = subListRenderedCount;
+      if (shown < total) {
+        const nextChunk = Math.min(SUB_LIST_PAGE_SIZE, total - shown);
+        footer.innerHTML = `
+          <span>已渲染 <b class="text-slate-700 dark:text-slate-200">${shown}</b> / <b>${total}</b> 条（向下滚动自动加载，保持切换零卡顿）</span>
+          <div class="flex items-center gap-2">
+            <button type="button" onclick="renderMoreSubscriptions()" class="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold transition">加载更多 (+${nextChunk})</button>
+            <button type="button" onclick="expandAllSubscriptions()" class="px-2.5 py-1 rounded-lg border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 text-xs font-medium transition">分批展开全部</button>
+          </div>`;
+      } else {
+        footer.innerHTML = `<span>已全部展示当前分类共 <b>${total}</b> 条订阅</span>`;
+      }
+    }
+
+    function _disconnectSubListObserver() {
+      if (subListObserver) {
+        subListObserver.disconnect();
+        subListObserver = null;
+      }
+    }
+
+    function _attachSubListObserver() {
+      _disconnectSubListObserver();
+      if (typeof IntersectionObserver === 'undefined') return;
+      const container = document.getElementById('subListContainer');
+      const footer = document.getElementById('subListLoadFooter');
+      if (!container || !footer || subListRenderedCount >= subListActiveItems.length) return;
+      subListObserver = new IntersectionObserver((entries) => {
+        if (entries.some(e => e.isIntersecting)) {
+          renderMoreSubscriptions();
+        }
+      }, { root: container, rootMargin: '260px 0px' });
+      subListObserver.observe(footer);
+    }
+
+    function renderMoreSubscriptions(batchSize = SUB_LIST_PAGE_SIZE) {
+      const wrap = document.getElementById('subListItemsWrap');
+      if (!wrap || subListRenderedCount >= subListActiveItems.length) {
+        _disconnectSubListObserver();
+        _updateSubListLoadFooter();
+        return;
+      }
+      const start = subListRenderedCount;
+      const end = Math.min(start + batchSize, subListActiveItems.length);
+      let html = '';
+      for (let i = start; i < end; i++) {
+        html += _buildSubscriptionCardHtml(subListActiveItems[i], i);
+      }
+      wrap.insertAdjacentHTML('beforeend', html);
+      subListRenderedCount = end;
+      _updateSubListLoadFooter();
+      if (subListRenderedCount >= subListActiveItems.length) {
+        _disconnectSubListObserver();
+      }
+    }
+
+    async function expandAllSubscriptions() {
+      const mySeq = subListRenderSeq;
+      _disconnectSubListObserver();
+      let deadline = performance.now() + 50;
+      while (subListRenderedCount < subListActiveItems.length) {
+        if (mySeq !== subListRenderSeq) return;
+        renderMoreSubscriptions(SUB_LIST_PAGE_SIZE);
+        if (performance.now() >= deadline) {
+          await yieldToMain();
+          if (mySeq !== subListRenderSeq) return;
+          deadline = performance.now() + 50;
+        }
+      }
+    }
+
+    function renderSubscriptionList(opts = {}) {
       const container = document.getElementById('subListContainer');
       if (!container) return;
 
+      const preserveScroll = Boolean(opts && opts.preserveScroll);
+      const prevScrollTop = preserveScroll ? container.scrollTop : 0;
+      const prevRenderedCount = preserveScroll ? subListRenderedCount : 0;
+
+      subListRenderSeq += 1;
+      _disconnectSubListObserver();
+
       // 尚未执行过查询时的空态引导
       if (!hasSubSnapshot || allSubscriptions.length === 0) {
+        subListActiveItems = [];
+        subListRenderedCount = 0;
         renderSubContextBanner([]);
         const isRunning = subUnifiedQueryState && subUnifiedQueryState.status === 'running';
         const targetType = currentMediaTab === 'movie' ? '电影' : '电视剧';
@@ -8414,67 +9082,35 @@
         return;
       }
 
-      const q = (document.getElementById('subSearchInput')?.value || '').trim().toLowerCase();
+      if (!subBucketIndex) rebuildSubBucketIndex();
+      const bucketScope = currentMediaTab === 'tv' ? subBucketIndex.tv : subBucketIndex.movie;
+      const filterKey = currentMediaTab === 'tv' ? currentTvFilter : currentMovieFilter;
+      const categoryList = bucketScope[filterKey] || bucketScope.all;
 
-      // 1. 过滤当前媒体大类
-      let list = allSubscriptions.filter(s => s.media_type === currentMediaTab);
+      // 渲染当前分类专属功能栏（直接从预索引 O(1) 读取统计数）
+      renderSubContextBanner(categoryList, bucketScope);
 
-      // 2. 专属分类过滤
-      if (currentMediaTab === 'tv') {
-        if (currentTvFilter === 'safe') {
-          list = list.filter(s => s.clean_rule === 'completed');
-        } else if (currentTvFilter === 'partial_stalled') {
-          list = list.filter(s => s.clean_rule === 'stalled');
-        } else if (currentTvFilter === 'never_downloaded') {
-          list = list.filter(s => s.clean_rule === 'zombie');
-        } else if (currentTvFilter === 'short_tv') {
-          list = list.filter(s => s.clean_rule === 'short_tv_stalled');
-        } else if (currentTvFilter === 'low_quality') {
-          list = list.filter(s => s.is_low_quality);
-        } else if (currentTvFilter === 'protected') {
-          list = list.filter(s => s.clean_confidence === 'low');
-        }
-      } else {
-        if (currentMovieFilter === 'safe') {
-          list = list.filter(s => s.clean_rule === 'completed');
-        } else if (currentMovieFilter === 'old_zombie') {
-          list = list.filter(s => s.clean_rule === 'zombie' || s.clean_rule === 'douban_stale');
-        } else if (currentMovieFilter === 'low_quality') {
-          list = list.filter(s => s.is_low_quality);
-        } else if (currentMovieFilter === 'upcoming') {
-          list = list.filter(s => s.clean_rule === 'upcoming_protect');
-        }
-      }
-
-      // 渲染当前分类专属功能栏（传入当前分类全量条目以便统计有源/无源数）
-      renderSubContextBanner(list);
-
-      // 2.1 若在「部分已下·断更」或「往年老片死种」下选择了有源/无源子筛选
+      let list = categoryList;
       if (
         ((currentMediaTab === 'tv' && currentTvFilter === 'partial_stalled') ||
          (currentMediaTab === 'movie' && currentMovieFilter === 'old_zombie')) &&
         currentStalledResourceSubFilter !== 'all'
       ) {
         if (currentStalledResourceSubFilter === 'downloadable') {
-          list = list.filter(s => s.resource_status === 'downloadable');
+          list = bucketScope.stalled_meta.dl;
         } else if (currentStalledResourceSubFilter === 'no_resource') {
-          list = list.filter(s => s.resource_status === 'no_resource' || s.resource_status === 'skipped' || s.resource_status === 'error');
+          list = bucketScope.stalled_meta.noRes;
         }
       }
 
-      // 3. 关键词过滤
+      const q = (document.getElementById('subSearchInput')?.value || '').trim().toLowerCase();
       if (q) {
-        list = list.filter(s =>
-          (s.name || '').toLowerCase().includes(q) ||
-          String(s.year || '').includes(q) ||
-          String(s.tmdb_id || '').includes(q) ||
-          (s.low_quality_reasons || []).join(' ').toLowerCase().includes(q) ||
-          (s.clean_reason || '').toLowerCase().includes(q) ||
-          (s.resource_plan_summary || '').toLowerCase().includes(q)
-        );
+        list = list.filter(s => (s._searchKey || '').includes(q));
       }
 
       if (list.length === 0) {
+        subListActiveItems = [];
+        subListRenderedCount = 0;
         container.innerHTML = `
           <div class="p-8 text-center text-slate-400">
             <i class="fa-solid fa-inbox text-2xl mb-2 text-slate-300 dark:text-slate-700 block"></i>
@@ -8483,131 +9119,37 @@
         return;
       }
 
-      const displayItems = list.slice(0, 150);
+      subListActiveItems = list;
+      const initialLimit = preserveScroll
+        ? Math.min(list.length, Math.max(SUB_LIST_INITIAL_BATCH, prevRenderedCount))
+        : Math.min(list.length, SUB_LIST_INITIAL_BATCH);
 
-      container.innerHTML = displayItems.map(s => {
-        let typeBadge = '';
-        if (s.media_type === 'tv') {
-          typeBadge = `<span class="px-1.5 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950/70 text-indigo-600 dark:text-indigo-400 font-mono text-[10px]">S${String(s.season || 1).padStart(2, '0')}</span>`;
-          if (s.is_short_tv) {
-            typeBadge += `<span class="px-1.5 py-0.5 rounded bg-purple-50 dark:bg-purple-950/70 text-purple-600 dark:text-purple-400 font-mono text-[10px] ml-1" title="${escapeHtml(s.short_drama_reason || '微短剧特征')}">短剧</span>`;
-          }
-        } else {
-          typeBadge = `<span class="px-1.5 py-0.5 rounded bg-amber-50 dark:bg-amber-950/70 text-amber-600 dark:text-amber-400 font-mono text-[10px]">电影</span>`;
-        }
-        if (s.username && s.username !== '豆瓣榜单') {
-          typeBadge += `<span class="px-1.5 py-0.5 rounded bg-emerald-50 dark:bg-emerald-950/70 text-emerald-700 dark:text-emerald-300 border border-emerald-200/70 dark:border-emerald-800 text-[10px] ml-1">👤 手动订阅</span>`;
-        }
+      let cardsHtml = '';
+      for (let i = 0; i < initialLimit; i++) {
+        cardsHtml += _buildSubscriptionCardHtml(list[i], i);
+      }
 
-        const lqBadges = (s.low_quality_reasons || []).map(r =>
-          `<span class="px-1.5 py-0.5 rounded bg-rose-50 dark:bg-rose-950/60 text-rose-600 dark:text-rose-300 border border-rose-200 dark:border-rose-800 text-[10px] font-medium">⚠️ ${escapeHtml(r)}</span>`
-        ).join('');
+      container.innerHTML = `<div id="subListItemsWrap" class="space-y-2">${cardsHtml}</div><div id="subListLoadFooter" class="sub-load-footer mt-2"></div>`;
+      subListRenderedCount = initialLimit;
+      _updateSubListLoadFooter();
+      _attachSubListObserver();
 
-        let confBadge = '';
-        if (s.clean_confidence === 'high') {
-          confBadge = `<span class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-400 font-semibold border border-emerald-200">🟢 ${escapeHtml(s.clean_rule_name)}</span>`;
-        } else if (s.clean_confidence === 'medium') {
-          confBadge = `<span class="text-[10px] px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950 text-amber-700 dark:text-amber-400 font-semibold border border-amber-200">🟡 ${escapeHtml(s.clean_rule_name)}</span>`;
-        } else {
-          confBadge = `<span class="text-[10px] px-2 py-0.5 rounded-full bg-blue-100 dark:bg-blue-950 text-blue-700 dark:text-blue-400 font-semibold border border-blue-200">🔵 ${escapeHtml(s.clean_rule_name)}</span>`;
-        }
+      container.scrollTop = preserveScroll ? prevScrollTop : 0;
+    }
 
-        const stateColor = s.state === 'R' ? 'text-emerald-500' : (s.state === 'P' ? 'text-amber-500' : 'text-slate-400');
-        const stateName = s.state === 'R' ? '运行中' : (s.state === 'P' ? '已暂停' : '已停止');
-
-        let progressHtml = '';
-        if (s.media_type === 'tv') {
-          if (s.cd2_verified) {
-            const srcPill = `<span class="px-1.5 py-0.2 rounded bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 text-[10px] font-bold">CD2 已收录</span>`;
-            let epText = `${s.current_episodes ?? 0} / ${s.total_episodes || '?'} 集`;
-            if (s.lack_episodes != null) epText += ` (缺 ${s.lack_episodes} 集)`;
-            if (s.cd2_source_episodes != null || s.cd2_archive_episodes != null) {
-              epText += ` [源${s.cd2_source_episodes || 0}·归档${s.cd2_archive_episodes || 0}]`;
-            }
-            progressHtml = `${srcPill} <span class="font-mono text-slate-700 dark:text-slate-200 font-semibold">${epText}</span>`;
-          } else {
-            progressHtml = `<span class="px-1.5 py-0.2 rounded bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800 text-[10px] font-medium">CD2 未核验</span> <span class="text-slate-400 text-[11px]">请点击「查询最新订阅数据」（总 ${s.total_episodes || '?'} 集）</span>`;
-          }
-        } else {
-          const movLibPill = s.cd2_verified
-            ? (s.cd2_in_library
-                ? `<span class="px-1.5 py-0.2 rounded bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 text-[10px] font-bold" title="${escapeHtml((s.cd2_paths || []).join(' ; '))}">🟢 CD2 已入库</span>`
-                : `<span class="px-1.5 py-0.2 rounded bg-slate-100 dark:bg-slate-800 text-slate-500 text-[10px]">⚪ CD2 未入库</span>`)
-            : `<span class="px-1.5 py-0.2 rounded bg-slate-100 dark:bg-slate-800 text-slate-400 text-[10px]">待查 CD2</span>`;
-          progressHtml = `${movLibPill} <span class="font-mono text-slate-600 dark:text-slate-300">${s.year ? `${s.year} 年公映` : '电影'}</span>`;
-        }
-
-        // 展示统一查询中已通过 MoviePilot 搜寻出的站点补缺资源信息
-        let resourceBoxHtml = '';
-        if (s.resource_status === 'downloadable') {
-          const tList = (s.resource_torrents || []).slice(0, 2).map(t =>
-            `<span class="inline-flex items-center gap-1 px-1.5 py-0.2 rounded bg-white dark:bg-slate-900 border border-emerald-200 dark:border-emerald-800 text-[10px]"><b class="text-emerald-700 dark:text-emerald-400">[${escapeHtml(t.site_name || 'PT')}]</b> 做种${t.seeders} · ${escapeHtml(t.size_display)} · <span class="truncate max-w-xs" title="${escapeHtml(t.title)}">${escapeHtml(t.title)}</span></span>`
-          ).join(' ');
-          resourceBoxHtml = `
-            <div class="text-xs p-2 rounded-lg bg-emerald-50/80 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/70 text-emerald-800 dark:text-emerald-200 space-y-1">
-              <div class="flex flex-wrap items-center gap-1.5">
-                <span class="font-bold">🎯 站点有源可补缺：</span>
-                <span>${escapeHtml(s.resource_plan_summary || s.resource_reason || '')}</span>
-              </div>
-              ${tList ? `<div class="flex flex-wrap gap-1">${tList}</div>` : ''}
-            </div>`;
-        } else if (s.resource_status === 'already_queued') {
-          resourceBoxHtml = `
-            <div class="text-xs px-2.5 py-1.5 rounded-lg bg-indigo-50/80 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800 text-indigo-700 dark:text-indigo-300 font-medium">
-              ⏬ 已推送至 MoviePilot 下载队列：${escapeHtml(s.resource_reason || '')}
-            </div>`;
-        } else if (
-          (s.clean_rule === 'stalled' || (s.media_type === 'movie' && (s.clean_rule === 'zombie' || s.clean_rule === 'douban_stale'))) &&
-          (s.resource_status === 'no_resource' || s.resource_status === 'skipped' || s.resource_status === 'error')
-        ) {
-          resourceBoxHtml = `
-            <div class="text-[11px] px-2.5 py-1 rounded-lg bg-amber-50/60 dark:bg-amber-950/20 border border-amber-200/70 dark:border-amber-900/50 text-amber-800 dark:text-amber-300">
-              ⚪ 站点搜寻结论：${escapeHtml(s.resource_reason || '全网补缺站点暂无合格资源（建议取消订阅）')}
-            </div>`;
-        }
-
-        return `
-          <div class="p-3.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 flex items-start justify-between gap-3 hover:border-indigo-300 dark:hover:border-indigo-700 transition shadow-2xs">
-            <div class="flex items-start space-x-3.5 min-w-0 flex-1">
-              <div class="w-12 h-16 sm:w-14 sm:h-20 rounded-lg bg-slate-100 dark:bg-slate-800 flex-shrink-0 overflow-hidden relative border border-slate-200 dark:border-slate-700 shadow-2xs">
-                ${s.poster ? `<img src="${s.poster}" class="w-full h-full object-cover" onerror="this.style.display='none'">` : ''}
-                <div class="absolute inset-0 flex items-center justify-center text-slate-400 text-sm pointer-events-none">
-                  <i class="fa-solid fa-${s.media_type === 'movie' ? 'film' : 'tv'}"></i>
-                </div>
-              </div>
-              <div class="min-w-0 flex-1 space-y-1.5">
-                <div class="flex flex-wrap items-center gap-1.5">
-                  <h4 class="text-sm font-bold text-slate-900 dark:text-white leading-snug break-words">${escapeHtml(s.name)}</h4>
-                  <span class="text-xs text-slate-500 font-mono font-medium">${s.year ? `(${s.year})` : ''}</span>
-                  ${typeBadge}
-                  ${lqBadges}
-                  ${s.tmdb_id ? `<span class="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-400 font-mono text-[10px]">TMDB: ${s.tmdb_id}</span>` : ''}
-                  <span class="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-400 font-mono text-[10px]">ID: ${s.id}</span>
-                </div>
-                <div class="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-                  <span class="inline-flex items-center gap-1 font-medium"><i class="fa-solid fa-circle text-[6px] ${stateColor}"></i>${stateName}</span>
-                  <span class="text-slate-300 dark:text-slate-700">|</span>
-                  <span class="inline-flex items-center gap-1.5">${progressHtml}</span>
-                </div>
-                <div class="text-xs text-slate-600 dark:text-slate-300 flex items-start gap-1.5 pt-0.5 bg-slate-50 dark:bg-slate-950/40 p-1.5 rounded-lg border border-slate-100 dark:border-slate-800/60">
-                  <i class="fa-solid fa-circle-info text-indigo-400 text-xs mt-0.5 flex-shrink-0"></i>
-                  <span class="leading-normal">${escapeHtml(s.clean_reason)}</span>
-                </div>
-                ${resourceBoxHtml}
-              </div>
-            </div>
-
-            <div class="flex flex-col items-end space-y-2 flex-shrink-0 ml-2">
-              ${confBadge}
-              <div class="flex items-center gap-1.5 pt-1">
-                ${s.resource_status === 'downloadable' ? `<button onclick="pushSingleSubGapFill(${s.id})" class="px-2.5 py-1 text-xs rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold transition shadow-2xs" title="一键推送已搜出的补缺种子至 MoviePilot">📥 补缺下载</button>` : ''}
-                ${s.state === 'R' ? `<button onclick="toggleSubStatus(${s.id}, 'S')" class="px-2 py-0.8 text-xs rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 hover:bg-amber-100 transition font-medium" title="置为暂停观察">暂停</button>` : `<button onclick="toggleSubStatus(${s.id}, 'R')" class="px-2 py-0.8 text-xs rounded-lg border border-indigo-300 dark:border-indigo-700 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 transition font-medium" title="恢复活跃追更">恢复</button>`}
-                <button onclick="triggerDeleteSingleSub(${s.id})" class="px-2 py-0.8 text-xs rounded-lg border border-rose-300 dark:border-rose-700 bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 hover:bg-rose-100 dark:hover:bg-rose-900/60 transition font-medium" title="取消此条订阅（绝不删除本地媒体文件）">取消订阅</button>
-              </div>
-            </div>
-          </div>
-        `;
-      }).join('');
+    function _formatGapFillPushAlert(res, fallbackMsg) {
+      const baseMsg = (res && res.message) || fallbackMsg || '推送完成';
+      const details = Array.isArray(res && res.details) ? res.details : [];
+      const failed = details.filter(d => d && d.ok === false);
+      if (failed.length === 0) return baseMsg;
+      const lines = failed.slice(0, 10).map(d => {
+        const siteTag = (Array.isArray(d.sites) && d.sites.length > 0) ? `[${d.sites.join('/')}] ` : '';
+        return `• ${d.name || ('#' + d.sub_id)} ${siteTag}：${d.error || 'MP 拒绝提交'}`;
+      });
+      if (failed.length > 10) {
+        lines.push(`... 另有 ${failed.length - 10} 部失败`);
+      }
+      return `${baseMsg}\n\n失败明细：\n${lines.join('\n')}`;
     }
 
     async function pushSingleSubGapFill(subId) {
@@ -8619,7 +9161,7 @@
           method: 'POST',
           body: JSON.stringify({ audit_id: 'unified', sub_ids: [subId] })
         });
-        alert(res.message || '推送完成');
+        alert(_formatGapFillPushAlert(res, '推送完成'));
         await loadSubscriptions({ cachedOnly: true });
       } catch (e) {
         alert('补缺下载推送失败: ' + e.message);
@@ -8630,7 +9172,11 @@
       await planSubOperation(subId, false);
     }
 
-    // ── 按当前分类直接打开「批量取消订阅」确认弹窗（零二次远程请求，直接复用已查询数据） ──
+    function isBatchCleanupSourceMode(mediaType, mode) {
+      return mediaType === 'tv' && ['partial_stalled', 'never_downloaded', 'short_tv', 'low_quality'].includes(mode);
+    }
+
+    // ── 按当前分类直接打开「批量取消订阅 / 批量取消订阅+删源」确认弹窗（零二次远程请求，直接复用已查询数据） ──
     function openCategoryBatchUnsubModal(mode = 'safe') {
       currentCleanMode = mode;
       openModal('subCleanModal');
@@ -8647,30 +9193,33 @@
       if (searchInput) searchInput.value = '';
       modalSearchQuery = '';
 
+      const willCleanupSource = isBatchCleanupSourceMode(currentMediaTab, mode);
       const modeMetaMap = {
         safe: {
           title: currentMediaTab === 'tv' ? '🟢 全季完结 · 批量一键取消订阅' : '🟢 已入库完成 (CD2) · 批量一键取消订阅',
-          sub: '以下条目在 CD2 实盘中已核实收齐/入库完成，取消订阅仅移除 MoviePilot 追更任务，绝不删文件',
+          sub: '以下条目在 CD2 实盘中已核实收齐/入库完成，确认执行后仅取消 MoviePilot 订阅，绝不删除任何本地文件',
         },
         partial_stalled: {
-          title: '🟡 部分已下·断更 · 批量取消订阅',
-          sub: '默认为您勾选「站点暂无合格补缺资源」的断更剧集（已搜出可补缺资源的剧集默认不勾选，防止误退订）',
+          title: '🟡 部分已下·断更 · 批量取消订阅+删源',
+          sub: '默认勾选「站点暂无合格资源」的断更剧集；确认执行后将取消订阅并彻底删除 CD2 受控源目录对应季文件夹（无其它季时一并删剧集空目录并刷新 CD2；绝不删归档库）',
         },
         never_downloaded: {
-          title: '⚫ 零进度死种 · 批量取消订阅',
-          sub: '以下剧集自订阅起至今在 CD2 实盘中 0 集入库，可勾选后一键批量取消订阅',
+          title: '⚫ 零进度死种 · 批量取消订阅+删源',
+          sub: '以下剧集自订阅起至今 CD2 实盘 0 集入库；确认执行后将取消订阅并清理源端残留目录（源端无文件时自动安全仅退订）',
         },
         short_tv: {
-          title: '🟣 微短剧停滞 · 批量取消订阅',
-          sub: '以下为多维识别出的停滞微短剧（已排除国漫、纪录片与多季综艺），可一键批量取消订阅',
+          title: '🟣 疑似短剧 · 批量取消订阅+删源',
+          sub: '以下为多维识别出的疑似短剧（已排除动漫、纪录片与多季综艺）；确认执行后将取消订阅并彻底删除 CD2 受控源目录对应季文件夹与空剧集目录（仅在归档库的条目将自动跳过删源、保留归档文件）',
         },
         low_quality: {
-          title: '⚠️ 异常特征 · 批量取消订阅',
-          sub: '以下为无封面图、繁体字标题、小语种、无中文译名或垃圾占位词条（未入库项），可一键批量取消订阅',
+          title: currentMediaTab === 'tv' ? '⚠️ 异常特征 · 批量取消订阅+删源' : '⚠️ 异常特征 · 批量取消订阅',
+          sub: currentMediaTab === 'tv'
+            ? '以下为无封面图、繁体字、小语种或垃圾占位词条（未入库项）；确认执行后将取消订阅并彻底清理受控源目录（绝不删归档库）'
+            : '以下为无封面图、繁体字、小语种或垃圾占位词条（未入库项）；确认执行后仅取消电影订阅，绝不删本地文件',
         },
         old_zombie: {
           title: '🟠 往年老片死种 · 批量取消订阅',
-          sub: '默认为您勾选「站点暂无合格资源」的往年未入库电影，可核对后一键批量取消订阅',
+          sub: '默认为您勾选「站点暂无合格资源」的往年未入库电影，确认执行后仅取消电影订阅，绝不删本地文件',
         }
       };
 
@@ -8679,8 +9228,8 @@
       if (subTitleEl) subTitleEl.textContent = meta.sub;
       if (hintEl) {
         hintEl.textContent = currentMediaTab === 'tv'
-          ? '活跃连载与受保护剧集已自动排除'
-          : '待映新片与受保护电影已自动排除';
+          ? (willCleanupSource ? '仅清理受控源目录，归档成品库与活跃连载绝对锁定保护' : '活跃连载与受保护剧集已自动排除，且仅退订不删文件')
+          : '待映新片与受保护电影已自动排除，且仅退订不删文件';
       }
 
       // 直接从已查询的 allSubscriptions 中提取本类别的条目（0 毫秒响应，无需再发请求）
@@ -8706,6 +9255,7 @@
         media_type: currentMediaTab,
         mode: mode,
         mode_name: meta.title,
+        cleanup_source: willCleanupSource,
         matched_count: normalized.length,
         to_clean: normalized,
       };
@@ -8851,7 +9401,7 @@
 
           <div onclick="selectCleanMode('short_tv')" id="cleanModeShortTvCard" class="cursor-pointer p-2.5 rounded-xl border border-slate-200 dark:border-slate-800 hover:border-purple-400 transition">
             <div class="flex items-center justify-between font-bold text-purple-800 dark:text-purple-300">
-              <span>🟣 微短剧停滞</span>
+              <span>🟣 疑似短剧</span>
               <i class="fa-solid fa-bolt text-purple-600"></i>
             </div>
             <p class="text-[10px] text-slate-500 dark:text-slate-400 mt-1">多维识别短剧（排动漫综艺）</p>
@@ -9015,10 +9565,39 @@
       }
     }
 
+    const MODAL_LIST_INITIAL_BATCH = 30;
+    const MODAL_LIST_PAGE_SIZE = 40;
+    let modalCleanActiveItems = [];
+    let modalCleanRenderedCount = 0;
+    let modalCleanObserver = null;
+    let modalSearchDebounceTimer = null;
+
     function filterModalCleanList() {
       const input = document.getElementById('modalSearchInput');
       modalSearchQuery = (input?.value || '').trim().toLowerCase();
-      renderModalCleanItems();
+      if (modalSearchDebounceTimer) clearTimeout(modalSearchDebounceTimer);
+      if (!modalSearchQuery) {
+        renderModalCleanItems();
+        return;
+      }
+      modalSearchDebounceTimer = setTimeout(() => {
+        modalSearchDebounceTimer = null;
+        renderModalCleanItems();
+      }, 150);
+    }
+
+    function _syncModalCheckboxDom() {
+      const listEl = document.getElementById('modalCleanList');
+      if (!listEl) return;
+      const cards = listEl.querySelectorAll('[data-modal-sub-id]');
+      for (let i = 0; i < cards.length; i++) {
+        const card = cards[i];
+        const sid = Number(card.getAttribute('data-modal-sub-id'));
+        const checked = modalSelectedIds.has(sid);
+        card.classList.toggle('is-checked', checked);
+        const cb = card.querySelector('input[type="checkbox"]');
+        if (cb && cb.checked !== checked) cb.checked = checked;
+      }
     }
 
     function toggleSelectAllCleanSubs(select) {
@@ -9026,10 +9605,9 @@
       const allItems = currentPreviewData.to_clean;
       const filtered = modalSearchQuery
         ? allItems.filter(item =>
-            (item.name || '').toLowerCase().includes(modalSearchQuery) ||
-            String(item.year || '').includes(modalSearchQuery) ||
-            String(item.tmdb_id || '').includes(modalSearchQuery) ||
-            (item.clean_reason || '').toLowerCase().includes(modalSearchQuery)
+            (item._searchKey || (
+              (item.name || '') + ' ' + (item.year || '') + ' ' + (item.tmdb_id || '') + ' ' + (item.clean_reason || '')
+            ).toLowerCase()).includes(modalSearchQuery)
           )
         : allItems;
 
@@ -9043,7 +9621,7 @@
         }
       }
       updateSelectedCount();
-      renderModalCleanItems();
+      _syncModalCheckboxDom();
     }
 
     function toggleModalItemCheck(subId, checked) {
@@ -9053,6 +9631,8 @@
         modalSelectedIds.delete(subId);
       }
       updateSelectedCount();
+      const card = document.querySelector(`[data-modal-sub-id="${subId}"]`);
+      if (card) card.classList.toggle('is-checked', checked);
     }
 
     function updateSelectedCount() {
@@ -9060,25 +9640,246 @@
       const selEl = document.getElementById('modalSelectedCount');
       if (selEl) selEl.textContent = selCount;
 
+      const mediaType = (currentPreviewData && currentPreviewData.media_type) || currentMediaTab;
+      const mode = (currentPreviewData && currentPreviewData.mode) || currentCleanMode;
+      const cleanupSource = Boolean(
+        currentPreviewData && currentPreviewData.cleanup_source !== undefined
+          ? currentPreviewData.cleanup_source
+          : isBatchCleanupSourceMode(mediaType, mode)
+      );
+
       const btnText = document.getElementById('modalConfirmBtnText');
-      if (btnText) btnText.textContent = selCount > 0 ? `确认执行退订 (${selCount}项)` : '请勾选退订条目';
+      if (btnText) {
+        if (selCount > 0) {
+          btnText.textContent = cleanupSource ? `确认执行退订+删源 (${selCount}项)` : `确认执行退订 (${selCount}项)`;
+        } else {
+          btnText.textContent = cleanupSource ? '请勾选退订+删源条目' : '请勾选退订条目';
+        }
+      }
 
       const confirmBtn = document.getElementById('modalConfirmCleanBtn');
       if (confirmBtn) {
         confirmBtn.disabled = selCount === 0;
         confirmBtn.className = selCount === 0
           ? "px-4 py-1.5 rounded-lg bg-slate-300 dark:bg-slate-700 text-slate-500 cursor-not-allowed text-xs font-bold flex items-center gap-1.5"
-          : (currentCleanMode === 'safe'
-              ? "px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition"
-              : "px-4 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition");
+          : (cleanupSource
+              ? "px-4 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition"
+              : (mode === 'safe'
+                  ? "px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition"
+                  : "px-4 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition"));
       }
+    }
+
+    function _disconnectModalCleanObserver() {
+      if (modalCleanObserver) {
+        modalCleanObserver.disconnect();
+        modalCleanObserver = null;
+      }
+    }
+
+    function _buildModalCleanCardHtml(item, idx) {
+      const isMovie = item.media_type === 'movie';
+      const isChecked = modalSelectedIds.has(item.id);
+
+      let typeBadge = isMovie
+        ? `<span class="sub-chip sub-chip-mov"><i class="fa-solid fa-film text-[10px] mr-1"></i>电影</span>`
+        : `<span class="sub-chip sub-chip-mono sub-chip-tv"><i class="fa-solid fa-tv text-[10px] mr-1"></i>S${String(item.season || 1).padStart(2, '0')}</span>`;
+
+      const shortTvBadge = item.is_short_tv
+        ? `<span class="sub-chip sub-chip-short" title="${escapeHtml(item.short_drama_reason || '微短剧特征')}">短剧</span>`
+        : '';
+
+      const manualBadge = (item.username && item.username !== '豆瓣榜单')
+        ? `<span class="sub-chip sub-chip-manual">👤 手动订阅</span>`
+        : '';
+
+      const lqModalBadges = (item.low_quality_reasons && item.low_quality_reasons.length)
+        ? item.low_quality_reasons.map(r => `<span class="sub-chip sub-chip-lq">⚠️ ${escapeHtml(r)}</span>`).join('')
+        : '';
+
+      const tmdbBadge = item.tmdb_id
+        ? `<span class="sub-chip sub-chip-mono sub-chip-meta">TMDB: ${item.tmdb_id}</span>`
+        : '';
+
+      const stateCode = (item.state || 'R').toUpperCase();
+      const stateColor = stateCode === 'R' ? 'text-emerald-500' : (stateCode === 'P' ? 'text-amber-500' : 'text-slate-400');
+      const stateName = stateCode === 'R' ? '运行中' : (stateCode === 'P' ? '已暂停' : '已停止');
+
+      const willCleanupSource = Boolean(currentPreviewData && currentPreviewData.cleanup_source);
+      const compEp = Number(item.completed_episodes ?? 0);
+      const srcEp = Number(item.cd2_source_episodes ?? 0);
+      const archEp = Number(item.cd2_archive_episodes ?? 0);
+
+      let libraryBadge = '';
+      if (!item.cd2_verified) {
+        libraryBadge = `<span class="sub-chip sub-pill-warn">CD2 未核验</span>`;
+      } else if (!isMovie) {
+        libraryBadge = compEp > 0
+          ? `<span class="sub-chip sub-pill-ok"><i class="fa-solid fa-check text-[10px] mr-1"></i>CD2 已收录</span>`
+          : `<span class="sub-chip sub-pill-muted">CD2 未收录</span>`;
+        if (compEp > 0 && srcEp === 0 && archEp > 0) {
+          libraryBadge += ` <span class="sub-chip sub-pill-arch" title="归档成品库受严格保护">${willCleanupSource ? '仅在归档库（退订后保留归档文件）' : '仅在归档库'}</span>`;
+        }
+      } else if (item.in_library_status === 'in_library') {
+        libraryBadge = `<span class="sub-chip sub-pill-ok"><i class="fa-solid fa-check text-[10px] mr-1"></i>CD2 已入库</span>`;
+      } else {
+        libraryBadge = `<span class="sub-chip sub-pill-muted">CD2 未入库</span>`;
+      }
+
+      let progressDesc = '';
+      if (!isMovie) {
+        if (item.cd2_verified) {
+          progressDesc = compEp > 0
+            ? `CD2 已收录 ${compEp} / ${item.total_episodes ?? '?'} 集`
+            : `CD2 未收录（0 / ${item.total_episodes ?? '?'} 集）`;
+          if (item.lack_episodes != null) progressDesc += ` (缺 ${item.lack_episodes} 集)`;
+          if (item.cd2_source_episodes != null || item.cd2_archive_episodes != null) {
+            progressDesc += ` [源${srcEp}·归档${archEp}]`;
+          }
+        } else {
+          progressDesc = `CD2 未核验（总 ${item.total_episodes ?? '?'} 集）`;
+        }
+      } else {
+        if (item.release_stage === 'in_theaters') progressDesc = '院线热映中';
+        else if (item.release_stage === 'upcoming_theatrical') progressDesc = '待映新片';
+        else if (item.release_stage === 'digital_pending') progressDesc = '数字版待发';
+        else progressDesc = item.year ? `${item.year} 年公映` : '电影';
+      }
+
+      const modalCd2PathsHtml = _renderSubCd2PathsHtml(item.cd2_paths);
+
+      const confBorder = item.clean_confidence === 'high'
+        ? 'border-emerald-200 dark:border-emerald-900/40 bg-emerald-50/50 dark:bg-emerald-950/20'
+        : 'border-amber-200 dark:border-amber-900/40 bg-amber-50/50 dark:bg-amber-950/20';
+
+      const confBadge = item.clean_confidence === 'high'
+        ? `<span class="sub-conf sub-conf-high">🟢 安全退订</span>`
+        : `<span class="sub-conf sub-conf-med">🟡 建议复核</span>`;
+
+      let actionsHtml = `
+        <button onclick="checkSubMediaServer(${item.id})" class="px-2.5 py-1 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 transition font-medium flex items-center gap-1 shadow-sm" title="实时核验 CD2 实盘入库状态">
+          <i class="fa-solid fa-hard-drive text-[10px] text-slate-400"></i>核验CD2
+        </button>
+        <button onclick="checkSubResource(${item.id})" class="px-2.5 py-1 text-xs rounded-lg border border-indigo-200 dark:border-indigo-800 bg-indigo-50/60 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 transition font-medium flex items-center gap-1 shadow-sm" title="核查站点可用资源与做种状态">
+          <i class="fa-solid fa-bolt text-[10px]"></i>资源
+        </button>
+        <button onclick="planSubOperation(${item.id}, false)" class="px-2.5 py-1 text-xs rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/50 text-amber-700 dark:text-amber-300 transition font-semibold flex items-center gap-1 shadow-sm" title="单条立即取消订阅，绝对不删除媒体文件">
+          <i class="fa-solid fa-ban text-[10px]"></i>仅退订
+        </button>
+      `;
+      if (!isMovie) {
+        actionsHtml += `
+          <button onclick="planSubOperation(${item.id}, true)" class="px-2.5 py-1 text-xs rounded-lg border border-rose-300 dark:border-rose-700 bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/50 text-rose-700 dark:text-rose-300 transition font-semibold flex items-center gap-1 shadow-sm" title="仅限剧集：退订并联动清理源季文件夹">
+            <i class="fa-solid fa-trash-can text-[10px]"></i>退订+删源
+          </button>
+        `;
+      }
+
+      const posterUrl = _subPosterUrl(item.poster);
+      const isDeferred = idx >= 8;
+      const imgLoadingAttr = idx < 6 ? 'loading="eager"' : 'loading="lazy" fetchpriority="low"';
+
+      return `
+      <div data-modal-sub-id="${item.id}" class="sub-modal-card${isChecked ? ' is-checked' : ''}${isDeferred ? ' sub-modal-card-deferred' : ''}">
+        <div class="sub-card-main">
+          <div class="flex flex-col items-center justify-center pt-1 flex-shrink-0">
+            <input type="checkbox" class="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer" ${isChecked ? 'checked' : ''} onchange="toggleModalItemCheck(${item.id}, this.checked)">
+            <span class="text-[10px] text-slate-400 font-mono mt-1">${idx + 1}</span>
+          </div>
+          <div class="sub-poster">
+            ${posterUrl ? `<img src="${posterUrl}" alt="" width="56" height="80" decoding="async" ${imgLoadingAttr} onerror="this.style.display='none'">` : ''}
+            <div class="sub-poster-fallback"><i class="fa-solid fa-${isMovie ? 'film' : 'tv'}"></i></div>
+          </div>
+          <div class="sub-info">
+            <div class="sub-title-row">
+              <h4 class="sub-title">${escapeHtml(item.name)}</h4>
+              ${item.year ? `<span class="sub-year">(${item.year})</span>` : ''}
+              ${typeBadge}
+              ${shortTvBadge}
+              ${manualBadge}
+              ${lqModalBadges}
+              ${tmdbBadge}
+              <span class="sub-chip sub-chip-mono sub-chip-meta">ID: ${item.id}</span>
+            </div>
+            <div class="sub-meta-row">
+              <span class="inline-flex items-center gap-1 font-medium"><i class="fa-solid fa-circle text-[7px] ${stateColor}"></i><span>${stateName}</span></span>
+              <span class="sub-sep">|</span>
+              ${libraryBadge}
+              <span class="sub-sep">|</span>
+              <span class="sub-ep-text"><i class="fa-solid fa-layer-group text-slate-400 mr-1"></i>${progressDesc}</span>
+            </div>
+            ${modalCd2PathsHtml}
+            <div class="text-xs p-2 rounded-lg border ${confBorder} text-slate-700 dark:text-slate-300 flex items-start gap-2">
+              <span class="font-bold flex-shrink-0 text-amber-700 dark:text-amber-400">【${escapeHtml(item.clean_rule_name)}】</span>
+              <span class="leading-normal flex-1">${escapeHtml(item.clean_reason)}</span>
+              <div class="flex-shrink-0 ml-1">${confBadge}</div>
+            </div>
+          </div>
+        </div>
+        <div class="flex md:flex-col items-end justify-between md:justify-center gap-2 flex-shrink-0 pt-2 md:pt-0 border-t md:border-t-0 border-slate-100 dark:border-slate-800">
+          <div class="flex items-center gap-1.5">${actionsHtml}</div>
+        </div>
+      </div>`;
+    }
+
+    function _updateModalCleanFooter() {
+      const footer = document.getElementById('modalCleanLoadFooter');
+      if (!footer) return;
+      const total = modalCleanActiveItems.length;
+      const shown = modalCleanRenderedCount;
+      if (shown < total) {
+        const nextChunk = Math.min(MODAL_LIST_PAGE_SIZE, total - shown);
+        footer.innerHTML = `
+          <span>已显示 <b>${shown}</b> / <b>${total}</b> 项（全选/取消全选将对全部 ${total} 项生效）</span>
+          <button type="button" onclick="renderMoreModalCleanItems()" class="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold transition">加载更多 (+${nextChunk})</button>`;
+      } else {
+        footer.innerHTML = `<span>已全部展示共 <b>${total}</b> 项</span>`;
+      }
+    }
+
+    function renderMoreModalCleanItems(batchSize = MODAL_LIST_PAGE_SIZE) {
+      const wrap = document.getElementById('modalCleanItemsWrap');
+      if (!wrap || modalCleanRenderedCount >= modalCleanActiveItems.length) {
+        _disconnectModalCleanObserver();
+        _updateModalCleanFooter();
+        return;
+      }
+      const start = modalCleanRenderedCount;
+      const end = Math.min(start + batchSize, modalCleanActiveItems.length);
+      let html = '';
+      for (let i = start; i < end; i++) {
+        html += _buildModalCleanCardHtml(modalCleanActiveItems[i], i);
+      }
+      wrap.insertAdjacentHTML('beforeend', html);
+      modalCleanRenderedCount = end;
+      _updateModalCleanFooter();
+      if (modalCleanRenderedCount >= modalCleanActiveItems.length) {
+        _disconnectModalCleanObserver();
+      }
+    }
+
+    function _attachModalCleanObserver() {
+      _disconnectModalCleanObserver();
+      if (typeof IntersectionObserver === 'undefined') return;
+      const listEl = document.getElementById('modalCleanList');
+      const footer = document.getElementById('modalCleanLoadFooter');
+      if (!listEl || !footer || modalCleanRenderedCount >= modalCleanActiveItems.length) return;
+      modalCleanObserver = new IntersectionObserver((entries) => {
+        if (entries.some(e => e.isIntersecting)) {
+          renderMoreModalCleanItems();
+        }
+      }, { root: listEl, rootMargin: '220px 0px' });
+      modalCleanObserver.observe(footer);
     }
 
     function renderModalCleanItems() {
       const listEl = document.getElementById('modalCleanList');
       if (!listEl) return;
+      _disconnectModalCleanObserver();
 
       if (!currentPreviewData || !Array.isArray(currentPreviewData.to_clean) || currentPreviewData.to_clean.length === 0) {
+        modalCleanActiveItems = [];
+        modalCleanRenderedCount = 0;
         listEl.innerHTML = `
           <div class="p-12 text-center text-slate-400">
             <i class="fa-solid fa-shield-halved text-3xl mb-3 text-emerald-500 block"></i>
@@ -9091,14 +9892,15 @@
       let items = currentPreviewData.to_clean;
       if (modalSearchQuery) {
         items = items.filter(item =>
-          (item.name || '').toLowerCase().includes(modalSearchQuery) ||
-          String(item.year || '').includes(modalSearchQuery) ||
-          String(item.tmdb_id || '').includes(modalSearchQuery) ||
-          (item.clean_reason || '').toLowerCase().includes(modalSearchQuery)
+          (item._searchKey || (
+            (item.name || '') + ' ' + (item.year || '') + ' ' + (item.tmdb_id || '') + ' ' + (item.clean_reason || '')
+          ).toLowerCase()).includes(modalSearchQuery)
         );
       }
 
       if (items.length === 0) {
+        modalCleanActiveItems = [];
+        modalCleanRenderedCount = 0;
         listEl.innerHTML = `
           <div class="p-8 text-center text-slate-400">
             <i class="fa-solid fa-magnifying-glass text-2xl mb-2 text-slate-300 dark:text-slate-700 block"></i>
@@ -9108,165 +9910,17 @@
         return;
       }
 
-      listEl.innerHTML = items.map((item, idx) => {
-        const isMovie = item.media_type === 'movie';
-        const isChecked = modalSelectedIds.has(item.id);
-
-        // 媒体类型与专属标签
-        let typeBadge = '';
-        if (isMovie) {
-          typeBadge = `<span class="px-2 py-0.5 rounded font-semibold bg-purple-50 text-purple-700 dark:bg-purple-950/70 dark:text-purple-300 border border-purple-200 dark:border-purple-800 text-[11px] flex items-center gap-1"><i class="fa-solid fa-film text-[10px]"></i>电影</span>`;
-        } else {
-          typeBadge = `<span class="px-2 py-0.5 rounded font-semibold bg-indigo-50 text-indigo-700 dark:bg-indigo-950/70 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800 text-[11px] font-mono flex items-center gap-1"><i class="fa-solid fa-tv text-[10px]"></i>S${String(item.season || 1).padStart(2, '0')}</span>`;
-        }
-
-        const shortTvBadge = item.is_short_tv
-          ? `<span class="px-2 py-0.5 rounded font-semibold bg-fuchsia-50 text-fuchsia-700 dark:bg-fuchsia-950/70 dark:text-fuchsia-300 border border-fuchsia-200 dark:border-fuchsia-800 text-[11px]" title="${escapeHtml(item.short_drama_reason || '微短剧特征')}">短剧</span>`
-          : '';
-
-        const manualBadge = (item.username && item.username !== '豆瓣榜单')
-          ? `<span class="px-2 py-0.5 rounded font-semibold bg-emerald-50 text-emerald-700 dark:bg-emerald-950/70 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 text-[11px]">👤 手动订阅</span>`
-          : '';
-
-        const lqModalBadges = (item.low_quality_reasons || []).map(r =>
-          `<span class="px-1.5 py-0.5 rounded bg-rose-50 dark:bg-rose-950/60 text-rose-600 dark:text-rose-300 border border-rose-200 dark:border-rose-800 text-[10px] font-medium">⚠️ ${escapeHtml(r)}</span>`
-        ).join('');
-
-        const tmdbBadge = item.tmdb_id
-          ? `<span class="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-500 font-mono text-[10px]">TMDB: ${item.tmdb_id}</span>`
-          : '';
-
-        // 订阅运行状态
-        const stateCode = (item.state || 'R').toUpperCase();
-        const stateColor = stateCode === 'R' ? 'text-emerald-500' : (stateCode === 'P' ? 'text-amber-500' : 'text-slate-400');
-        const stateName = stateCode === 'R' ? '运行中' : (stateCode === 'P' ? '已暂停' : '已停止');
-
-        // 入库状态标签（严格以 CD2 实盘为唯一依据）
-        let libraryBadge = '';
-        if (!item.cd2_verified) {
-          libraryBadge = `<span class="px-2 py-0.5 rounded font-medium bg-amber-50 text-amber-700 dark:bg-amber-950/50 dark:text-amber-300 text-[11px]">CD2 未核验</span>`;
-        } else if (item.in_library_status === 'in_library') {
-          libraryBadge = `<span class="px-2 py-0.5 rounded font-medium bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800/60 text-[11px] flex items-center gap-1"><i class="fa-solid fa-check text-[10px]"></i>CD2 已入库</span>`;
-        } else {
-          libraryBadge = `<span class="px-2 py-0.5 rounded font-medium bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400 border border-slate-200 dark:border-slate-700 text-[11px]">CD2 未入库</span>`;
-        }
-
-        // 进度/公映描述
-        let progressDesc = '';
-        if (!isMovie) {
-          if (item.cd2_verified) {
-            progressDesc = `CD2 已收录 ${item.completed_episodes ?? 0} / ${item.total_episodes ?? '?'} 集`;
-            if (item.lack_episodes != null) {
-              progressDesc += ` (缺 ${item.lack_episodes} 集)`;
-            }
-          } else {
-            progressDesc = `CD2 未核验（总 ${item.total_episodes ?? '?'} 集）`;
-          }
-        } else {
-          if (item.release_stage === 'in_theaters') {
-            progressDesc = '院线热映中';
-          } else if (item.release_stage === 'upcoming_theatrical') {
-            progressDesc = '待映新片';
-          } else if (item.release_stage === 'digital_pending') {
-            progressDesc = '数字版待发';
-          } else {
-            progressDesc = item.year ? `${item.year} 年公映` : '电影';
-          }
-        }
-
-        // 置信度样式
-        const confBorder = item.clean_confidence === 'high'
-          ? 'border-emerald-200 dark:border-emerald-900/40 bg-emerald-50/50 dark:bg-emerald-950/20'
-          : 'border-amber-200 dark:border-amber-900/40 bg-amber-50/50 dark:bg-amber-950/20';
-
-        const confBadge = item.clean_confidence === 'high'
-          ? `<span class="px-2 py-0.5 rounded-full font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 text-[10px]">🟢 安全退订</span>`
-          : `<span class="px-2 py-0.5 rounded-full font-bold bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 text-[10px]">🟡 建议复核</span>`;
-
-        // 按钮组
-        let actionsHtml = `
-          <button onclick="checkSubMediaServer(${item.id})" class="px-2.5 py-1 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 transition font-medium flex items-center gap-1 shadow-2xs" title="实时核验 CD2 实盘入库状态">
-            <i class="fa-solid fa-hard-drive text-[10px] text-slate-400"></i>核验CD2
-          </button>
-          <button onclick="checkSubResource(${item.id})" class="px-2.5 py-1 text-xs rounded-lg border border-indigo-200 dark:border-indigo-800 bg-indigo-50/60 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 transition font-medium flex items-center gap-1 shadow-2xs" title="核查站点可用资源与做种状态">
-            <i class="fa-solid fa-bolt text-[10px]"></i>资源
-          </button>
-          <button onclick="planSubOperation(${item.id}, false)" class="px-2.5 py-1 text-xs rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/50 text-amber-700 dark:text-amber-300 transition font-semibold flex items-center gap-1 shadow-2xs" title="单条立即取消订阅，绝对不删除媒体文件">
-            <i class="fa-solid fa-ban text-[10px]"></i>仅退订
-          </button>
-        `;
-        if (!isMovie) {
-          actionsHtml += `
-            <button onclick="planSubOperation(${item.id}, true)" class="px-2.5 py-1 text-xs rounded-lg border border-rose-300 dark:border-rose-700 bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/50 text-rose-700 dark:text-rose-300 transition font-semibold flex items-center gap-1 shadow-2xs" title="仅限剧集：退订并联动清理已归档的源视频">
-              <i class="fa-solid fa-trash-can text-[10px]"></i>退订+删源
-            </button>
-          `;
-        }
-
-        return `
-        <div class="p-3.5 rounded-xl bg-white dark:bg-slate-900 border ${isChecked ? 'border-indigo-300 dark:border-indigo-700 shadow-sm' : 'border-slate-200 dark:border-slate-800'} hover:border-indigo-400 dark:hover:border-indigo-600 transition flex flex-col md:flex-row md:items-center justify-between gap-3.5">
-          <!-- 左侧：多选框 + 封面图 + 详细元信息 -->
-          <div class="flex items-start gap-3 min-w-0 flex-1">
-            <!-- 勾选与序号 -->
-            <div class="flex flex-col items-center justify-center pt-1 flex-shrink-0">
-              <input type="checkbox" class="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer" ${isChecked ? 'checked' : ''} onchange="toggleModalItemCheck(${item.id}, this.checked)">
-              <span class="text-[10px] text-slate-400 font-mono mt-1">${idx + 1}</span>
-            </div>
-
-            <!-- 海报封面大图 -->
-            <div class="w-14 h-20 rounded-lg bg-slate-100 dark:bg-slate-800 flex-shrink-0 overflow-hidden relative border border-slate-200 dark:border-slate-700 shadow-2xs">
-              ${item.poster ? `<img src="${item.poster}" class="w-full h-full object-cover" onerror="this.style.display='none'">` : ''}
-              <div class="absolute inset-0 flex items-center justify-center text-slate-400 text-base pointer-events-none">
-                <i class="fa-solid fa-${isMovie ? 'film' : 'tv'}"></i>
-              </div>
-            </div>
-
-            <!-- 条目核心信息 -->
-            <div class="min-w-0 flex-1 space-y-1.5">
-              <!-- 第1行：标题与大徽标 -->
-              <div class="flex flex-wrap items-center gap-1.5">
-                <h4 class="text-sm sm:text-base font-bold text-slate-900 dark:text-white leading-snug break-words">${escapeHtml(item.name)}</h4>
-                <span class="text-xs text-slate-500 font-mono font-medium">${item.year ? `(${item.year})` : ''}</span>
-                ${typeBadge}
-                ${shortTvBadge}
-                ${manualBadge}
-                ${lqModalBadges}
-                ${tmdbBadge}
-                <span class="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-400 font-mono text-[10px]">ID: ${item.id}</span>
-              </div>
-
-              <!-- 第2行：状态与入库及集数进度 -->
-              <div class="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-                <span class="inline-flex items-center gap-1 font-medium">
-                  <i class="fa-solid fa-circle text-[7px] ${stateColor}"></i>
-                  <span>${stateName}</span>
-                </span>
-                <span class="text-slate-300 dark:text-slate-700">|</span>
-                ${libraryBadge}
-                <span class="text-slate-300 dark:text-slate-700">|</span>
-                <span class="font-mono text-slate-700 dark:text-slate-300 font-medium">
-                  <i class="fa-solid fa-layer-group text-slate-400 mr-1"></i>${progressDesc}
-                </span>
-              </div>
-
-              <!-- 第3行：智能清理规则依据（高亮提示框） -->
-              <div class="text-xs p-2 rounded-lg ${confBorder} text-slate-700 dark:text-slate-300 flex items-start gap-2">
-                <span class="font-bold flex-shrink-0 text-amber-700 dark:text-amber-400">【${escapeHtml(item.clean_rule_name)}】</span>
-                <span class="leading-normal flex-1">${escapeHtml(item.clean_reason)}</span>
-                <div class="flex-shrink-0 ml-1">${confBadge}</div>
-              </div>
-            </div>
-          </div>
-
-          <!-- 右侧：快捷操作工具栏 -->
-          <div class="flex md:flex-col items-end justify-between md:justify-center gap-2 flex-shrink-0 pt-2 md:pt-0 border-t md:border-t-0 border-slate-100 dark:border-slate-800">
-            <div class="flex items-center gap-1.5">
-              ${actionsHtml}
-            </div>
-          </div>
-        </div>
-        `;
-      }).join('');
+      modalCleanActiveItems = items;
+      const initialLimit = Math.min(items.length, MODAL_LIST_INITIAL_BATCH);
+      let cardsHtml = '';
+      for (let i = 0; i < initialLimit; i++) {
+        cardsHtml += _buildModalCleanCardHtml(items[i], i);
+      }
+      listEl.innerHTML = `<div id="modalCleanItemsWrap" class="space-y-2.5">${cardsHtml}</div><div id="modalCleanLoadFooter" class="sub-load-footer mt-2"></div>`;
+      modalCleanRenderedCount = initialLimit;
+      listEl.scrollTop = 0;
+      _updateModalCleanFooter();
+      _attachModalCleanObserver();
     }
 
     async function checkSubResource(id) {
@@ -9333,6 +9987,7 @@
       if (out && out.ok) {
         const removedId = Number(r.sub_id);
         allSubscriptions = allSubscriptions.filter(s => Number(s.id) !== removedId);
+        rebuildSubBucketIndex();
         if (currentPreviewData && Array.isArray(currentPreviewData.to_clean)) {
           currentPreviewData.to_clean = currentPreviewData.to_clean.filter(x => Number(x.id) !== removedId);
           currentPreviewData.matched_count = currentPreviewData.to_clean.length;
@@ -9366,14 +10021,14 @@
       const barEl = document.getElementById(barId);
       if (boxEl) boxEl.classList.remove('hidden');
       if (msgEl) msgEl.innerHTML = `<i class="fa-solid fa-spinner fa-spin mr-1.5"></i><span>${escapeHtml(initialMsg || '正在执行批量操作...')}</span>`;
-      if (pctEl) pctEl.textContent = '5%';
-      if (barEl) barEl.style.width = '5%';
+      if (pctEl) pctEl.textContent = '0%';
+      if (barEl) barEl.style.width = '0%';
 
       async function _poll() {
         try {
           const st = await api('/api/moviepilot/subscriptions/batch-action/status');
           if (st && (st.status === 'running' || st.status === 'completed')) {
-            const pct = st.progress_pct ?? 5;
+            const pct = st.progress_pct ?? 0;
             const total = st.total || 0;
             const proc = st.processed || 0;
             if (msgEl && st.message) {
@@ -9417,12 +10072,20 @@
       const count = selectedItems.length;
       const totalCount = currentPreviewData.matched_count;
       const modeName = currentPreviewData.mode_name;
-      const mediaName = currentMediaTab === 'movie' ? '电影' : '电视剧';
+      const mediaType = currentPreviewData.media_type || currentMediaTab;
+      const mediaName = mediaType === 'movie' ? '电影' : '电视剧';
+      const cleanupSource = Boolean(
+        currentPreviewData.cleanup_source !== undefined
+          ? currentPreviewData.cleanup_source
+          : isBatchCleanupSourceMode(mediaType, currentPreviewData.mode || currentCleanMode)
+      );
 
       const itemNamesPreview = selectedItems.slice(0, 8).map((x, i) => `${i + 1}. ${x.name} (${x.year || '-'})`).join('\n');
       const moreSuffix = count > 8 ? `\n... 等共 ${count} 部作品` : '';
 
-      const promptText = `【${mediaName}批量退订确认】\n\n模式：${modeName}\n已选退订数量：${count} 项（匹配清单共 ${totalCount} 项）\n\n拟退订作品：\n${itemNamesPreview}${moreSuffix}\n\n安全提示：确认退订后，系统将仅在 MoviePilot 中取消上述条目的订阅追更，绝不会删除本地已有视频、Emby媒体库正片或做种任务。\n\n确认立即执行批量退订？`;
+      const promptText = cleanupSource
+        ? `【${mediaName}批量退订+删源确认】\n\n模式：${modeName}\n已选执行数量：${count} 项（匹配清单共 ${totalCount} 项）\n\n拟退订并删源作品：\n${itemNamesPreview}${moreSuffix}\n\n⚠️ 操作说明：确认后将真实取消上述 MoviePilot 订阅，并彻底删除 CD2 受控源目录下对应的该季文件夹（含视频、字幕、NFO、海报；若该剧无其它季则一并删除剧集空目录并刷新 CD2；源端无文件的条目将安全仅退订；绝不触碰归档成品库）。\n\n确认立即执行批量退订+删源？`
+        : `【${mediaName}批量退订确认】\n\n模式：${modeName}\n已选退订数量：${count} 项（匹配清单共 ${totalCount} 项）\n\n拟退订作品：\n${itemNamesPreview}${moreSuffix}\n\n安全提示：确认退订后，系统将仅在 MoviePilot 中取消上述条目的订阅追更，绝不会删除本地已有视频、Emby媒体库正片或做种任务。\n\n确认立即执行批量退订？`;
 
       if (!confirm(promptText)) return;
 
@@ -9430,7 +10093,7 @@
       const btnText = document.getElementById('modalConfirmBtnText');
       if (confirmBtn) {
         confirmBtn.disabled = true;
-        if (btnText) btnText.textContent = `正在执行退订 (${count}项)...`;
+        if (btnText) btnText.textContent = cleanupSource ? `正在退订+删源 (${count}项)...` : `正在执行退订 (${count}项)...`;
       }
 
       startSubBatchActionPoll({
@@ -9438,7 +10101,9 @@
         msgId: 'modalCleanProgressMsg',
         pctId: 'modalCleanProgressPct',
         barId: 'modalCleanProgressBar',
-        initialMsg: `正在批量取消 ${count} 项订阅，请稍候...`,
+        initialMsg: cleanupSource
+          ? `正在批量执行退订+删源（共 ${count} 项），请稍候...`
+          : `正在批量取消 ${count} 项订阅，请稍候...`,
       });
 
       try {
@@ -9446,15 +10111,15 @@
         const titles = selectedItems.map(x => x.name);
         const res = await api('/api/moviepilot/subscriptions/batch-delete', {
           method: 'POST',
-          body: JSON.stringify({ sub_ids: subIds, titles: titles, force: false })
+          body: JSON.stringify({ sub_ids: subIds, titles: titles, force: false, cleanup_source: cleanupSource })
         });
         stopSubBatchActionPoll('modalCleanProgressBox');
-        alert(res.message || '批量退订已完成');
+        alert(res.message || (cleanupSource ? '批量退订+删源已完成' : '批量退订已完成'));
         closeModal('subCleanModal');
         await loadSubscriptions({ cachedOnly: true });
       } catch (err) {
         stopSubBatchActionPoll('modalCleanProgressBox');
-        alert('批量退订执行遇到异常: ' + err.message);
+        alert((cleanupSource ? '批量退订+删源执行遇到异常: ' : '批量退订执行遇到异常: ') + err.message);
       } finally {
         if (confirmBtn) confirmBtn.disabled = false;
         updateSelectedCount();
@@ -9715,23 +10380,25 @@
         const checked = selSet.has(item.id);
         const torrentsHtml = (item.selected_torrents || []).map(t => `
           <div class="text-[11px] px-2 py-1 rounded bg-emerald-50/70 dark:bg-emerald-950/40 border border-emerald-200/70 dark:border-emerald-900/50 flex flex-wrap items-center gap-2">
-            <span class="px-1.5 py-0.2 rounded bg-emerald-600 text-white font-bold text-[10px]">${escapeHtml(t.site_name || 'PT')}</span>
+            <span class="px-1.5 py-0.5 rounded bg-emerald-600 text-white font-bold text-[10px]">${escapeHtml(t.site_name || 'PT')}</span>
             <span class="font-semibold text-emerald-700 dark:text-emerald-300">做种 ${t.seeders}</span>
             <span class="font-mono text-slate-500">${escapeHtml(t.size_display)}</span>
-            ${t.is_season_pack ? '<span class="px-1.5 py-0.2 rounded bg-indigo-100 text-indigo-700 text-[10px] font-bold">整季包</span>' : ''}
+            ${t.is_season_pack ? '<span class="px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700 text-[10px] font-bold">整季包</span>' : ''}
             ${(t.covered_episodes && t.covered_episodes.length) ? `<span class="font-mono text-indigo-600 dark:text-indigo-400">覆E${t.covered_episodes.slice(0, 8).join(',E')}${t.covered_episodes.length > 8 ? '...' : ''}</span>` : ''}
             <span class="text-slate-700 dark:text-slate-300 truncate max-w-md" title="${escapeHtml(t.title)}">${escapeHtml(t.title)}</span>
           </div>
         `).join('');
 
+        const posterUrl = _subPosterUrl(item.poster);
+        const imgLoadingAttr = idx < 6 ? 'loading="eager"' : 'loading="lazy" fetchpriority="low"';
         return `
-          <div class="p-3 rounded-xl bg-white dark:bg-slate-900 border ${checked ? 'border-indigo-400 dark:border-indigo-600 shadow-sm' : 'border-slate-200 dark:border-slate-800'} flex items-start gap-3 text-xs">
+          <div class="p-3 rounded-xl bg-white dark:bg-slate-900 border ${checked ? 'border-indigo-400 dark:border-indigo-600 shadow-sm' : 'border-slate-200 dark:border-slate-800'} flex items-start gap-3 text-xs${idx >= 8 ? ' sub-card-deferred' : ''}">
             <div class="flex flex-col items-center pt-1 flex-shrink-0">
               <input type="checkbox" class="w-4 h-4 rounded border-slate-300 text-indigo-600 cursor-pointer" ${checked ? 'checked' : ''} onchange="toggleAuditItemCheck(${item.id}, this.checked)">
               <span class="text-[10px] text-slate-400 font-mono mt-1">${idx + 1}</span>
             </div>
             <div class="w-11 h-16 rounded-lg bg-slate-100 dark:bg-slate-800 flex-shrink-0 overflow-hidden relative border border-slate-200 dark:border-slate-700">
-              ${item.poster ? `<img src="${item.poster}" class="w-full h-full object-cover" onerror="this.style.display='none'">` : ''}
+              ${posterUrl ? `<img src="${posterUrl}" alt="" width="44" height="64" decoding="async" ${imgLoadingAttr} class="w-full h-full object-cover" onerror="this.style.display='none'">` : ''}
               <div class="absolute inset-0 flex items-center justify-center text-slate-400 text-xs pointer-events-none"><i class="fa-solid fa-${isMovie ? 'film' : 'tv'}"></i></div>
             </div>
             <div class="min-w-0 flex-1 space-y-1.5">
@@ -9756,7 +10423,7 @@
         return;
       }
       const ids = Array.from(auditSelectedDownloadIds);
-      if (!confirm(`确认将已勾选的 ${ids.length} 部作品的优选种子一键批量推送至 MoviePilot 下载？`)) return;
+      if (!confirm(`确认将已勾选的 ${ids.length} 部作品的优选种子一键批量推送至 MoviePilot 下载？\n\n说明：电视剧补缺推送成功后，将自动清理 MoviePilot「媒体整理」中对应季的旧转移记录（仅删记录，绝不删实体文件），防止下载完成后被跳过整理。`)) return;
 
       const btn = document.getElementById('subAuditPushGapFillBtn');
       const txt = document.getElementById('subAuditPushBtnText');
@@ -9777,7 +10444,7 @@
           body: JSON.stringify({ audit_id: currentSubAuditId || 'unified', sub_ids: ids })
         });
         stopSubBatchActionPoll('subAuditProgressBox');
-        alert(res.message || '批量补缺推送完成');
+        alert(_formatGapFillPushAlert(res, '批量补缺推送完成'));
         auditSelectedDownloadIds.clear();
         if (!currentSubAuditId || currentSubAuditId === 'unified') {
           await loadSubscriptions({ cachedOnly: true });
@@ -10187,7 +10854,7 @@
           <div class="space-y-0.5 min-w-0">
             <div class="flex items-center gap-2 flex-wrap">
               <span class="font-bold text-slate-900 dark:text-white">《${escapeHtml(r.show_title)}》S${String(r.season_number).padStart(2, '0')}</span>
-              <span class="px-1.5 py-0.2 rounded text-[10px] bg-indigo-50 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">${r.scope_kind === 'this_package' ? '同下载包' : '目录模板'}</span>
+              <span class="px-1.5 py-0.5 rounded text-[10px] bg-indigo-50 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">${r.scope_kind === 'this_package' ? '同下载包' : '目录模板'}</span>
               ${r.episode_offset ? `<span class="text-[10px] font-mono text-amber-600">offset=${r.episode_offset}</span>` : ''}
               <span class="text-[11px] text-slate-500 font-mono">命中: ${r.hit_count} 次</span>
             </div>
@@ -10682,9 +11349,9 @@
               <div class="space-y-1.5 min-w-0 flex-1">
                 <div class="flex items-center gap-2 flex-wrap">
                   <span class="font-bold text-slate-900 dark:text-white break-all">${title}</span>
-                  <span class="px-1.5 py-0.2 rounded font-mono text-[10px] ${epBadgeClass}">${epTag}</span>
-                  <span class="px-1.5 py-0.2 rounded bg-indigo-50 dark:bg-indigo-950/70 text-indigo-600 dark:text-indigo-400 font-mono text-[10px]">${resPix}</span>
-                  <span class="px-1.5 py-0.2 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 font-mono text-[10px]">${site}</span>
+                  <span class="px-1.5 py-0.5 rounded font-mono text-[10px] ${epBadgeClass}">${epTag}</span>
+                  <span class="px-1.5 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950/70 text-indigo-600 dark:text-indigo-400 font-mono text-[10px]">${resPix}</span>
+                  <span class="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 font-mono text-[10px]">${site}</span>
                 </div>
                 <div class="text-slate-500 dark:text-slate-400 text-[11px] flex items-center gap-3 font-mono">
                   <span>体积: ${sizeGb} GB</span>

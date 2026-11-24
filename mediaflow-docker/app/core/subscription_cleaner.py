@@ -678,7 +678,7 @@ def diagnose_tv_subscription(sub: Dict[str, Any], now: Optional[datetime] = None
             total_episodes=total_ep, completed_episodes=comp_ep, lack_episodes=lack_ep, state=state, username=username,
             clean_eligible=True, clean_confidence="medium",
             clean_rule="low_quality", clean_rule_name="异常特征待清",
-            clean_reason=f"命中异常/低质特征（{'、'.join(lq_reasons)}），且{'CD2 已收录' if cd2_verified else '当前实存'} 0 集，大概率为无效词条，建议复核或批量退订",
+            clean_reason=f"命中异常/低质特征（{'、'.join(lq_reasons)}），且{'CD2 未收录（实存 0 集）' if cd2_verified else '当前实存 0 集'}，大概率为无效词条，建议复核或批量退订",
             days_inactive=inactive_days, created_days_ago=created_days, is_protected=False,
             is_short_tv=is_short_drama, is_douban_sync=True,
             stalled_kind="never_downloaded", can_gap_fill=False, **common_ext,
@@ -698,12 +698,21 @@ def diagnose_tv_subscription(sub: Dict[str, Any], now: Optional[datetime] = None
     # 门禁 T3：短剧/微短剧虚标长期停滞（Medium Confidence）
     if is_short_drama and (state in ("P", "S") or inactive_days >= 30):
         sd_why = short_drama_reason or "短剧特征"
+        short_ep_desc = (
+            f"CD2 已收录 {comp_ep}/{total_ep or '?'} 集"
+            if (cd2_verified and comp_ep > 0)
+            else (
+                f"CD2 未收录（0/{total_ep or '?'} 集）"
+                if cd2_verified
+                else f"当前 {comp_ep}/{total_ep or '?'} 集"
+            )
+        )
         return SubscriptionDiagnosis(
             sub_id=sub_id, name=name, year=year_str, media_type="tv", season=season,
             total_episodes=total_ep, completed_episodes=comp_ep, lack_episodes=lack_ep, state=state, username=username,
             clean_eligible=True, clean_confidence="medium",
             clean_rule="short_tv_stalled", clean_rule_name="短剧虚标停滞",
-            clean_reason=f"识别为短剧（{sd_why}），已停滞 {inactive_days} 天（{'CD2 已收录' if cd2_verified else '当前'} {comp_ep}/{total_ep or '?'} 集），建议核查退订",
+            clean_reason=f"识别为短剧（{sd_why}），已停滞 {inactive_days} 天（{short_ep_desc}），建议核查退订",
             days_inactive=inactive_days, created_days_ago=created_days, is_protected=False,
             is_short_tv=True, is_douban_sync=is_douban,
             stalled_kind="partial_stalled" if comp_ep > 0 else "never_downloaded",
@@ -731,7 +740,7 @@ def diagnose_tv_subscription(sub: Dict[str, Any], now: Optional[datetime] = None
             total_episodes=total_ep, completed_episodes=0, lack_episodes=lack_ep, state=state, username=username,
             clean_eligible=True, clean_confidence="medium",
             clean_rule="zombie", clean_rule_name="零进度·从未下载",
-            clean_reason=f"自订阅起已逾 {created_days} 天，至今{'CD2 已收录' if cd2_verified else '实存'} 0 集无任何资源入库；适合批量取消订阅（亦可先筛查站点）",
+            clean_reason=f"自订阅起已逾 {created_days} 天，至今{'CD2 未收录（实存 0 集）' if cd2_verified else '实存 0 集'}，无任何资源入库；适合批量取消订阅（亦可先筛查站点）",
             days_inactive=inactive_days, created_days_ago=created_days, is_protected=False,
             is_short_tv=is_short_drama, is_douban_sync=is_douban,
             stalled_kind="never_downloaded", can_gap_fill=True, **common_ext,

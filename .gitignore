@@ -1,7 +1,8 @@
-# 配置文件与凭据（绝不提交任何真实令牌/地址）
+# 配置文件与凭据（绝不提交任何真实令牌/地址，仅放行无敏感信息的 .env.example 模板）
 config.json
 */config.json
 **/*.env*
+!**/*.env.example
 
 # 运行时临时数据与产出
 logs/

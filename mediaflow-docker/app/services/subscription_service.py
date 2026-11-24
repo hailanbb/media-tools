@@ -228,6 +228,8 @@ async def discover_source_season_entries(
     db,
     disk: CloudDrive2Client | None,
     sub: dict[str, Any],
+    *,
+    allow_live_scan: bool = True,
 ) -> list[dict[str, Any]]:
     """只读定位剧集订阅对应的受控源季目录（优先 SeasonRecord；无初检记录时回退 CD2 快照与源根目录实盘扫描）。
 
@@ -295,7 +297,8 @@ async def discover_source_season_entries(
             return list(unique.values())
 
     # 2. 快照未命中或尚未同步时，按 source_root/{电视剧,动漫}/* 实时只读扫描源季目录
-    if disk is None:
+    # 批量清理场景在已有完整 CD2 快照 (tv_scanned_ok=True) 且明确未命中时，直接跳过全盘重扫避免重复耗时
+    if disk is None or (not allow_live_scan and isinstance(snap, dict) and snap.get("tv_scanned_ok")):
         return []
 
     sem = asyncio.Semaphore(4)
@@ -623,3 +626,231 @@ async def execute(db, mp, disk, operation_id):
             "message": f"{'已退订' if data['unsubscribed'] else '退订未确认'}；{message}，可使用同一操作重试",
             "operation_id": op.id,
         }
+
+
+async def cleanup_subscription_source_season(
+    db,
+    disk: CloudDrive2Client,
+    sub: dict[str, Any],
+) -> dict[str, Any]:
+    """批量「退订+删源」专用的受控源季目录彻底清理函数（仅限电视剧，绝不触碰归档/媒体库）。
+
+    规则与单条「退订+删源」完全一致：
+    1. 仅定位严格位于 source_root 下且基名明确为目标季目录的唯一源季路径；
+    2. 源端无目录/文件时安全返回 status="no_source"（不阻断退订）；
+    3. 删除季内全部文件（视频、字幕、NFO、海报等）及该季文件夹本身；
+    4. 刷新剧集父目录，若该剧无其它季或有效文件，一并删除剧集空目录并刷新分类父目录。
+    """
+    if is_movie_sub(sub):
+        return {
+            "status": "skipped_movie",
+            "path": None,
+            "deleted_files": 0,
+            "season_dir_deleted": False,
+            "show_dir_deleted": False,
+            "reason": "电影订阅禁止联动删源",
+        }
+
+    tid, season = identity(sub)
+    if not tid.isdigit() or season is None:
+        return {
+            "status": "skipped",
+            "path": None,
+            "deleted_files": 0,
+            "season_dir_deleted": False,
+            "show_dir_deleted": False,
+            "reason": "作品 TMDB ID 或季号未确认",
+        }
+
+    entries = await discover_source_season_entries(db, disk, sub, allow_live_scan=False)
+    if not entries:
+        return {
+            "status": "no_source",
+            "path": None,
+            "deleted_files": 0,
+            "season_dir_deleted": False,
+            "show_dir_deleted": False,
+            "reason": "CD2 源目录无对应季文件",
+        }
+
+    candidate_paths = list(dict.fromkeys(str(e["path"]) for e in entries if e.get("path")))
+    if len(candidate_paths) != 1:
+        return {
+            "status": "skipped",
+            "path": None,
+            "deleted_files": 0,
+            "season_dir_deleted": False,
+            "show_dir_deleted": False,
+            "reason": f"定位到 {len(candidate_paths)} 个源季候选目录，为安全起见跳过自动删源",
+        }
+
+    try:
+        path = source_path(candidate_paths[0])
+    except HTTPException as exc:
+        return {
+            "status": "skipped",
+            "path": candidate_paths[0],
+            "deleted_files": 0,
+            "season_dir_deleted": False,
+            "show_dir_deleted": False,
+            "reason": str(exc.detail),
+        }
+
+    if _parse_season_dirname(posixpath.basename(path)) != season:
+        return {
+            "status": "skipped",
+            "path": path,
+            "deleted_files": 0,
+            "season_dir_deleted": False,
+            "show_dir_deleted": False,
+            "reason": "目标路径非明确的季子目录",
+        }
+
+    settings = get_settings()
+    # 多目录治理冲突保护
+    check_recs = list(await db.scalars(select(SeasonRecord).where(SeasonRecord.season_path == path)))
+    for cr in check_recs:
+        blocked_group = await find_blocking_group_for_record(
+            db, cr, cd2_client=disk, operation="subscription_cleanup"
+        )
+        if blocked_group is not None:
+            return {
+                "status": "skipped",
+                "path": path,
+                "deleted_files": 0,
+                "season_dir_deleted": False,
+                "show_dir_deleted": False,
+                "reason": f"存在未确认的多目录冲突组（TMDB {blocked_group.tmdb_id}）",
+            }
+    if not check_recs and settings.enable_multi_dir_governance:
+        norm_show = normalize_dir_path(posixpath.dirname(path))
+        cat_key = resolve_category_key(norm_show, settings.source_root, settings.archive_root)
+        groups = list(await db.scalars(select(DirectoryGroup).where(
+            DirectoryGroup.tmdb_id == tid, DirectoryGroup.status == "pending_confirm"
+        )))
+        for g in groups:
+            try:
+                g_entries = json.loads(g.paths_json or "[]")
+            except Exception:
+                g_entries = []
+            paths_in_group = {normalize_dir_path(e.get("norm_path") or "") for e in g_entries if isinstance(e, dict)}
+            if norm_show in paths_in_group or (cat_key and g.category_key == cat_key):
+                return {
+                    "status": "skipped",
+                    "path": path,
+                    "deleted_files": 0,
+                    "season_dir_deleted": False,
+                    "show_dir_deleted": False,
+                    "reason": f"存在未确认的多目录冲突组（TMDB {g.tmdb_id}）",
+                }
+
+    try:
+        items = await disk.list_files(path, force_refresh=True)
+    except Exception as list_err:
+        # 目录在网盘侧已不存在时视为无源
+        if "not found" in str(list_err).lower() or "不存在" in str(list_err):
+            return {
+                "status": "no_source",
+                "path": path,
+                "deleted_files": 0,
+                "season_dir_deleted": False,
+                "show_dir_deleted": False,
+                "reason": "源季目录已不存在",
+            }
+        raise
+
+    if any(f.get("isDirectory") for f in items):
+        return {
+            "status": "skipped",
+            "path": path,
+            "deleted_files": 0,
+            "season_dir_deleted": False,
+            "show_dir_deleted": False,
+            "reason": "源季目录内含未知子目录，为安全起见跳过自动删源",
+        }
+
+    for item in items:
+        if posixpath.dirname(item.get("path") or "") != path:
+            return {
+                "status": "skipped",
+                "path": path,
+                "deleted_files": 0,
+                "season_dir_deleted": False,
+                "show_dir_deleted": False,
+                "reason": "返回的文件路径超出源季目录",
+            }
+        if is_video_file(item.get("name") or ""):
+            parsed = parse_episode(item["name"], item["path"], item.get("size", 0))
+            if parsed.season_number is not None and parsed.season_number != season:
+                return {
+                    "status": "skipped",
+                    "path": path,
+                    "deleted_files": 0,
+                    "season_dir_deleted": False,
+                    "show_dir_deleted": False,
+                    "reason": f"源季目录内含跨季视频（S{parsed.season_number:02d}），跳过自动删源",
+                }
+
+    deleted_files = 0
+    for item in items:
+        fpath = item.get("path")
+        if not fpath:
+            continue
+        res = await disk.delete_file(fpath)
+        if res.get("success") is not True:
+            raise RuntimeError(f"网盘未确认文件删除成功: {fpath}")
+        deleted_files += 1
+
+    season_dir_deleted = False
+    try:
+        del_season_res = await disk.delete_file(path)
+        if del_season_res.get("success") is True:
+            season_dir_deleted = True
+    except Exception as s_err:
+        log.warning("批量清理季目录异常: %s", s_err)
+
+    show_path = posixpath.dirname(path)
+    show_dir_deleted = False
+    try:
+        parent_items = await disk.list_files(show_path, force_refresh=True)
+        meaningful_items = [
+            it for it in parent_items
+            if it.get("path") != path and it.get("name") not in (".DS_Store", "Thumbs.db")
+        ]
+        src_root_norm = posixpath.normpath(settings.source_root) if settings.source_root else ""
+        is_safe_show_dir = (
+            src_root_norm
+            and show_path.startswith(src_root_norm.rstrip("/") + "/")
+            and show_path != src_root_norm
+            and len(show_path.strip("/").split("/")) > len(src_root_norm.strip("/").split("/")) + 1
+        )
+        if not meaningful_items and is_safe_show_dir:
+            del_show_res = await disk.delete_file(show_path)
+            if del_show_res.get("success") is True:
+                show_dir_deleted = True
+                cat_dir = posixpath.dirname(show_path)
+                await disk.list_files(cat_dir, force_refresh=True)
+    except Exception as show_err:
+        log.warning("批量清理剧集空目录异常: %s", show_err)
+
+    for record in check_recs:
+        if record.status != "manually_handled":
+            record.status = "archive_check"
+            record.local_episode_count = 0
+            record.recognized_episodes_json = "[]"
+            record.missing_episodes_json = "[]"
+            record.duplicate_episodes_json = "[]"
+            record.status_detail = "已按批量退订+删源彻底清理源季目录" + ("，并清理剧集空目录" if show_dir_deleted else "")
+    if check_recs:
+        from app.api.archive import _refresh_task_summary
+        for task_id in {r.task_id for r in check_recs}:
+            await _refresh_task_summary(task_id, db)
+
+    return {
+        "status": "cleaned",
+        "path": path,
+        "deleted_files": deleted_files,
+        "season_dir_deleted": season_dir_deleted,
+        "show_dir_deleted": show_dir_deleted,
+        "reason": "已彻底清理源季目录" + ("及空剧集目录" if show_dir_deleted else ""),
+    }
