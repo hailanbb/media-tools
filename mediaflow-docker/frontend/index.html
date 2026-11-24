@@ -29,10 +29,11 @@
   <style>
     html {
       overflow-y: scroll;
+      overflow-x: clip;
       scrollbar-gutter: stable;
     }
     body {
-      overflow-x: hidden;
+      overflow-x: clip;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
       transition: background-color 0.25s ease, color 0.25s ease;
     }
@@ -57,7 +58,8 @@
       box-shadow: 0 0 0 2px rgba(129, 140, 248, 0.25);
     }
 
-    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    /* 使用偶数 6px 滚动条宽度，避免偶数视口减去奇数滚动条后 mx-auto 容器落在 .5px 半像素引发合成层左右取整跳动 */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
     .light ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
     .dark ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
@@ -75,10 +77,9 @@
       min-width: 0;
       width: min(28rem, 100%);
       max-height: calc(100dvh - 2rem);
-      overflow-y: auto;
-      overflow-x: hidden;
-      scrollbar-gutter: stable;
+      overflow: hidden;
       contain: layout style paint;
+      transform: translateZ(0);
     }
     #inspectProgressStep {
       display: block;
@@ -146,7 +147,7 @@
     #liveBannerCountText {
       display: inline-flex;
       align-items: center;
-      justify-content: center;
+      justify-content: flex-end;
       flex: 0 0 11ch;
       width: 11ch;
       height: 1.375rem;
@@ -174,6 +175,8 @@
     #taskMenuList {
       contain: layout style;
       overflow-anchor: none;
+      overflow-x: hidden;
+      scrollbar-gutter: stable;
     }
     .task-card-stable {
       contain: layout style paint;
@@ -198,11 +201,11 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    /* 纯 GPU 合成层进度条缩放，彻底避免 width 过渡引发布局重排 */
+    /* 常驻 GPU 合成层平移进度条：will-change 常驻消除每 500ms 图层升降级引发的半像素栅格跳动，且不拉伸圆角与渐变 */
     .mf-progress-bar-fill {
       width: 100%;
-      transform-origin: left center;
-      transform: scaleX(0.01);
+      will-change: transform;
+      transform: translate3d(-99%, 0, 0);
       transition: transform 280ms cubic-bezier(0.22, 1, 0.36, 1);
     }
     @media (prefers-reduced-motion: reduce) {
@@ -689,9 +692,11 @@
               </div>
             </div>
 
-            <!-- 流光全景进度条（纯合成层 scaleX 渲染，零重排） -->
+            <!-- 流光全景进度条（常驻合成层 translate3d 渲染，零重排零图层抖动） -->
             <div class="w-full bg-slate-200/80 dark:bg-slate-800 rounded-full h-2.5 overflow-hidden p-0.5 border border-indigo-100 dark:border-indigo-900">
-              <div id="liveBannerProgressBar" class="mf-progress-bar-fill bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 h-full rounded-full" style="transform: scaleX(0.01)"></div>
+              <div class="w-full h-full rounded-full overflow-hidden">
+                <div id="liveBannerProgressBar" class="mf-progress-bar-fill bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 h-full rounded-full" style="transform: translate3d(-99%, 0, 0)"></div>
+              </div>
             </div>
 
             <!-- 当前探测剧集与并发说明 -->
@@ -1380,7 +1385,7 @@
       </div>
     </div>
   </div>
-  <div id="inspectProgressModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/70 backdrop-blur-sm">
+  <div id="inspectProgressModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/75">
     <div class="bg-white dark:bg-slate-900 rounded-2xl max-w-md w-full p-4 sm:p-6 space-y-4 border border-slate-200 dark:border-slate-800 shadow-2xl">
       <div class="flex items-center justify-between gap-3 min-w-0">
         <div class="flex items-center space-x-3 min-w-0 flex-1">
@@ -1395,9 +1400,11 @@
         <span class="text-lg font-bold text-indigo-600 dark:text-indigo-400 font-mono" id="inspectProgressPercent">0%</span>
       </div>
 
-      <!-- 动态渐变流光进度条（纯合成层 scaleX 渲染，零重排） -->
+      <!-- 动态渐变流光进度条（常驻合成层 translate3d 渲染，零重排零图层抖动） -->
       <div class="w-full bg-slate-100 dark:bg-slate-800 rounded-full h-3 overflow-hidden p-0.5 border border-slate-200/80 dark:border-slate-700/80">
-        <div id="inspectProgressBar" class="mf-progress-bar-fill bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 h-full rounded-full" style="transform: scaleX(0.01)"></div>
+        <div class="w-full h-full rounded-full overflow-hidden">
+          <div id="inspectProgressBar" class="mf-progress-bar-fill bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 h-full rounded-full" style="transform: translate3d(-99%, 0, 0)"></div>
+        </div>
       </div>
 
       <!-- 当前扫描剧集 -->
@@ -2903,7 +2910,7 @@
                 <span class="font-mono font-bold text-indigo-600 dark:text-indigo-400 shrink-0 ml-1 task-card-pct-slot" id="task-card-pct-${task.id}">${task.status === 'stopping' ? '保存中' : (task.status === 'paused' ? '暂停' : '扫描中')}</span>
               </div>
               <div class="w-full bg-slate-100 dark:bg-slate-800 rounded-full h-1.5 overflow-hidden">
-                <div id="task-card-bar-${task.id}" class="mf-progress-bar-fill bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 h-full rounded-full" style="transform: scaleX(${task.status === 'stopping' ? 0.01 : (task.status === 'paused' ? 0.5 : 0.05)})"></div>
+                <div id="task-card-bar-${task.id}" class="mf-progress-bar-fill bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 h-full rounded-full" style="transform: translate3d(${task.status === 'stopping' ? -99 : (task.status === 'paused' ? -50 : -95)}%, 0, 0)"></div>
               </div>
             </div>` : `
             <div class="mt-2 pt-1.5 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between text-[10px] h-[36px]">
@@ -3348,11 +3355,27 @@
     function setProgressBarPercent(el, pct) {
       if (!el) return;
       const clamped = Math.min(100, Math.max(0, Number(pct) || 0));
-      const scale = Math.max(0.01, clamped / 100);
-      const transformVal = `scaleX(${scale.toFixed(4)})`;
+      const shownPct = Math.max(1, Math.round(clamped));
+      const offsetPct = shownPct - 100;
+      const transformVal = `translate3d(${offsetPct}%, 0, 0)`;
       if (el.style.transform !== transformVal) {
         el.style.transform = transformVal;
       }
+    }
+
+    function formatInspectionProgressCount(current, total, suffix = '') {
+      const tot = Number(total) || 0;
+      if (tot <= 0) return suffix ? '[探测中]' : '[并行探测中]';
+      const width = String(tot).length;
+      const curStr = String(Math.max(0, Number(current) || 0)).padStart(width, '0');
+      return `[${curStr}/${tot}${suffix}]`;
+    }
+
+    let _latestInspectProgress = null;
+
+    function isInspectModalOpen() {
+      const modal = document.getElementById('inspectProgressModal');
+      return Boolean(modal && !modal.classList.contains('hidden'));
     }
 
     function openInspectProgressModal(taskTitle) {
@@ -3374,11 +3397,22 @@
       const closeBtn = document.getElementById('inspectProgressCloseBtn');
       if (closeBtn) closeBtn.classList.add('hidden');
       modal.classList.remove('hidden');
+      if (_latestInspectProgress && _latestInspectProgress.taskId === activeInspectTaskId) {
+        const lp = _latestInspectProgress.p;
+        const pct = Math.min(100, Math.max(1, Math.round(Number(lp.percent) || 1)));
+        setInspectionProgressText('inspectProgressPercent', `${pct}%`);
+        setProgressBarPercent(document.getElementById('inspectProgressBar'), pct);
+        if (lp.current_show || lp.message) {
+          setInspectionProgressText('inspectProgressShow', lp.current_show || lp.message);
+        }
+        setInspectionProgressText('inspectProgressCount', formatInspectionProgressCount(lp.current, lp.total));
+      }
     }
 
     function closeInspectProgressModal() {
       if (inspectTimer) { clearInterval(inspectTimer); inspectTimer = null; }
       activeInspectTaskId = null;
+      _latestInspectProgress = null;
       const modal = document.getElementById('inspectProgressModal');
       if (modal) modal.classList.add('hidden');
     }
@@ -3386,6 +3420,9 @@
     function hideInspectProgressModal() {
       const modal = document.getElementById('inspectProgressModal');
       if (modal) modal.classList.add('hidden');
+      if (_latestInspectProgress && _latestInspectProgress.p) {
+        updateLiveInspectionUI(_latestInspectProgress.taskId, _latestInspectProgress.p);
+      }
     }
 
     let _lastLiveTaskId = null;
@@ -3416,7 +3453,7 @@
         return;
       }
 
-      // 1. 更新主面板常驻看板（固定高度 + contain 隔离 + 纯合成层 scaleX，零布局位移）
+      // 1. 更新主面板常驻看板（固定高度 + contain 隔离 + 常驻合成层 translate3d，零布局位移）
       const liveBanner = document.getElementById('liveInspectionBanner');
       if (liveBanner && currentTaskId === taskId) {
         if (p.status === 'running' || p.status === 'paused') {
@@ -3434,7 +3471,7 @@
             _lastLiveShowText = showText;
             setInspectionProgressText('liveBannerCurrentShow', showText);
           }
-          const cntText = p.total > 0 ? `[${p.current}/${p.total}季]` : '[探测中]';
+          const cntText = formatInspectionProgressCount(p.current, p.total, '季');
           if (_lastLiveCountText !== cntText) {
             _lastLiveCountText = cntText;
             const bannerCnt = document.getElementById('liveBannerCountText');
@@ -3460,7 +3497,7 @@
         }
       }
 
-      // 2. 更新左侧任务卡片微型进度条（固定宽高槽位 + 纯合成层 scaleX，零重排抖动）
+      // 2. 更新左侧任务卡片微型进度条（固定宽高槽位 + 常驻合成层 translate3d，零重排抖动）
       const cardPct = document.getElementById(`task-card-pct-${taskId}`);
       const pctText = isPaused ? '已暂停' : `${pct}%`;
       if (cardPct && cardPct.textContent !== pctText) cardPct.textContent = pctText;
@@ -3478,15 +3515,17 @@
     async function startInspectionWithProgress(taskId, taskTitle) {
       activeInspectTaskId = taskId;
       resetLiveInspectionCache(taskId);
-      openInspectProgressModal(taskTitle);
-      // 启动即同步呈现常驻看板，避免 500ms 首包到达时后台页面突然下移 120px
-      updateLiveInspectionUI(taskId, {
+      const initPayload = {
         status: 'running',
         percent: 1,
         current: 0,
         total: 0,
         current_show: '正在连接 CloudDrive2 递归探测目录结构...',
-      });
+      };
+      _latestInspectProgress = { taskId, p: initPayload };
+      // 先就位看板再打开遮罩弹窗，弹窗开启期间冻结背景更新，彻底消除遮罩背后进度条与文字重绘波动
+      updateLiveInspectionUI(taskId, initPayload);
+      openInspectProgressModal(taskTitle);
 
       try {
         await api(`/api/inspect/${taskId}/run`, { method: 'POST' });
@@ -3502,6 +3541,7 @@
           try {
             const p = await api(`/api/inspect/${taskId}/progress`);
             if (!p || activeInspectTaskId !== taskId) return;
+            _latestInspectProgress = { taskId, p };
 
             const pBar = document.getElementById('inspectProgressBar');
             const pShow = document.getElementById('inspectProgressShow');
@@ -3510,28 +3550,26 @@
             const pauseIcon = document.getElementById('modalPauseIcon');
             const ctrlGroup = document.getElementById('modalControlBtnGroup');
 
-            const pct = Math.min(100, Math.max(1, Math.round(Number(p.percent) || 1)));
-            setInspectionProgressText('inspectProgressPercent', `${pct}%`);
-            setProgressBarPercent(pBar, pct);
+            if (isInspectModalOpen()) {
+              const pct = Math.min(100, Math.max(1, Math.round(Number(p.percent) || 1)));
+              setInspectionProgressText('inspectProgressPercent', `${pct}%`);
+              setProgressBarPercent(pBar, pct);
 
-            if (pShow) {
-              if (p.current_show) {
-                setInspectionProgressText('inspectProgressShow', p.current_show);
-              } else if (p.message) {
-                setInspectionProgressText('inspectProgressShow', p.message);
+              if (pShow) {
+                if (p.current_show) {
+                  setInspectionProgressText('inspectProgressShow', p.current_show);
+                } else if (p.message) {
+                  setInspectionProgressText('inspectProgressShow', p.message);
+                }
               }
-            }
 
-            if (pCnt) {
-              if (p.total > 0) {
-                setInspectionProgressText('inspectProgressCount', `[${p.current}/${p.total}]`);
-              } else {
-                setInspectionProgressText('inspectProgressCount', '[并行探测中]');
+              if (pCnt) {
+                setInspectionProgressText('inspectProgressCount', formatInspectionProgressCount(p.current, p.total));
               }
+            } else {
+              // 仅在弹窗已收起后台时驱动主面板常驻看板与左侧卡片进度，杜绝弹窗遮罩背后双倍重绘
+              updateLiveInspectionUI(taskId, p);
             }
-
-            // 同步驱动主面板常驻看板与左侧卡片进度
-            updateLiveInspectionUI(taskId, p);
 
             // 暂停与恢复状态显示
             if (p.status === 'paused') {

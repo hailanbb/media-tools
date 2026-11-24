@@ -1,6 +1,13 @@
 # MediaFlow 版本管理
 
-## v2.5.77（2026-11-24，本地实现，已同步本地 media-tools）
+## v2.5.78（2026-11-24，本地实现，已同步本地 media-tools）
+
+- **初检执行期页面左右抖动（半像素栅格取整、双滚动条与遮罩背光波动）像素级根治**：
+  - **消除奇数滚动条导致的 `.5px` 半像素居中抖动**：将全局 `::-webkit-scrollbar` 宽度从奇数 `5px` 改为偶数 `6px`，使偶数视口下所有 `mx-auto` 居中容器（顶栏、主布局、进度弹窗）严格落在整数像素坐标（如 `77.0px` / `493.0px` 而非 `77.5px` / `493.5px`），消除 `150%` 等分数缩放（DPR）下 GPU 合成层切换引发的 `1px` 左右取整跳动（实测截图帧稳定性从 `3/8` 提升至全缩放比 `1/8` 零像素差异）。
+  - **消除 `body` 嵌套双滚动容器**：将 `html / body` 从 `overflow-x: hidden` 改为 `overflow-x: clip`，防止 CSS 规范将 `body` 隐式提升为第二个纵向滚动容器（`overflow-y: auto`）在页面高度临界时弹出第二条纵向滚动条挤压横向宽度；为侧边栏 `#taskMenuList` 补齐 `scrollbar-gutter: stable` 与 `overflow-x: hidden`。
+  - **常驻合成层 `translate3d` 进度条 + 弹窗开启期背景冻结**：将三处进度条从 `scaleX(...)` 升级为 `will-change: transform` 常驻合成层的 `translate3d(offset%, 0, 0)`（消除每 `500ms` 临时提升/销毁合成层引发的边缘像素抖动及圆角挤压变形）；弹窗开启期间冻结遮罩背后的常驻看板与侧边栏进度更新并移除全屏 `backdrop-blur-sm` 重算（收起后台时即时同步最新进度），消除跨越 `x=67..2091` 的背景模糊光晕波动；计数胶囊改为按总位数等宽补零右对齐（`[01/44季]`）。
+
+## v2.5.77（2026-11-24，本地实现，已同步 GitHub）
 
 - **豆瓣备选通道升级为「全文检索 + Suggest 联想」双引擎召回，根治多季/新季漏搜与跨区 Cookie 静默空列表**：
   - **CF Workers 反代新增 `/search?q=...` 全文检索路由（`cloudflare-douban-proxy/src/index.js`）**：按优先级自动尝试 `m.douban.com/rexxar/api/v2/search/movie` → `rexxar/api/v2/search?type=movie` → `www.douban.com/j/search?cat=1002` → `m.douban.com/search/`，统一输出标准化候选数组（含 `id / title / sub_title / year / episode`），彻底解决仅靠下拉联想 `/j/subject_suggest` 搜不到多季/新季（如《少年泰坦出击 第九季》`37283814`）的根本瓶颈。

@@ -1207,7 +1207,11 @@ console.log("===================================================================
     assert(htmlContent.includes('prefers-reduced-motion: reduce'), '进度动效必须尊重 prefers-reduced-motion');
     assert(htmlContent.includes('await selectTask(task.id);'), 'confirmCreateNewTask 必须先 await selectTask 再启动初检弹窗，避免背景重绘抖动');
 
-    // 运行期 VM 校验：进度条仅更新 transform: scaleX(...)，不改写 width，且跨任务重置缓存
+    assert(htmlContent.includes('overflow-x: clip;'), 'html/body 必须使用 overflow-x: clip 避免产生第二个嵌套滚动容器');
+    assert(htmlContent.includes('::-webkit-scrollbar { width: 6px; height: 6px; }'), '滚动条宽度必须为偶数 6px，消除 mx-auto 容器 .5px 半像素左右取整跳动');
+    assert(htmlContent.includes('will-change: transform;'), '进度条必须常驻合成层消除每 500ms 图层升降级抖动');
+
+    // 运行期 VM 校验：进度条仅更新常驻合成层 transform: translate3d(...)，数字等宽补零，不改写 width
     const mkEl = (hidden = false) => {
       const cls = new Set(hidden ? ['hidden'] : []);
       return {
@@ -1254,20 +1258,21 @@ console.log("===================================================================
       'let _lastLiveCountText = "";',
       extractFn('setInspectionProgressText'),
       extractFn('setProgressBarPercent'),
+      extractFn('formatInspectionProgressCount'),
       extractFn('resetLiveInspectionCache'),
       extractFn('updateLiveInspectionUI'),
     ].join(';\n'), pCtx);
 
-    pCtx.updateLiveInspectionUI('t1', { status: 'running', percent: 42, current: 21, total: 50, current_show: 'Mickey Mouse Clubhouse+ (2025)' });
+    pCtx.updateLiveInspectionUI('t1', { status: 'running', percent: 42, current: 7, total: 50, current_show: 'Mickey Mouse Clubhouse+ (2025)' });
     assert.strictEqual(progEls.liveInspectionBanner.classList.contains('hidden'), false, '运行态应显示实时看板');
     assert.strictEqual(progEls.liveBannerPercent.textContent, '42%');
-    assert.strictEqual(progEls.liveBannerCountText.textContent, '[21/50季]');
+    assert.strictEqual(progEls.liveBannerCountText.textContent, '[07/50季]', '集数槽必须按总位数补零锁定字符宽度');
     assert.strictEqual(progEls.liveBannerCurrentShow.textContent, 'Mickey Mouse Clubhouse+ (2025)');
-    assert.strictEqual(progEls.liveBannerProgressBar.style.transform, 'scaleX(0.4200)');
+    assert.strictEqual(progEls.liveBannerProgressBar.style.transform, 'translate3d(-58%, 0, 0)');
     assert.strictEqual(progEls.liveBannerProgressBar.style.width, '', '进度条不得写入 style.width 触发重排');
-    assert.strictEqual(progEls['task-card-bar-t1'].style.transform, 'scaleX(0.4200)');
+    assert.strictEqual(progEls['task-card-bar-t1'].style.transform, 'translate3d(-58%, 0, 0)');
     assert.strictEqual(progEls['task-card-bar-t1'].style.width, '', '侧边栏进度条不得写入 style.width 触发重排');
-    console.log('✓ 初检执行期防抖契约与合成层 scaleX 渲染回归测试通过');
+    console.log('✓ 初检执行期防抖契约与常驻合成层 translate3d 渲染回归测试通过');
   }
 
   // ======================================================================
