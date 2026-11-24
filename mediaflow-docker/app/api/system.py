@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Body, HTTPException, Query
 
 from app.config import get_settings, VERSION
 
@@ -12,6 +12,7 @@ _VERSION = VERSION
 
 # 连通性探测缓存 (状态, 过期时间戳)
 _HEALTH_CACHE: dict[str, tuple[str, float]] = {}
+_DOUBAN_DETAIL_CACHE: tuple[dict, float] | None = None
 _CACHE_TTL = 30.0  # 30 秒缓存
 
 
@@ -23,11 +24,15 @@ async def app_version():
 
 
 @router.get("/health")
-async def health_check() -> dict:
-    """健康检查，含各外部服务连通性状态（含 MP 代理的 TMDB 与豆瓣状态）。"""
+async def health_check(force_refresh: bool = Query(default=False, description="强制跳过 30s 缓存重新探测")) -> dict:
+    """健康检查，含各外部服务连通性状态（含 MP 代理的 TMDB 与豆瓣主备通道状态）。"""
+    global _DOUBAN_DETAIL_CACHE
     settings = get_settings()
     services: dict[str, str] = {}
     now = time.time()
+    if force_refresh:
+        _HEALTH_CACHE.clear()
+        _DOUBAN_DETAIL_CACHE = None
 
     # 1. CD2 连通性
     if "cd2" in _HEALTH_CACHE and _HEALTH_CACHE["cd2"][1] > now:
@@ -97,25 +102,87 @@ async def health_check() -> dict:
     else:
         services["tmdb"] = "not_configured"
 
-    # 4. 豆瓣通道连通性（通过 MoviePilot 代理源探测）
-    if "douban" in _HEALTH_CACHE and _HEALTH_CACHE["douban"][1] > now:
+    # 4. 豆瓣通道连通性（MP 主通道 + 故障自动切备选 CF 反代/Cookie + 恢复自动回切）
+    douban_status: dict = {}
+    if not force_refresh and "douban" in _HEALTH_CACHE and _HEALTH_CACHE["douban"][1] > now and _DOUBAN_DETAIL_CACHE and _DOUBAN_DETAIL_CACHE[1] > now:
         services["douban"] = _HEALTH_CACHE["douban"][0]
-    elif mp_online:
-        try:
-            from app.clients.moviepilot import MoviePilotClient
-            mp = MoviePilotClient()
-            # 探测豆瓣媒体检索服务
-            douban_res = await mp.search_media("庆余年", source="douban")
-            await mp.close()
-            status = "online" if isinstance(douban_res, list) and len(douban_res) > 0 else "error"
-        except Exception:
-            status = "error"
-        services["douban"] = status
-        _HEALTH_CACHE["douban"] = (status, now + _CACHE_TTL)
+        douban_status = _DOUBAN_DETAIL_CACHE[0]
     else:
-        services["douban"] = "not_configured"
+        from app.clients import douban_gateway
+        mp_client = None
+        if mp_online and settings.mp_url and settings.mp_token:
+            from app.clients.moviepilot import MoviePilotClient
+            mp_client = MoviePilotClient()
+        try:
+            douban_status = await douban_gateway.check_health(
+                mp_client,
+                mp_online=mp_online,
+                force=force_refresh,
+            )
+        finally:
+            if mp_client is not None:
+                await mp_client.close()
+        services["douban"] = str(douban_status.get("status") or "error")
+        _HEALTH_CACHE["douban"] = (services["douban"], now + _CACHE_TTL)
+        _DOUBAN_DETAIL_CACHE = (douban_status, now + _CACHE_TTL)
 
-    return {"ok": True, "version": _VERSION, "services": services}
+    return {"ok": True, "version": _VERSION, "services": services, "douban_status": douban_status}
+
+
+@router.get("/douban/config")
+async def get_douban_gateway_config() -> dict:
+    """获取豆瓣备选通道（Cloudflare 反代 + Cookie-Editor 导入）的脱敏配置与状态。"""
+    from app.clients import douban_gateway
+    return {"ok": True, **douban_gateway.get_public_config()}
+
+
+@router.post("/douban/config")
+async def update_douban_gateway_config(payload: dict = Body(default={})) -> dict:
+    """保存豆瓣备选通道配置并刷新健康缓存，可选同时执行三通道探测。"""
+    global _DOUBAN_DETAIL_CACHE
+    from app.clients import douban_gateway
+
+    try:
+        saved = douban_gateway.save_runtime_config(payload or {})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    _HEALTH_CACHE.pop("douban", None)
+    _DOUBAN_DETAIL_CACHE = None
+
+    if payload and payload.get("run_test"):
+        settings = get_settings()
+        mp_client = None
+        if settings.mp_url and settings.mp_token:
+            from app.clients.moviepilot import MoviePilotClient
+            mp_client = MoviePilotClient()
+        try:
+            saved["test"] = await douban_gateway.test_channels(mp_client)
+        finally:
+            if mp_client is not None:
+                await mp_client.close()
+
+    return saved
+
+
+@router.post("/douban/test")
+async def test_douban_gateway_channels(payload: dict = Body(default={})) -> dict:
+    """立即实测 MoviePilot 主通道、Cloudflare 反代及 Cookie 直连三通道（支持草稿测试，不落盘）。"""
+    from app.clients import douban_gateway
+
+    settings = get_settings()
+    mp_client = None
+    if settings.mp_url and settings.mp_token:
+        from app.clients.moviepilot import MoviePilotClient
+        mp_client = MoviePilotClient()
+    try:
+        draft = payload if isinstance(payload, dict) and payload else None
+        return await douban_gateway.test_channels(mp_client, draft=draft)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    finally:
+        if mp_client is not None:
+            await mp_client.close()
 
 
 @router.get("/config/roots")

@@ -7,7 +7,7 @@ from functools import lru_cache
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-VERSION = "2.5.73"
+VERSION = "2.5.74"
 
 
 
@@ -36,6 +36,12 @@ class Settings(BaseSettings):
 
     # ── TMDB ──────────────────────────────────────────────
     tmdb_api_key: str = "ed74a00b26fb863a58d378b2e97131b1"
+
+    # ── 豆瓣备选通道与故障自动切换 ──────────────────────────
+    douban_proxy_base: str = ""
+    douban_proxy_token: str = ""
+    douban_cookie: str = ""
+    douban_failover_cooldown_seconds: int = 300
 
     # ── 路径映射 ──────────────────────────────────────────
     source_root: str = ""       # 源目录根路径，如 /115/Library_incs/nas

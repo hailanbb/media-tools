@@ -1092,9 +1092,26 @@ async def run_inspection(
                     if cached_mapped:
                         info = dict(cached_mapped)
                         info["stale_cache_reused"] = True
-                if not info.get("total") and target_did and mp_client:
-                    try:
-                        db_detail = await mp_client.get_douban_media_info(target_did, type_name="电视剧")
+                if not info.get("total") and target_did:
+                    from app.clients import douban_gateway
+                    db_detail: dict[str, Any] = {}
+                    if mp_client and not douban_gateway.should_skip_mp():
+                        try:
+                            db_detail = await mp_client.get_douban_media_info(target_did, type_name="电视剧") or {}
+                            if db_detail:
+                                douban_gateway.record_mp_success()
+                            elif douban_gateway.has_fallback_configured():
+                                douban_gateway.record_mp_failure("MoviePilot 豆瓣详情返回为空")
+                        except Exception as exc:
+                            if douban_gateway.has_fallback_configured():
+                                douban_gateway.record_mp_failure(f"MoviePilot 豆瓣详情异常: {type(exc).__name__}")
+                    if not db_detail and douban_gateway.has_fallback_configured():
+                        try:
+                            async with httpx.AsyncClient(timeout=8.0) as _fb_http:
+                                db_detail = await douban_gateway.fetch_detail_fallback(target_did, _fb_http)
+                        except Exception:
+                            db_detail = {}
+                    if db_detail:
                         db_parsed = _douban_evidence(
                             db_detail, target_did, "", active_mapping.get("target_title") or show_name,
                             {season_num, target_sn}, target_tid, season_num, None,
@@ -1102,8 +1119,6 @@ async def run_inspection(
                         db_hit = db_parsed.get(season_num) or db_parsed.get(target_sn)
                         if db_hit:
                             info = {**info, **db_hit}
-                    except Exception:
-                        pass
                 info["mapped"] = True
                 info["mapping_id"] = active_mapping.get("mapping_id")
                 if info.get("total") and db is not None and target_tid and not info.get("stale_cache_reused"):
@@ -3008,12 +3023,20 @@ def _douban_lookup_status(attempts, adopted=False):
 
 async def _fetch_seasons_via_douban(mp_client, show_name, log=None, needed_seasons=None,
                                   extra_queries=None, tmdb_id=None, season_years=None, diagnostics=None, known_bindings=None):
+    from app.clients import douban_gateway
     from app.core.douban_lookup import search_items, normalize_detail, search_page_candidates, subject_page_detail, lookup_error_reason
     diagnostics = diagnostics if diagnostics is not None else []
     wanted = set(needed_seasons or [])
     bindings = _DOUBAN_SEASON_IDS.get(str(tmdb_id), {})
     result = {}
     detail_cache = {}
+    def _detail_has_core_info(d: dict[str, Any]) -> bool:
+        return bool(
+            d.get("seasons")
+            or d.get("number_of_episodes")
+            or (d.get("title") and str(d.get("type") or "").casefold() in ("电影", "movie"))
+        )
+
     async def read(subject_id, title, season=None):
         subject_id = str(subject_id)
         if not subject_id.isdigit():
@@ -3022,18 +3045,29 @@ async def _fetch_seasons_via_douban(mp_client, show_name, log=None, needed_seaso
             if subject_id not in detail_cache:
                 detail = {}
                 channels = [("moviepilot_media", "get_douban_media_info"), ("moviepilot_detail", "get_douban_detail")]
-                for channel, method in channels:
-                    if not callable(getattr(type(mp_client), method, None)):
-                        continue
-                    try:
-                        response = await asyncio.wait_for(getattr(mp_client, method)(subject_id), timeout=8.0)
-                        detail = normalize_detail(response)
-                        if detail.get("seasons") or detail.get("number_of_episodes") or (detail.get("title") and str(detail.get("type") or "").casefold() in ("电影", "movie")):
-                            break
-                        diagnostics.append({"source":channel, "subject_id":subject_id, "title":title, "status":"unavailable", "reason":"详情缺少季集数，切换备用渠道"})
-                    except Exception as exc:
-                        diagnostics.append({"source":channel, "subject_id":subject_id, "title":title, "status":"failed", "reason":lookup_error_reason(exc), "error_type":type(exc).__name__})
-                if not detail.get("seasons") and not detail.get("number_of_episodes") and not (detail.get("title") and str(detail.get("type") or "").casefold() in ("电影", "movie")):
+                mp_tried = False
+                mp_failed_err = ""
+                if mp_client is not None and not douban_gateway.should_skip_mp():
+                    for channel, method in channels:
+                        if not callable(getattr(type(mp_client), method, None)):
+                            continue
+                        mp_tried = True
+                        try:
+                            response = await asyncio.wait_for(getattr(mp_client, method)(subject_id), timeout=8.0)
+                            detail = normalize_detail(response)
+                            if _detail_has_core_info(detail):
+                                douban_gateway.record_mp_success()
+                                break
+                            diagnostics.append({"source":channel, "subject_id":subject_id, "title":title, "status":"unavailable", "reason":"详情缺少季集数，切换备用渠道"})
+                        except Exception as exc:
+                            mp_failed_err = f"{type(exc).__name__}"
+                            diagnostics.append({"source":channel, "subject_id":subject_id, "title":title, "status":"failed", "reason":lookup_error_reason(exc), "error_type":type(exc).__name__})
+                    if mp_tried and not _detail_has_core_info(detail) and douban_gateway.has_fallback_configured():
+                        douban_gateway.record_mp_failure(mp_failed_err or "MoviePilot 豆瓣详情缺少季集数")
+                if not _detail_has_core_info(detail) and douban_gateway.has_fallback_configured():
+                    async with httpx.AsyncClient(timeout=8.0) as http:
+                        detail = await douban_gateway.fetch_detail_fallback(subject_id, http, diagnostics=diagnostics)
+                if not _detail_has_core_info(detail):
                     async with httpx.AsyncClient(timeout=8.0) as http:
                         response = await http.get(f"https://movie.douban.com/subject/{subject_id}/", headers={"User-Agent":"Mozilla/5.0"})
                         if response.status_code != 200:
@@ -3085,29 +3119,42 @@ async def _fetch_seasons_via_douban(mp_client, show_name, log=None, needed_seaso
             async def search(q):
                 async with search_sem:
                     found = {}
-                    try:
-                        resp = await http.get("https://movie.douban.com/j/subject_suggest", params={"q": q},
-                                              headers={"User-Agent": "Mozilla/5.0"})
-                        if resp.status_code == 200:
-                            suggest_hits = search_items(resp.json())
-                            diagnostics.append({"source":"douban_suggest", "query":q, "status":"returned" if suggest_hits else "empty", "candidate_count":len(suggest_hits), "reason":"返回候选" if suggest_hits else "此搜索接口返回空列表（不代表网站无条目）"})
-                            for it in suggest_hits:
-                                if str(it.get("id") or "").isdigit():
-                                    found[str(it["id"])] = it.get("title") or ""
-                        else:
-                            diagnostics.append({"source":"douban_suggest", "query":q, "status":"failed", "reason":f"HTTP {resp.status_code}"})
-                    except (ValueError, httpx.HTTPError, AttributeError) as exc:
-                        diagnostics.append({"source":"douban_suggest", "query":q, "status":"failed", "reason":lookup_error_reason(exc), "error_type":type(exc).__name__})
-                    try:
-                        hits = await asyncio.wait_for(mp_client.search_media(q, source="douban"), timeout=10.0)
-                        hits = search_items(hits)
-                        diagnostics.append({"source":"moviepilot_douban", "query":q, "status":"returned" if hits else "empty", "candidate_count":len(hits), "reason":"返回候选" if hits else "MoviePilot 豆瓣搜索返回空列表"})
-                        for it in hits:
-                            did = str(it.get("douban_id") or it.get("media_id") or it.get("id") or "")
-                            if did.isdigit():
-                                found[did] = it.get("title") or ""
-                    except Exception as exc:
-                        diagnostics.append({"source":"moviepilot_douban", "query":q, "status":"failed", "reason":lookup_error_reason(exc), "error_type":type(exc).__name__})
+                    if douban_gateway.has_fallback_configured():
+                        fb_hits = await douban_gateway.search_fallback(q, http, diagnostics=diagnostics)
+                        found.update(fb_hits)
+                    if not found:
+                        try:
+                            resp = await http.get("https://movie.douban.com/j/subject_suggest", params={"q": q},
+                                                  headers={"User-Agent": "Mozilla/5.0"})
+                            if resp.status_code == 200:
+                                suggest_hits = search_items(resp.json())
+                                diagnostics.append({"source":"douban_suggest", "query":q, "status":"returned" if suggest_hits else "empty", "candidate_count":len(suggest_hits), "reason":"返回候选" if suggest_hits else "此搜索接口返回空列表（不代表网站无条目）"})
+                                for it in suggest_hits:
+                                    if str(it.get("id") or "").isdigit():
+                                        found[str(it["id"])] = it.get("title") or ""
+                            else:
+                                diagnostics.append({"source":"douban_suggest", "query":q, "status":"failed", "reason":f"HTTP {resp.status_code}"})
+                        except (ValueError, httpx.HTTPError, AttributeError) as exc:
+                            diagnostics.append({"source":"douban_suggest", "query":q, "status":"failed", "reason":lookup_error_reason(exc), "error_type":type(exc).__name__})
+                    if mp_client is not None and not douban_gateway.should_skip_mp():
+                        try:
+                            hits = await asyncio.wait_for(mp_client.search_media(q, source="douban"), timeout=10.0)
+                            hits = search_items(hits)
+                            diagnostics.append({"source":"moviepilot_douban", "query":q, "status":"returned" if hits else "empty", "candidate_count":len(hits), "reason":"返回候选" if hits else "MoviePilot 豆瓣搜索返回空列表"})
+                            mp_added = False
+                            for it in hits:
+                                did = str(it.get("douban_id") or it.get("media_id") or it.get("id") or "")
+                                if did.isdigit():
+                                    found[did] = it.get("title") or ""
+                                    mp_added = True
+                            if mp_added:
+                                douban_gateway.record_mp_success()
+                            elif found and douban_gateway.has_fallback_configured():
+                                douban_gateway.record_mp_failure("MoviePilot 豆瓣搜索返回空列表")
+                        except Exception as exc:
+                            if douban_gateway.has_fallback_configured():
+                                douban_gateway.record_mp_failure(f"MoviePilot 豆瓣搜索异常: {type(exc).__name__}")
+                            diagnostics.append({"source":"moviepilot_douban", "query":q, "status":"failed", "reason":lookup_error_reason(exc), "error_type":type(exc).__name__})
                     return found
             for found in await asyncio.gather(*(search(q) for q in queries[:8])):
                 candidates.update(found)

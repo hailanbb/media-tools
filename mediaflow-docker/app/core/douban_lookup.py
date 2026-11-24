@@ -45,9 +45,36 @@ def normalize_detail(payload):
             break
         detail = dict(nested)
     detail["title"] = detail.get("title") or detail.get("name") or ""
-    count = detail.get("number_of_episodes") or detail.get("episodes") or detail.get('episode_count') or detail.get('total_episodes')
+    count = (
+        detail.get("number_of_episodes")
+        or detail.get("episodes_count")
+        or detail.get("episodes")
+        or detail.get("episode_count")
+        or detail.get("total_episodes")
+    )
     if isinstance(count, (str, int)) and str(count).isdigit():
         detail["number_of_episodes"] = int(count)
+    raw_type = str(detail.get("type") or detail.get("subtype") or "").strip().casefold()
+    if raw_type in ("tv", "drama", "series", "tv_show"):
+        detail["type"] = "电视剧"
+    elif raw_type == "movie":
+        detail["type"] = "电影"
+    if not detail.get("douban_id") and str(detail.get("id") or "").isdigit():
+        detail["douban_id"] = str(detail["id"])
+    if not detail.get("year"):
+        pub_candidates = []
+        pubdate = detail.get("pubdate")
+        if isinstance(pubdate, list) and pubdate:
+            pub_candidates.append(str(pubdate[0]))
+        elif isinstance(pubdate, str) and pubdate:
+            pub_candidates.append(pubdate)
+        if detail.get("card_subtitle"):
+            pub_candidates.append(str(detail["card_subtitle"]))
+        for txt in pub_candidates:
+            m = re.search(r"((?:19|20)\d{2})", txt)
+            if m:
+                detail["year"] = m.group(1)
+                break
     return detail
 
 

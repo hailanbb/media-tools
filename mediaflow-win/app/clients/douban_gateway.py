@@ -1,0 +1,693 @@
+"""豆瓣主备通道网关：支持 MoviePilot 主通道熔断切换备选（Cloudflare 反代 / Cookie 直连）与恢复自动回切。"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
+
+import httpx
+
+from app.config import get_settings
+from app.core.douban_cookie import mask_cookie_summary, parse_douban_cookie
+from app.core.douban_lookup import (
+    lookup_error_reason,
+    normalize_detail,
+    search_items,
+    subject_page_detail,
+)
+
+log = logging.getLogger("mediaflow.douban_gateway")
+
+_DEFAULT_COOLDOWN_SECONDS = 300
+_DIRECT_COOKIE_MIN_INTERVAL = 1.5
+_DIRECT_COOKIE_LOCK = asyncio.Lock()
+_LAST_DIRECT_REQUEST_AT = 0.0
+
+# 进程内熔断状态（单测可通过 reset_state_for_tests() 复位）
+_STATE: dict[str, Any] = {
+    "mp_cooldown_until": 0.0,
+    "mp_last_error": "",
+    "mp_last_checked_at": 0.0,
+    "last_active_channel": "moviepilot",  # moviepilot | cf_proxy | direct_cookie | none
+    "last_fallback_error": "",
+}
+
+
+def reset_state_for_tests() -> None:
+    """重置进程内熔断状态与直连节流时间戳（专供单元测试隔离使用）。"""
+    global _LAST_DIRECT_REQUEST_AT
+    _STATE.update(
+        {
+            "mp_cooldown_until": 0.0,
+            "mp_last_error": "",
+            "mp_last_checked_at": 0.0,
+            "last_active_channel": "moviepilot",
+            "last_fallback_error": "",
+        }
+    )
+    _LAST_DIRECT_REQUEST_AT = 0.0
+
+
+def _config_file_path() -> Path:
+    return Path(get_settings().data_dir) / "douban_gateway.json"
+
+
+def _normalize_proxy_base(raw: str) -> str:
+    val = str(raw or "").strip().rstrip("/")
+    if not val:
+        return ""
+    parsed = urlparse(val)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError("反代地址必须以 http:// 或 https:// 开头")
+    return val
+
+
+def _load_file_config() -> dict[str, Any]:
+    cfg_path = _config_file_path()
+    if not cfg_path.exists():
+        return {}
+    try:
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        log.warning("读取豆瓣网关配置失败 (%s): %s", cfg_path, exc)
+        return {}
+
+
+def _write_file_config(data: dict[str, Any]) -> None:
+    cfg_path = _config_file_path()
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = cfg_path.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp_path, cfg_path)
+
+
+def _effective_config(draft: dict[str, Any] | None = None) -> dict[str, Any]:
+    """合并顺序：环境默认值 (.env) < 运行时文件 (douban_gateway.json) < 临时草稿 (draft)。"""
+    settings = get_settings()
+    file_cfg = _load_file_config()
+
+    proxy_base = str(
+        file_cfg["proxy_base"]
+        if "proxy_base" in file_cfg
+        else (getattr(settings, "douban_proxy_base", "") or "")
+    ).strip().rstrip("/")
+
+    proxy_token = str(
+        file_cfg["proxy_token"]
+        if "proxy_token" in file_cfg
+        else (getattr(settings, "douban_proxy_token", "") or "")
+    ).strip()
+
+    cookie_header = str(
+        file_cfg["cookie_header"]
+        if "cookie_header" in file_cfg
+        else (getattr(settings, "douban_cookie", "") or "")
+    ).strip()
+    cookie_format = str(file_cfg.get("cookie_format") or "")
+    cookie_updated_at = str(file_cfg.get("cookie_updated_at") or "")
+
+    cooldown = int(
+        file_cfg.get("failover_cooldown_seconds")
+        or getattr(settings, "douban_failover_cooldown_seconds", _DEFAULT_COOLDOWN_SECONDS)
+        or _DEFAULT_COOLDOWN_SECONDS
+    )
+
+    if isinstance(draft, dict):
+        if "proxy_base" in draft and draft["proxy_base"] is not None:
+            proxy_base = _normalize_proxy_base(str(draft["proxy_base"]))
+        if draft.get("clear_proxy_token"):
+            proxy_token = ""
+        elif str(draft.get("proxy_token") or "").strip():
+            proxy_token = str(draft["proxy_token"]).strip()
+        if draft.get("clear_cookie"):
+            cookie_header = ""
+            cookie_format = ""
+        elif str(draft.get("raw_cookie") or "").strip():
+            parsed = parse_douban_cookie(str(draft["raw_cookie"]))
+            if parsed["header"]:
+                cookie_header = parsed["header"]
+                cookie_format = parsed["format_detected"]
+        if draft.get("failover_cooldown_seconds") is not None:
+            cooldown = max(30, min(3600, int(draft["failover_cooldown_seconds"])))
+
+    return {
+        "proxy_base": proxy_base,
+        "proxy_token": proxy_token,
+        "cookie_header": cookie_header,
+        "cookie_format": cookie_format,
+        "cookie_updated_at": cookie_updated_at,
+        "failover_cooldown_seconds": max(30, min(3600, cooldown)),
+    }
+
+
+def has_fallback_configured(draft: dict[str, Any] | None = None) -> bool:
+    """检查是否至少配置了一个可用的豆瓣备选通道（CF 反代或个人 Cookie）。"""
+    cfg = _effective_config(draft)
+    return bool(cfg["proxy_base"] or cfg["cookie_header"])
+
+
+def should_skip_mp() -> bool:
+    """仅当已配置备选通道且 MP 仍在熔断冷却期内时跳过 MP，避免无效等待；否则始终尝试 MP。"""
+    if not has_fallback_configured():
+        return False
+    return time.time() < float(_STATE.get("mp_cooldown_until") or 0.0)
+
+
+def record_mp_success() -> None:
+    """MP 恢复正常响应时立即解除熔断并自动切回 MP 主通道。"""
+    was_in_cooldown = float(_STATE.get("mp_cooldown_until") or 0.0) > time.time()
+    _STATE["mp_cooldown_until"] = 0.0
+    _STATE["mp_last_error"] = ""
+    _STATE["mp_last_checked_at"] = time.time()
+    _STATE["last_active_channel"] = "moviepilot"
+    if was_in_cooldown:
+        log.info("MoviePilot 豆瓣主通道已恢复正常，已自动切回主通道")
+
+
+def record_mp_failure(reason: str = "") -> None:
+    """MP 豆瓣主通道异常或空返回时触发冷却，期间自动由备选通道承接。"""
+    cfg = _effective_config()
+    now = time.time()
+    _STATE["mp_last_checked_at"] = now
+    _STATE["mp_last_error"] = str(reason or "MoviePilot 豆瓣搜索未返回结果")[:160]
+    if cfg["proxy_base"] or cfg["cookie_header"]:
+        _STATE["mp_cooldown_until"] = now + cfg["failover_cooldown_seconds"]
+
+
+def get_runtime_status() -> dict[str, Any]:
+    """返回当前主备切换状态（脱敏，可直接对前端输出）。"""
+    now = time.time()
+    cooldown_until = float(_STATE.get("mp_cooldown_until") or 0.0)
+    retry_in = max(0, int(cooldown_until - now)) if cooldown_until > now else 0
+    return {
+        "active_channel": str(_STATE.get("last_active_channel") or "moviepilot"),
+        "mp_state": "cooldown" if retry_in > 0 else ("error" if _STATE.get("mp_last_error") else "ok"),
+        "mp_retry_in_seconds": retry_in,
+        "mp_last_error": str(_STATE.get("mp_last_error") or ""),
+        "last_fallback_error": str(_STATE.get("last_fallback_error") or ""),
+        "has_fallback": has_fallback_configured(),
+    }
+
+
+def get_public_config() -> dict[str, Any]:
+    """返回脱敏后的豆瓣网关配置与状态，永不向调用方回传明文 Cookie 或 Proxy Token。"""
+    cfg = _effective_config()
+    cookie_summary = mask_cookie_summary(
+        cfg["cookie_header"],
+        format_detected=cfg["cookie_format"],
+        updated_at=cfg["cookie_updated_at"],
+    )
+    return {
+        "proxy_base": cfg["proxy_base"],
+        "has_proxy_token": bool(cfg["proxy_token"]),
+        "cookie_summary": cookie_summary,
+        "failover_cooldown_seconds": cfg["failover_cooldown_seconds"],
+        "status": get_runtime_status(),
+    }
+
+
+def save_runtime_config(payload: dict[str, Any]) -> dict[str, Any]:
+    """校验、解析并持久化豆瓣反代与 Cookie-Editor 配置。"""
+    current = _load_file_config()
+    eff = _effective_config()
+
+    proxy_base = _normalize_proxy_base(
+        payload["proxy_base"] if "proxy_base" in payload and payload["proxy_base"] is not None else eff["proxy_base"]
+    )
+    if payload.get("clear_proxy_token"):
+        proxy_token = ""
+    elif str(payload.get("proxy_token") or "").strip():
+        proxy_token = str(payload["proxy_token"]).strip()
+    else:
+        proxy_token = str(current.get("proxy_token") if "proxy_token" in current else eff["proxy_token"])
+
+    parse_result: dict[str, Any] | None = None
+    cookie_header = str(current.get("cookie_header") if "cookie_header" in current else eff["cookie_header"])
+    cookie_format = str(current.get("cookie_format") if "cookie_format" in current else eff["cookie_format"])
+    cookie_updated_at = str(current.get("cookie_updated_at") or "")
+
+    if payload.get("clear_cookie"):
+        cookie_header = ""
+        cookie_format = ""
+        cookie_updated_at = ""
+    elif "raw_cookie" in payload and str(payload.get("raw_cookie") or "").strip():
+        parse_result = parse_douban_cookie(str(payload["raw_cookie"]))
+        if not parse_result["header"]:
+            raise ValueError(
+                "; ".join(parse_result["warnings"]) or "未能解析有效的豆瓣 Cookie，请检查粘贴内容"
+            )
+        cookie_header = parse_result["header"]
+        cookie_format = parse_result["format_detected"]
+        cookie_updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    cooldown = eff["failover_cooldown_seconds"]
+    if payload.get("failover_cooldown_seconds") is not None:
+        cooldown = max(30, min(3600, int(payload["failover_cooldown_seconds"])))
+
+    to_save = {
+        "proxy_base": proxy_base,
+        "proxy_token": proxy_token,
+        "cookie_header": cookie_header,
+        "cookie_format": cookie_format,
+        "cookie_updated_at": cookie_updated_at,
+        "failover_cooldown_seconds": cooldown,
+    }
+    _write_file_config(to_save)
+    # 配置变更后清除上次备选报错并允许立即可测
+    _STATE["last_fallback_error"] = ""
+
+    public_parse_result = (
+        {
+            "format_detected": parse_result["format_detected"],
+            "has_dbcl2": parse_result["has_dbcl2"],
+            "uid_masked": parse_result["uid_masked"],
+            "has_bid": parse_result["has_bid"],
+            "bid_masked": parse_result["bid_masked"],
+            "cookie_count": parse_result["cookie_count"],
+            "auto_generated_bid": parse_result["auto_generated_bid"],
+            "warnings": parse_result["warnings"],
+        }
+        if parse_result is not None
+        else None
+    )
+
+    return {
+        "ok": True,
+        "config": get_public_config(),
+        "parse_result": public_parse_result,
+    }
+
+
+def _build_cf_headers(cfg: dict[str, Any]) -> dict[str, str]:
+    headers: dict[str, str] = {"Accept": "application/json, text/plain, */*"}
+    if cfg["proxy_token"]:
+        headers["X-Proxy-Token"] = cfg["proxy_token"]
+    if cfg["cookie_header"]:
+        headers["X-Douban-Cookie"] = cfg["cookie_header"]
+    return headers
+
+
+def _build_direct_headers(kind: str, cookie_header: str, subject_id: str = "") -> dict[str, str]:
+    if kind == "rexxar":
+        return {
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
+            "Referer": f"https://m.douban.com/movie/subject/{subject_id}/" if subject_id else "https://movie.douban.com/",
+            "Accept": "application/json, text/plain, */*",
+            "Cookie": cookie_header,
+        }
+    return {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        "Referer": "https://movie.douban.com/",
+        "Accept": "application/json, text/plain, */*" if kind == "suggest" else "text/html,application/xhtml+xml",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Cookie": cookie_header,
+    }
+
+
+def _is_blocked_response(status_code: int, text: str) -> bool:
+    if status_code in (401, 403, 302):
+        return True
+    lowered = str(text or "").lower()
+    return any(marker in lowered for marker in ("error code: 004", "sec.douban.com", "captcha", "访问受限", "异常请求"))
+
+
+async def _throttle_direct_cookie(min_interval: float = _DIRECT_COOKIE_MIN_INTERVAL) -> None:
+    global _LAST_DIRECT_REQUEST_AT
+    if min_interval <= 0:
+        return
+    async with _DIRECT_COOKIE_LOCK:
+        now = time.monotonic()
+        wait = (_LAST_DIRECT_REQUEST_AT + min_interval) - now
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _LAST_DIRECT_REQUEST_AT = time.monotonic()
+
+
+async def search_fallback(
+    query: str,
+    http_client: httpx.AsyncClient,
+    *,
+    diagnostics: list[dict[str, Any]] | None = None,
+    throttle_seconds: float = _DIRECT_COOKIE_MIN_INTERVAL,
+) -> dict[str, str]:
+    """按优先级通过备选通道检索豆瓣候选 {subject_id: title}：CF 反代 → 本机 Cookie 直连。"""
+    cfg = _effective_config()
+    diag = diagnostics if diagnostics is not None else []
+    found: dict[str, str] = {}
+
+    # 1. Cloudflare Workers 反代通道
+    if cfg["proxy_base"]:
+        try:
+            resp = await http_client.get(
+                f"{cfg['proxy_base']}/suggest",
+                params={"q": query},
+                headers=_build_cf_headers(cfg),
+            )
+            if resp.status_code == 200:
+                hits = search_items(resp.json())
+                diag.append(
+                    {
+                        "source": "cf_proxy_suggest",
+                        "query": query,
+                        "status": "returned" if hits else "empty",
+                        "candidate_count": len(hits),
+                        "reason": "CF 反代返回候选" if hits else "CF 反代返回空列表",
+                    }
+                )
+                for it in hits:
+                    did = str(it.get("id") or "")
+                    if did.isdigit():
+                        found[did] = it.get("title") or ""
+                if found:
+                    _STATE["last_active_channel"] = "cf_proxy"
+                    _STATE["last_fallback_error"] = ""
+                    return found
+            else:
+                reason = f"CF 反代 HTTP {resp.status_code}"
+                _STATE["last_fallback_error"] = reason
+                diag.append({"source": "cf_proxy_suggest", "query": query, "status": "failed", "reason": reason})
+        except Exception as exc:
+            reason = lookup_error_reason(exc)
+            _STATE["last_fallback_error"] = reason
+            diag.append(
+                {
+                    "source": "cf_proxy_suggest",
+                    "query": query,
+                    "status": "failed",
+                    "reason": reason,
+                    "error_type": type(exc).__name__,
+                }
+            )
+
+    # 2. 本机 Cookie 直连通道（带单 IP 限流与 004/验证码熔断）
+    if cfg["cookie_header"]:
+        try:
+            await _throttle_direct_cookie(throttle_seconds)
+            resp = await http_client.get(
+                "https://movie.douban.com/j/subject_suggest",
+                params={"q": query},
+                headers=_build_direct_headers("suggest", cfg["cookie_header"]),
+            )
+            if resp.status_code == 200 and not _is_blocked_response(resp.status_code, resp.text):
+                hits = search_items(resp.json())
+                diag.append(
+                    {
+                        "source": "douban_cookie_suggest",
+                        "query": query,
+                        "status": "returned" if hits else "empty",
+                        "candidate_count": len(hits),
+                        "reason": "Cookie 通道返回候选" if hits else "Cookie 通道返回空列表",
+                    }
+                )
+                for it in hits:
+                    did = str(it.get("id") or "")
+                    if did.isdigit():
+                        found[did] = it.get("title") or ""
+                if found:
+                    _STATE["last_active_channel"] = "direct_cookie"
+                    _STATE["last_fallback_error"] = ""
+                    return found
+            else:
+                reason = "Cookie 已失效或触发豆瓣验证/004拦截" if _is_blocked_response(resp.status_code, resp.text) else f"HTTP {resp.status_code}"
+                _STATE["last_fallback_error"] = reason
+                diag.append({"source": "douban_cookie_suggest", "query": query, "status": "blocked", "reason": reason})
+        except Exception as exc:
+            reason = lookup_error_reason(exc)
+            _STATE["last_fallback_error"] = reason
+            diag.append(
+                {
+                    "source": "douban_cookie_suggest",
+                    "query": query,
+                    "status": "failed",
+                    "reason": reason,
+                    "error_type": type(exc).__name__,
+                }
+            )
+
+    return found
+
+
+async def fetch_detail_fallback(
+    subject_id: str,
+    http_client: httpx.AsyncClient,
+    *,
+    diagnostics: list[dict[str, Any]] | None = None,
+    throttle_seconds: float = _DIRECT_COOKIE_MIN_INTERVAL,
+) -> dict[str, Any]:
+    """按优先级通过备选通道拉取豆瓣单条目详情（兼容 Rexxar / Frodo / Subject HTML）。"""
+    cfg = _effective_config()
+    diag = diagnostics if diagnostics is not None else []
+    sid = str(subject_id or "").strip()
+    if not sid.isdigit():
+        return {}
+
+    def _is_usable_detail(d: dict[str, Any]) -> bool:
+        return bool(
+            d.get("seasons")
+            or d.get("number_of_episodes")
+            or (d.get("title") and str(d.get("type") or "").casefold() in ("电影", "movie"))
+        )
+
+    # 1. Cloudflare Workers 反代（Rexxar → Frodo → Subject HTML）
+    if cfg["proxy_base"]:
+        cf_headers = _build_cf_headers(cfg)
+        for ch_name, path, is_html in (
+            ("cf_proxy_rexxar", f"/rexxar/tv/{sid}", False),
+            ("cf_proxy_frodo", f"/frodo/tv/{sid}", False),
+            ("cf_proxy_subject", f"/subject/{sid}", True),
+        ):
+            try:
+                resp = await http_client.get(f"{cfg['proxy_base']}{path}", headers=cf_headers)
+                if resp.status_code != 200:
+                    diag.append({"source": ch_name, "subject_id": sid, "status": "failed", "reason": f"HTTP {resp.status_code}"})
+                    continue
+                detail = subject_page_detail(resp.text, sid) if is_html else normalize_detail(resp.json())
+                if _is_usable_detail(detail):
+                    _STATE["last_active_channel"] = "cf_proxy"
+                    _STATE["last_fallback_error"] = ""
+                    return detail
+                diag.append({"source": ch_name, "subject_id": sid, "status": "unavailable", "reason": "详情缺少季集数"})
+            except Exception as exc:
+                diag.append({"source": ch_name, "subject_id": sid, "status": "failed", "reason": lookup_error_reason(exc)})
+
+    # 2. 本机 Cookie 直连（Rexxar → Subject HTML）
+    if cfg["cookie_header"]:
+        for ch_name, url, kind, is_html in (
+            ("douban_cookie_rexxar", f"https://m.douban.com/rexxar/api/v2/tv/{sid}", "rexxar", False),
+            ("douban_cookie_subject", f"https://movie.douban.com/subject/{sid}/", "subject", True),
+        ):
+            try:
+                await _throttle_direct_cookie(throttle_seconds)
+                resp = await http_client.get(url, headers=_build_direct_headers(kind, cfg["cookie_header"], sid))
+                if _is_blocked_response(resp.status_code, resp.text):
+                    diag.append({"source": ch_name, "subject_id": sid, "status": "blocked", "reason": "Cookie 已失效或触发豆瓣验证/004拦截"})
+                    break
+                if resp.status_code != 200:
+                    continue
+                detail = subject_page_detail(resp.text, sid) if is_html else normalize_detail(resp.json())
+                if _is_usable_detail(detail):
+                    _STATE["last_active_channel"] = "direct_cookie"
+                    _STATE["last_fallback_error"] = ""
+                    return detail
+            except Exception as exc:
+                diag.append({"source": ch_name, "subject_id": sid, "status": "failed", "reason": lookup_error_reason(exc)})
+
+    return {}
+
+
+async def _probe_cf_proxy(cfg: dict[str, Any], http_client: httpx.AsyncClient) -> dict[str, Any]:
+    if not cfg["proxy_base"]:
+        return {"configured": False, "ok": False, "http_status": 0, "latency_ms": 0, "sample_title": "", "reason": "未配置反代地址"}
+    started = time.monotonic()
+    try:
+        resp = await http_client.get(f"{cfg['proxy_base']}/probe", headers=_build_cf_headers(cfg))
+        latency = int((time.monotonic() - started) * 1000)
+        if resp.status_code == 200:
+            data = resp.json()
+            results = data.get("results") if isinstance(data, dict) else {}
+            suggest_title = ((results or {}).get("suggest") or {}).get("sample_title") or ""
+            rexxar_title = ((results or {}).get("rexxar_tv") or {}).get("sample_title") or ""
+            ok = bool(data.get("ok"))
+            return {
+                "configured": True,
+                "ok": ok,
+                "http_status": 200,
+                "latency_ms": latency,
+                "sample_title": suggest_title or rexxar_title,
+                "results": results,
+                "reason": "CF 反代在线" if ok else "CF 反代上游探测全部失败",
+            }
+        reason = "Proxy Token 鉴权失败 (401)" if resp.status_code == 401 else f"HTTP {resp.status_code}"
+        return {"configured": True, "ok": False, "http_status": resp.status_code, "latency_ms": latency, "sample_title": "", "reason": reason}
+    except Exception as exc:
+        latency = int((time.monotonic() - started) * 1000)
+        return {"configured": True, "ok": False, "http_status": 0, "latency_ms": latency, "sample_title": "", "reason": lookup_error_reason(exc)}
+
+
+async def _probe_direct_cookie(
+    cfg: dict[str, Any],
+    http_client: httpx.AsyncClient,
+    *,
+    throttle_seconds: float = 0.0,
+) -> dict[str, Any]:
+    if not cfg["cookie_header"]:
+        return {"configured": False, "ok": False, "http_status": 0, "latency_ms": 0, "sample_title": "", "reason": "未导入豆瓣 Cookie"}
+    started = time.monotonic()
+    try:
+        await _throttle_direct_cookie(throttle_seconds)
+        resp = await http_client.get(
+            "https://movie.douban.com/j/subject_suggest",
+            params={"q": "庆余年"},
+            headers=_build_direct_headers("suggest", cfg["cookie_header"]),
+        )
+        latency = int((time.monotonic() - started) * 1000)
+        if resp.status_code == 200 and not _is_blocked_response(resp.status_code, resp.text):
+            hits = search_items(resp.json())
+            if hits:
+                return {
+                    "configured": True,
+                    "ok": True,
+                    "http_status": 200,
+                    "latency_ms": latency,
+                    "sample_title": str(hits[0].get("title") or ""),
+                    "reason": "Cookie 直连在线",
+                }
+            return {"configured": True, "ok": False, "http_status": 200, "latency_ms": latency, "sample_title": "", "reason": "返回空列表"}
+        reason = "Cookie 已过期或触发豆瓣 004/验证码拦截" if _is_blocked_response(resp.status_code, resp.text) else f"HTTP {resp.status_code}"
+        return {"configured": True, "ok": False, "http_status": resp.status_code, "latency_ms": latency, "sample_title": "", "reason": reason}
+    except Exception as exc:
+        latency = int((time.monotonic() - started) * 1000)
+        return {"configured": True, "ok": False, "http_status": 0, "latency_ms": latency, "sample_title": "", "reason": lookup_error_reason(exc)}
+
+
+async def check_health(
+    mp_client: Any = None,
+    *,
+    mp_online: bool = False,
+    force: bool = False,
+) -> dict[str, Any]:
+    """统一执行豆瓣主备健康检查，支持故障切备选与冷却期后自动探测回切 MP。"""
+    cfg = _effective_config()
+    now = time.time()
+    in_cooldown = bool((cfg["proxy_base"] or cfg["cookie_header"]) and now < float(_STATE.get("mp_cooldown_until") or 0.0))
+
+    # 1. 探测 MP 主通道（冷却期未到且非强制探测时暂时跳过 MP，直接用备选承接）
+    if mp_online and mp_client is not None and (force or not in_cooldown):
+        try:
+            mp_res = await mp_client.search_media("庆余年", source="douban")
+            if isinstance(mp_res, list) and len(mp_res) > 0:
+                record_mp_success()
+                return {"status": "online", **get_runtime_status()}
+            record_mp_failure("MoviePilot 豆瓣搜索返回空结果")
+        except Exception as exc:
+            record_mp_failure(f"MoviePilot 豆瓣请求异常: {type(exc).__name__}")
+    elif not mp_online and not (cfg["proxy_base"] or cfg["cookie_header"]):
+        return {"status": "not_configured", **get_runtime_status()}
+
+    # 2. MP 处于冷却或不可用时，探测已配置的备选通道
+    if cfg["proxy_base"] or cfg["cookie_header"]:
+        async with httpx.AsyncClient(timeout=10.0) as http_client:
+            if cfg["proxy_base"]:
+                cf_res = await _probe_cf_proxy(cfg, http_client)
+                if cf_res["ok"]:
+                    _STATE["last_active_channel"] = "cf_proxy"
+                    _STATE["last_fallback_error"] = ""
+                    return {"status": "fallback:cf_proxy", **get_runtime_status()}
+                _STATE["last_fallback_error"] = cf_res.get("reason") or "CF 反代不可用"
+
+            if cfg["cookie_header"]:
+                ck_res = await _probe_direct_cookie(cfg, http_client, throttle_seconds=0.0)
+                if ck_res["ok"]:
+                    _STATE["last_active_channel"] = "direct_cookie"
+                    _STATE["last_fallback_error"] = ""
+                    return {"status": "fallback:cookie", **get_runtime_status()}
+                _STATE["last_fallback_error"] = ck_res.get("reason") or "Cookie 通道不可用"
+
+        return {"status": "error", **get_runtime_status()}
+
+    return {"status": "error", **get_runtime_status()}
+
+
+async def test_channels(
+    mp_client: Any = None,
+    *,
+    draft: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """对 MP 主通道、CF 反代、Cookie 直连分别做实测（支持草稿参数测试，不写入磁盘）。"""
+    parse_preview = None
+    if isinstance(draft, dict) and str(draft.get("raw_cookie") or "").strip():
+        parse_preview = parse_douban_cookie(str(draft["raw_cookie"]))
+
+    cfg = _effective_config(draft)
+    results: dict[str, Any] = {}
+
+    # 1. MoviePilot 主通道
+    if mp_client is not None:
+        started = time.monotonic()
+        try:
+            mp_hits = await mp_client.search_media("庆余年", source="douban")
+            latency = int((time.monotonic() - started) * 1000)
+            if isinstance(mp_hits, list) and len(mp_hits) > 0:
+                results["moviepilot"] = {
+                    "configured": True,
+                    "ok": True,
+                    "http_status": 200,
+                    "latency_ms": latency,
+                    "sample_title": str(mp_hits[0].get("title") or ""),
+                    "reason": "MoviePilot 豆瓣主通道正常",
+                }
+            else:
+                results["moviepilot"] = {
+                    "configured": True,
+                    "ok": False,
+                    "http_status": 200,
+                    "latency_ms": latency,
+                    "sample_title": "",
+                    "reason": "MoviePilot 返回空列表（内置 Frodo 被 004 拦截）",
+                }
+        except Exception as exc:
+            results["moviepilot"] = {
+                "configured": True,
+                "ok": False,
+                "http_status": 0,
+                "latency_ms": int((time.monotonic() - started) * 1000),
+                "sample_title": "",
+                "reason": lookup_error_reason(exc),
+            }
+    else:
+        results["moviepilot"] = {
+            "configured": False,
+            "ok": False,
+            "http_status": 0,
+            "latency_ms": 0,
+            "sample_title": "",
+            "reason": "MoviePilot 未配置",
+        }
+
+    # 2 & 3. Cloudflare Workers 反代 + 本机 Cookie 直连
+    async with httpx.AsyncClient(timeout=12.0) as http_client:
+        results["cf_proxy"] = await _probe_cf_proxy(cfg, http_client)
+        results["direct_cookie"] = await _probe_direct_cookie(cfg, http_client, throttle_seconds=0.0)
+
+    return {
+        "ok": any(bool(v.get("ok")) for v in results.values()),
+        "results": results,
+        "parse_preview": {
+            "format_detected": parse_preview["format_detected"],
+            "has_dbcl2": parse_preview["has_dbcl2"],
+            "uid_masked": parse_preview["uid_masked"],
+            "bid_masked": parse_preview["bid_masked"],
+            "cookie_count": parse_preview["cookie_count"],
+            "warnings": parse_preview["warnings"],
+        }
+        if parse_preview
+        else None,
+    }

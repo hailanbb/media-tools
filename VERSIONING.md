@@ -1,5 +1,16 @@
 # MediaFlow 版本管理
 
+## v2.5.74（2026-11-24，本地实现，已同步本地 media-tools）
+
+- **豆瓣主备通道自动熔断切换与自动回切（`DoubanGateway`）**：
+  - MoviePilot 豆瓣主通道异常或返回空结果时，自动触发冷却窗口并无缝切换至备选通道（优先 Cloudflare Workers 反代，其次本机 Cookie 直连）；冷却到期后静默探测 MP，一旦恢复立即自动切回 MP 主通道，全程无需重启。
+  - `GET /api/system/health`（支持 `?force_refresh=true`）接入 `douban_gateway.check_health()`，返回 `online` / `fallback:cf_proxy` / `fallback:cookie` / `error` 及详细诊断；前端顶栏「豆瓣」状态灯新增青色 `豆瓣 (备选)` 态且可点击打开配置弹窗。
+  - 初检引擎 `_fetch_seasons_via_douban` 与单季映射详情查询统一接入备选检索与详情回退；`normalize_detail` 兼容 Rexxar / Frodo 原生字段（`episodes_count`、`type="tv"`、`pubdate` 年份）。
+- **原生支持 `Cookie-Editor` 一键导入与脱敏热存储**：
+  - 新增 `app/core/douban_cookie.py`，自动识别 **Cookie-Editor JSON**、Netscape `cookies.txt`、HTTP Header String 与键值对；仅提取 `.douban.com` 域未过期字段、自动补全 11 位随机 `bid` 并严格脱敏存储于 `data/douban_gateway.json`（免重启热生效，API 响应永不回传明文 `dbcl2` 或 `proxy_token`）。
+- **Cloudflare Workers 豆瓣只读元数据反代（`cloudflare-douban-proxy/`）**：
+  - 独立提供可部署至自定义域名（如 `douban.ubaby.top`）的轻量只读反代 Worker：严格上游白名单（`/health`、`/probe`、`/suggest`、`/rexxar`、`/frodo`、`/subject` 零开放 SSRF）、SHA-256 + `timingSafeEqual` 恒定时间鉴权、流式透传与结构化 JSON 日志，配套 `tests/worker.test.mjs` 单元测试。
+
 ## v2.5.73（2026-11-24，本地实现，已同步本地 media-tools）
 
 - **「待复核清理」目录组独立行卡片重构与彻底去重**：

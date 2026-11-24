@@ -1131,4 +1131,54 @@ console.log("===================================================================
     assert(alerts[0].includes('【动漫】') && alerts[0].includes('【非动漫】'), '保存提示必须告知两套规则均已保存');
     console.log('✓ 补缺站点规则刷新回显持久化与双页签协同保存回归测试通过');
   }
+
+  // ======================================================================
+  // 验证 v2.5.74 豆瓣主备健康灯三态渲染与点击打开配置弹窗
+  // ======================================================================
+  {
+    const topBarEl = { innerHTML: '' };
+    let healthPayload = null;
+    const hCtx = {
+      window: {},
+      document: {
+        getElementById: (id) => (id === 'topStatusBar' ? topBarEl : null),
+        querySelector: () => null,
+      },
+      console: { warn() {} },
+      escapeHtml: (s) => String(s ?? ''),
+      api: async () => healthPayload,
+      openDoubanConfigModal() {},
+    };
+    const chCode = htmlContent.match(/async function checkHealth\([^]*?\n    \}/);
+    assert(chCode, '必须存在 checkHealth 函数');
+    assert(htmlContent.includes('id="doubanConfigModal"'), '必须存在豆瓣配置弹窗 doubanConfigModal');
+    assert(htmlContent.includes('Cookie-Editor'), '豆瓣配置弹窗必须内置 Cookie-Editor 指引');
+    vm.createContext(hCtx);
+    vm.runInContext(chCode[0], hCtx);
+
+    healthPayload = {
+      version: '2.5.74',
+      services: { cd2: 'online', moviepilot: 'online (v2.15.6)', tmdb: 'online', douban: 'online' },
+      douban_status: { active_channel: 'moviepilot' },
+    };
+    await hCtx.checkHealth();
+    assert(topBarEl.innerHTML.includes('bg-emerald-500') && topBarEl.innerHTML.includes('openDoubanConfigModal()'), 'online 态必须渲染绿点并可点击打开配置弹窗');
+
+    healthPayload = {
+      version: '2.5.74',
+      services: { cd2: 'online', moviepilot: 'online (v2.15.6)', tmdb: 'online', douban: 'fallback:cf_proxy' },
+      douban_status: { active_channel: 'cf_proxy', mp_retry_in_seconds: 240 },
+    };
+    await hCtx.checkHealth();
+    assert(topBarEl.innerHTML.includes('bg-cyan-500') && topBarEl.innerHTML.includes('豆瓣 (备选)'), '备选态必须渲染青色指示灯及「豆瓣 (备选)」');
+
+    healthPayload = {
+      version: '2.5.74',
+      services: { cd2: 'online', moviepilot: 'online (v2.15.6)', tmdb: 'online', douban: 'error' },
+      douban_status: { active_channel: 'none', mp_last_error: '返回空结果' },
+    };
+    await hCtx.checkHealth();
+    assert(topBarEl.innerHTML.includes('bg-red-500') && topBarEl.innerHTML.includes('openDoubanConfigModal()'), '异常态必须渲染红点且提示点击配置');
+    console.log('✓ 豆瓣主备状态灯三态渲染与配置弹窗绑定契约测试通过');
+  }
 })().catch(error => {console.error(error); process.exitCode = 1;});

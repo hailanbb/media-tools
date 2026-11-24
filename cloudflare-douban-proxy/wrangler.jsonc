@@ -1,0 +1,25 @@
+{
+  "$schema": "https://raw.githubusercontent.com/cloudflare/workers-sdk/main/packages/wrangler/config-schema.json",
+  "name": "mediaflow-douban-proxy",
+  "main": "src/index.js",
+  "compatibility_date": "2026-11-24",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "routes": [
+    {
+      "pattern": "douban.ubaby.top",
+      "custom_domain": true
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 1
+    }
+  }
+}

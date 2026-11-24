@@ -2056,6 +2056,88 @@
     </div>
   </dialog>
 
+  <!-- 原生无障碍弹窗：豆瓣主备通道与 Cookie-Editor 一键导入 -->
+  <dialog id="doubanConfigModal" aria-labelledby="doubanConfigTitle" style="overscroll-behavior: contain;" class="w-[95vw] max-w-2xl m-auto p-0 rounded-2xl bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 border border-slate-200 dark:border-slate-700 shadow-2xl overflow-hidden">
+    <div class="flex flex-col max-h-[90dvh]">
+      <div class="flex items-center justify-between px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-900">
+        <div class="flex items-center gap-2 min-w-0">
+          <i class="fa-solid fa-plug-circle-bolt text-cyan-600 dark:text-cyan-400"></i>
+          <h3 id="doubanConfigTitle" class="text-sm font-bold truncate">豆瓣主备通道配置（MoviePilot 自动熔断切换 &amp; Cookie-Editor）</h3>
+        </div>
+        <form method="dialog">
+          <button type="submit" aria-label="关闭弹窗" class="w-8 h-8 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-200/60 dark:hover:bg-slate-800 flex items-center justify-center transition">
+            <i class="fa-solid fa-xmark"></i>
+          </button>
+        </form>
+      </div>
+      <div class="p-5 overflow-y-auto space-y-4 text-xs">
+        <div id="doubanGatewayStatusCard" class="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 flex flex-wrap items-center justify-between gap-2">
+          <div class="space-y-1">
+            <div class="font-semibold text-slate-800 dark:text-slate-100" id="doubanStatusSummaryText">正在读取通道状态...</div>
+            <div class="text-[11px] text-slate-500 dark:text-slate-400" id="doubanStatusSubText">MoviePilot 异常时自动切换备选通道；MP 恢复后冷却期满自动回切。</div>
+          </div>
+          <button type="button" onclick="refreshDoubanHealthNow()" class="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-semibold transition flex items-center gap-1.5">
+            <i class="fa-solid fa-rotate text-[11px]"></i>
+            <span>强制重探状态</span>
+          </button>
+        </div>
+
+        <div class="p-3.5 rounded-xl border border-cyan-200/80 dark:border-cyan-900/60 bg-cyan-50/40 dark:bg-cyan-950/20 space-y-2.5">
+          <div class="flex items-center justify-between gap-2">
+            <span class="font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
+              <i class="fa-solid fa-cloud text-cyan-600 dark:text-cyan-400"></i>
+              <span>备选通道 1：Cloudflare Workers 豆瓣反代（推荐优先）</span>
+            </span>
+            <span id="doubanProxyTokenBadge" class="text-[11px] px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400">未设密钥</span>
+          </div>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label for="doubanProxyBaseInput" class="block font-semibold text-slate-700 dark:text-slate-300 mb-1">反代服务地址</label>
+              <input id="doubanProxyBaseInput" type="url" placeholder="https://douban.ubaby.top" class="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white font-mono text-xs">
+            </div>
+            <div>
+              <label for="doubanProxyTokenInput" class="block font-semibold text-slate-700 dark:text-slate-300 mb-1">访问密钥 (X-Proxy-Token，留空保留原密钥)</label>
+              <input id="doubanProxyTokenInput" type="password" autocomplete="new-password" placeholder="输入新密钥或留空不变" class="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white font-mono text-xs">
+            </div>
+          </div>
+          <label class="inline-flex items-center gap-1.5 text-[11px] text-slate-600 dark:text-slate-400 cursor-pointer">
+            <input id="doubanClearTokenCheck" type="checkbox" class="rounded border-slate-300 text-amber-600 focus:ring-amber-500">
+            <span>清空已保存的反代访问密钥</span>
+          </label>
+        </div>
+
+        <div class="p-3.5 rounded-xl border border-amber-200/80 dark:border-amber-900/60 bg-amber-50/40 dark:bg-amber-950/20 space-y-2.5">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <span class="font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
+              <i class="fa-solid fa-cookie-bite text-amber-600 dark:text-amber-400"></i>
+              <span>备选通道 2：豆瓣 Cookie（原生支持 Cookie-Editor 一键导入）</span>
+            </span>
+            <button type="button" onclick="clearDoubanCookieConfig()" class="text-[11px] text-rose-600 dark:text-rose-400 hover:underline font-medium">清空已存 Cookie</button>
+          </div>
+          <div class="p-2.5 rounded-lg bg-white/80 dark:bg-slate-900/60 border border-amber-200/70 dark:border-amber-800/60 text-[11px] text-slate-600 dark:text-slate-300 space-y-1">
+            <div class="font-semibold text-amber-800 dark:text-amber-300">三步完成 Cookie 导入（无需手动拼接、绝不存明文）：</div>
+            <div>1. 浏览器安装扩展 <b>Cookie-Editor</b> 并打开登录 <span class="font-mono">https://movie.douban.com</span>；</div>
+            <div>2. 点击扩展图标 → <b>Export</b> → 选择 <b>JSON</b>（同样支持 Header String / Netscape）；</div>
+            <div>3. 直接粘贴到下方输入框并点击「保存并测试」（自动仅提取 <span class="font-mono">.douban.com</span> 核心字段并脱敏）。</div>
+          </div>
+          <div id="doubanCookieSummaryBar" class="text-[11px] px-2.5 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">尚未导入豆瓣 Cookie</div>
+          <textarea id="doubanRawCookieInput" rows="4" placeholder='粘贴 Cookie-Editor 导出的 JSON 数组（[{"name":"dbcl2",...}]）、Netscape 或 Cookie 字符串；若无需更新 Cookie 请留空' class="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white font-mono text-[11px]"></textarea>
+        </div>
+
+        <div id="doubanTestResultBox" class="hidden p-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/70 dark:bg-slate-800/40 space-y-2"></div>
+      </div>
+      <div class="px-5 py-3 border-t border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2 bg-slate-50/50 dark:bg-slate-900">
+        <form method="dialog">
+          <button type="submit" class="px-3.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-xs font-medium transition">关闭</button>
+        </form>
+        <div class="flex items-center gap-2">
+          <button type="button" id="doubanTestOnlyBtn" onclick="testDoubanGatewayDraft()" class="px-3.5 py-1.5 rounded-lg border border-cyan-300 dark:border-cyan-700 bg-cyan-50 dark:bg-cyan-950/40 hover:bg-cyan-100 dark:hover:bg-cyan-900/60 text-cyan-800 dark:text-cyan-200 text-xs font-semibold transition">仅测试当前输入</button>
+          <button type="button" id="doubanSaveBtn" onclick="saveDoubanGatewayConfig()" class="px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-sm transition">保存并测试连通性</button>
+        </div>
+      </div>
+    </div>
+  </dialog>
+
 
   <!-- ================= 交互逻辑脚本（真实 API 版） ================= -->
   <script>
@@ -2161,18 +2243,26 @@
       }
     }
 
-    async function checkHealth() {
+    async function checkHealth(forceRefresh = false) {
       try {
-        const data = await api('/api/system/health');
+        const healthUrl = forceRefresh ? '/api/system/health?force_refresh=true' : '/api/system/health';
+        const data = await api(healthUrl);
         // 兼容尚未重启的旧服务：它只返回原始 HTML，不能把新页面误标为新版后端。
         const pageVersion = document.querySelector('meta[name="mediaflow-version"]')?.content || '';
         if (data.version && pageVersion.startsWith('__')) {
           const badge = document.getElementById('appVersionBadge');
           if (badge) { badge.textContent = `v${data.version} · 更新待加载`; badge.title = '前端文件已更新，后端尚未加载配套接口；请在批次结束后重启服务'; }
         }
+        if (typeof window !== 'undefined') {
+          window._lastDoubanStatus = data.douban_status || null;
+        }
         const container = document.getElementById('topStatusBar') || document.querySelector('[title*="CloudDrive2"]')?.parentElement?.parentElement;
         if (!container) return;
+        const safeEsc = (typeof escapeHtml === 'function')
+          ? escapeHtml
+          : (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
         const services = data.services || {};
+        const doubanDetail = data.douban_status || {};
         const items = [
           { key: 'cd2', label: 'CD2 云盘' },
           { key: 'moviepilot', label: 'MP' },
@@ -2181,6 +2271,33 @@
         ];
         container.innerHTML = items.map(s => {
           const val = services[s.key] || 'unknown';
+          if (s.key === 'douban') {
+            const isOnline = val.startsWith('online');
+            const isFallback = val.startsWith('fallback');
+            const isNotCfg = val === 'not_configured';
+            const color = isOnline
+              ? 'bg-emerald-500'
+              : (isFallback ? 'bg-cyan-500' : (isNotCfg ? 'bg-slate-400' : 'bg-red-500'));
+            const textLabel = isFallback ? '豆瓣 (备选)' : '豆瓣';
+            const retrySec = Number(doubanDetail.mp_retry_in_seconds || 0);
+            let titleText = `豆瓣: ${val}`;
+            if (isOnline) {
+              titleText = '豆瓣: MoviePilot 主通道在线（点击配置备选或查看详情）';
+            } else if (isFallback) {
+              const fbName = val === 'fallback:cf_proxy' ? 'Cloudflare 反代' : 'Cookie 直连';
+              titleText = `豆瓣: 已自动切换备选通道 [${fbName}]${retrySec > 0 ? ` · ${retrySec}s 后自动探测回切 MP` : ''}（点击配置）`;
+            } else if (isNotCfg) {
+              titleText = '豆瓣: 未配置（点击可配置 Cloudflare 反代或 Cookie）';
+            } else {
+              const errHint = doubanDetail.mp_last_error || doubanDetail.last_fallback_error || val;
+              titleText = `豆瓣异常: ${errHint}（点击配置 Cloudflare 反代或 Cookie-Editor）`;
+            }
+            return `
+              <button type="button" onclick="openDoubanConfigModal()" class="flex items-center space-x-1.5 hover:opacity-80 transition cursor-pointer" title="${safeEsc(titleText)}">
+                <span class="w-2 h-2 rounded-full ${color}"></span>
+                <span>${textLabel}</span>
+              </button>`;
+          }
           const online = val.startsWith('online') || val === 'configured';
           const color = online ? 'bg-emerald-500' : (val === 'not_configured' ? 'bg-slate-400' : 'bg-red-500');
           let shortLabel = '';
@@ -2189,13 +2306,181 @@
             if (m) shortLabel = 'v' + m[1];
           }
           return `
-            <div class="flex items-center space-x-1.5" title="${s.label}: ${val}">
+            <div class="flex items-center space-x-1.5" title="${safeEsc(s.label)}: ${safeEsc(val)}">
               <span class="w-2 h-2 rounded-full ${color}"></span>
               <span>${s.label}${shortLabel ? ' ' + shortLabel : ''}</span>
             </div>`;
         }).join('<span class="text-slate-300 dark:text-slate-700">•</span>');
       } catch (e) {
         console.warn('Health check failed:', e);
+      }
+    }
+
+    function _renderDoubanModalConfig(cfgData) {
+      const proxyInput = document.getElementById('doubanProxyBaseInput');
+      const tokenInput = document.getElementById('doubanProxyTokenInput');
+      const clearTokenCheck = document.getElementById('doubanClearTokenCheck');
+      const tokenBadge = document.getElementById('doubanProxyTokenBadge');
+      const cookieBar = document.getElementById('doubanCookieSummaryBar');
+      const rawCookieInput = document.getElementById('doubanRawCookieInput');
+      const statusSumEl = document.getElementById('doubanStatusSummaryText');
+      const statusSubEl = document.getElementById('doubanStatusSubText');
+
+      if (proxyInput) proxyInput.value = cfgData.proxy_base || '';
+      if (tokenInput) tokenInput.value = '';
+      if (clearTokenCheck) clearTokenCheck.checked = false;
+      if (rawCookieInput) rawCookieInput.value = '';
+
+      if (tokenBadge) {
+        tokenBadge.textContent = cfgData.has_proxy_token ? '已配置密钥 (已脱敏保护)' : '未设密钥';
+        tokenBadge.className = cfgData.has_proxy_token
+          ? 'text-[11px] px-2 py-0.5 rounded bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 font-semibold'
+          : 'text-[11px] px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400';
+      }
+
+      const cs = cfgData.cookie_summary || {};
+      if (cookieBar) {
+        if (cs.configured) {
+          const fmtLabel = cs.format_detected === 'cookie_editor_json' ? 'Cookie-Editor JSON' : (cs.format_detected || 'Header');
+          const uidPart = cs.has_dbcl2 ? `dbcl2 UID: ${cs.uid_masked}` : '未含 dbcl2 (仅匿名指纹)';
+          cookieBar.innerHTML = `<span class="font-semibold text-emerald-700 dark:text-emerald-300">✓ 已导入 ${cs.cookie_count || 0} 项 (${escapeHtml(fmtLabel)})</span> · ${escapeHtml(uidPart)} · bid: ${escapeHtml(cs.bid_masked || '-')}${cs.updated_at ? ` · 更新于 ${escapeHtml(cs.updated_at)}` : ''}`;
+        } else {
+          cookieBar.textContent = '尚未导入豆瓣 Cookie';
+        }
+      }
+
+      const st = cfgData.status || (typeof window !== 'undefined' ? window._lastDoubanStatus : null) || {};
+      if (statusSumEl) {
+        const ch = st.active_channel || 'moviepilot';
+        const chMap = {
+          moviepilot: '当前通道：MoviePilot 主通道',
+          cf_proxy: '当前通道：Cloudflare Workers 反代（备选接管中）',
+          direct_cookie: '当前通道：Cookie 直连（备选接管中）',
+        };
+        statusSumEl.textContent = chMap[ch] || `当前通道：${ch}`;
+      }
+      if (statusSubEl) {
+        const parts = [];
+        if (st.mp_state === 'cooldown' && st.mp_retry_in_seconds > 0) {
+          parts.push(`MP 主通道冷却中（${st.mp_retry_in_seconds}s 后自动探测回切）`);
+        } else if (st.mp_last_error) {
+          parts.push(`MP 最近异常：${st.mp_last_error}`);
+        } else {
+          parts.push('MP 主通道就绪');
+        }
+        if (st.last_fallback_error) parts.push(`备选提示：${st.last_fallback_error}`);
+        statusSubEl.textContent = parts.join(' · ');
+      }
+    }
+
+    function _renderDoubanTestResults(testRes, parseResult) {
+      const box = document.getElementById('doubanTestResultBox');
+      if (!box || !testRes || !testRes.results) return;
+      const names = {
+        moviepilot: 'MoviePilot 主通道',
+        cf_proxy: 'Cloudflare Workers 反代',
+        direct_cookie: '本机 Cookie 直连',
+      };
+      const rows = Object.entries(testRes.results).map(([key, r]) => {
+        const icon = r.ok ? '🟢' : (r.configured === false ? '⚪' : '🔴');
+        const extra = r.sample_title ? ` · 命中「${escapeHtml(r.sample_title)}」` : '';
+        const ms = r.latency_ms ? ` (${r.latency_ms}ms)` : '';
+        return `
+          <div class="flex items-center justify-between gap-2 text-[11px] py-1 border-b border-slate-200/60 dark:border-slate-700/60 last:border-0">
+            <span class="font-semibold text-slate-800 dark:text-slate-200">${icon} ${escapeHtml(names[key] || key)}</span>
+            <span class="text-slate-600 dark:text-slate-300 text-right">${escapeHtml(r.reason || '-')}${extra}${ms}</span>
+          </div>`;
+      }).join('');
+
+      const warnings = (parseResult && Array.isArray(parseResult.warnings) && parseResult.warnings.length > 0)
+        ? `<div class="text-[11px] text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 rounded-lg px-2.5 py-1.5">${parseResult.warnings.map(w => escapeHtml(w)).join('；')}</div>`
+        : '';
+
+      box.classList.remove('hidden');
+      box.innerHTML = `<div class="font-bold text-slate-800 dark:text-slate-100">三通道实测结果</div>${warnings}${rows}`;
+    }
+
+    async function openDoubanConfigModal() {
+      const dlg = document.getElementById('doubanConfigModal');
+      const box = document.getElementById('doubanTestResultBox');
+      if (box) { box.classList.add('hidden'); box.innerHTML = ''; }
+      try {
+        const cfg = await api('/api/system/douban/config');
+        _renderDoubanModalConfig(cfg);
+      } catch (e) {
+        alert(`读取豆瓣通道配置失败: ${e.message}`);
+      }
+      if (dlg && typeof dlg.showModal === 'function') dlg.showModal();
+    }
+
+    async function refreshDoubanHealthNow() {
+      await checkHealth(true);
+      try {
+        const cfg = await api('/api/system/douban/config');
+        _renderDoubanModalConfig(cfg);
+      } catch (_) {}
+    }
+
+    async function testDoubanGatewayDraft() {
+      const btn = document.getElementById('doubanTestOnlyBtn');
+      const oldText = btn ? btn.textContent : '';
+      if (btn) { btn.disabled = true; btn.textContent = '探测中...'; }
+      try {
+        const payload = {
+          proxy_base: (document.getElementById('doubanProxyBaseInput')?.value || '').trim(),
+          proxy_token: (document.getElementById('doubanProxyTokenInput')?.value || '').trim(),
+          clear_proxy_token: Boolean(document.getElementById('doubanClearTokenCheck')?.checked),
+          raw_cookie: (document.getElementById('doubanRawCookieInput')?.value || '').trim(),
+        };
+        const res = await api('/api/system/douban/test', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        });
+        _renderDoubanTestResults(res, res.parse_preview);
+      } catch (e) {
+        alert(`测试失败: ${e.message}`);
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = oldText; }
+      }
+    }
+
+    async function saveDoubanGatewayConfig() {
+      const btn = document.getElementById('doubanSaveBtn');
+      const oldText = btn ? btn.textContent : '';
+      if (btn) { btn.disabled = true; btn.textContent = '保存并探测中...'; }
+      try {
+        const payload = {
+          proxy_base: (document.getElementById('doubanProxyBaseInput')?.value || '').trim(),
+          proxy_token: (document.getElementById('doubanProxyTokenInput')?.value || '').trim(),
+          clear_proxy_token: Boolean(document.getElementById('doubanClearTokenCheck')?.checked),
+          raw_cookie: (document.getElementById('doubanRawCookieInput')?.value || '').trim(),
+          run_test: true,
+        };
+        const res = await api('/api/system/douban/config', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        });
+        if (res.config) _renderDoubanModalConfig(res.config);
+        if (res.test) _renderDoubanTestResults(res.test, res.parse_result);
+        await checkHealth(true);
+      } catch (e) {
+        alert(`保存失败: ${e.message}`);
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = oldText; }
+      }
+    }
+
+    async function clearDoubanCookieConfig() {
+      if (!confirm('确认清空已保存的豆瓣 Cookie 吗？')) return;
+      try {
+        const res = await api('/api/system/douban/config', {
+          method: 'POST',
+          body: JSON.stringify({ clear_cookie: true }),
+        });
+        if (res.config) _renderDoubanModalConfig(res.config);
+        await checkHealth(true);
+      } catch (e) {
+        alert(`清空失败: ${e.message}`);
       }
     }
 
