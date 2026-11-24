@@ -26,9 +26,19 @@ from app.core.douban_lookup import (
 log = logging.getLogger("mediaflow.douban_gateway")
 
 _DEFAULT_COOLDOWN_SECONDS = 300
+_CF_PROXY_MIN_INTERVAL = 1.1
+_CF_PROXY_BACKOFF_SECONDS = 20.0
 _DIRECT_COOKIE_MIN_INTERVAL = 1.5
+_CACHE_TTL_SECONDS = 600.0
+_CF_PROXY_LOCK = asyncio.Lock()
+_LAST_CF_REQUEST_AT = 0.0
 _DIRECT_COOKIE_LOCK = asyncio.Lock()
 _LAST_DIRECT_REQUEST_AT = 0.0
+
+# 进程内轻量 TTL 缓存：同轮初检内避免对同一剧名或同一 subject_id 重复触发豆瓣风控
+_SEARCH_CACHE: dict[str, tuple[float, dict[str, str]]] = {}
+_DETAIL_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_SUGGEST_META_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 
 # 进程内熔断状态（单测可通过 reset_state_for_tests() 复位）
 _STATE: dict[str, Any] = {
@@ -37,12 +47,14 @@ _STATE: dict[str, Any] = {
     "mp_last_checked_at": 0.0,
     "last_active_channel": "moviepilot",  # moviepilot | cf_proxy | direct_cookie | none
     "last_fallback_error": "",
+    "cf_backoff_until": 0.0,
+    "cf_backoff_reason": "",
 }
 
 
 def reset_state_for_tests() -> None:
-    """重置进程内熔断状态与直连节流时间戳（专供单元测试隔离使用）。"""
-    global _LAST_DIRECT_REQUEST_AT
+    """重置进程内熔断状态、缓存与节流时间戳（专供单元测试隔离使用）。"""
+    global _LAST_DIRECT_REQUEST_AT, _LAST_CF_REQUEST_AT
     _STATE.update(
         {
             "mp_cooldown_until": 0.0,
@@ -50,9 +62,15 @@ def reset_state_for_tests() -> None:
             "mp_last_checked_at": 0.0,
             "last_active_channel": "moviepilot",
             "last_fallback_error": "",
+            "cf_backoff_until": 0.0,
+            "cf_backoff_reason": "",
         }
     )
     _LAST_DIRECT_REQUEST_AT = 0.0
+    _LAST_CF_REQUEST_AT = 0.0
+    _SEARCH_CACHE.clear()
+    _DETAIL_CACHE.clear()
+    _SUGGEST_META_CACHE.clear()
 
 
 def _config_file_path() -> Path:
@@ -261,8 +279,13 @@ def save_runtime_config(payload: dict[str, Any]) -> dict[str, Any]:
         "failover_cooldown_seconds": cooldown,
     }
     _write_file_config(to_save)
-    # 配置变更后清除上次备选报错并允许立即可测
+    # 配置变更后清除上次备选报错、退避窗口与缓存，允许立即可测
     _STATE["last_fallback_error"] = ""
+    _STATE["cf_backoff_until"] = 0.0
+    _STATE["cf_backoff_reason"] = ""
+    _SEARCH_CACHE.clear()
+    _DETAIL_CACHE.clear()
+    _SUGGEST_META_CACHE.clear()
 
     public_parse_result = (
         {
@@ -319,6 +342,89 @@ def _is_blocked_response(status_code: int, text: str) -> bool:
     return any(marker in lowered for marker in ("error code: 004", "sec.douban.com", "captcha", "访问受限", "异常请求"))
 
 
+def is_cf_proxy_in_backoff() -> bool:
+    """检查 CF 反代是否处于刚触发 302/403 后的短暂风控退避窗口。"""
+    return time.monotonic() < float(_STATE.get("cf_backoff_until") or 0.0)
+
+
+def _record_cf_backoff(status_code: int) -> str:
+    _STATE["cf_backoff_until"] = time.monotonic() + _CF_PROXY_BACKOFF_SECONDS
+    if status_code == 302:
+        reason = "CF 反代触发豆瓣临时风控 (HTTP 302)，已自动退避限流（建议在顶栏「豆瓣」导入 Cookie-Editor 提升稳定性）"
+    elif status_code == 403:
+        reason = "CF 反代被豆瓣拦截 (HTTP 403)，已自动退避（建议导入豆瓣 Cookie-Editor）"
+    else:
+        reason = f"CF 反代 HTTP {status_code}"
+    _STATE["cf_backoff_reason"] = reason
+    _STATE["last_fallback_error"] = reason
+    return reason
+
+
+def _cache_get(store: dict[str, tuple[float, Any]], key: str) -> Any | None:
+    entry = store.get(key)
+    if not entry:
+        return None
+    expires_at, value = entry
+    if time.monotonic() > expires_at:
+        store.pop(key, None)
+        return None
+    return value
+
+
+def _cache_set(store: dict[str, tuple[float, Any]], key: str, value: Any, ttl: float = _CACHE_TTL_SECONDS) -> None:
+    if len(store) > 512:
+        now = time.monotonic()
+        expired = [k for k, (exp, _) in store.items() if exp <= now]
+        for k in expired:
+            store.pop(k, None)
+        if len(store) > 512:
+            store.clear()
+    store[key] = (time.monotonic() + ttl, value)
+
+
+def _cache_suggest_items_meta(hits: list[dict[str, Any]]) -> None:
+    """缓存 /suggest 返回的剧集集数与年份元数据，减少不必要的二次详情请求。"""
+    for it in hits:
+        did = str(it.get("id") or "").strip()
+        ep_raw = str(it.get("episode") or "").strip()
+        if not did.isdigit() or not ep_raw.isdigit() or int(ep_raw) <= 0:
+            continue
+        meta = normalize_detail(
+            {
+                "id": did,
+                "douban_id": did,
+                "title": str(it.get("title") or ""),
+                "sub_title": str(it.get("sub_title") or ""),
+                "year": str(it.get("year") or ""),
+                "number_of_episodes": int(ep_raw),
+                "type": "电视剧",
+                "source_url": f"https://movie.douban.com/subject/{did}/",
+            }
+        )
+        _cache_set(_SUGGEST_META_CACHE, did, meta)
+
+
+def get_suggest_cached_detail(subject_id: str) -> dict[str, Any]:
+    """读取 /suggest 阶段已缓存的轻量剧集详情（含集数与年份），命中可免发详情请求。"""
+    sid = str(subject_id or "").strip()
+    if not sid.isdigit():
+        return {}
+    cached = _cache_get(_SUGGEST_META_CACHE, sid)
+    return dict(cached) if isinstance(cached, dict) else {}
+
+
+async def _throttle_cf_proxy(min_interval: float = _CF_PROXY_MIN_INTERVAL) -> None:
+    global _LAST_CF_REQUEST_AT
+    if min_interval <= 0:
+        return
+    async with _CF_PROXY_LOCK:
+        now = time.monotonic()
+        wait = (_LAST_CF_REQUEST_AT + min_interval) - now
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _LAST_CF_REQUEST_AT = time.monotonic()
+
+
 async def _throttle_direct_cookie(min_interval: float = _DIRECT_COOKIE_MIN_INTERVAL) -> None:
     global _LAST_DIRECT_REQUEST_AT
     if min_interval <= 0:
@@ -337,55 +443,84 @@ async def search_fallback(
     *,
     diagnostics: list[dict[str, Any]] | None = None,
     throttle_seconds: float = _DIRECT_COOKIE_MIN_INTERVAL,
+    cf_throttle_seconds: float = _CF_PROXY_MIN_INTERVAL,
 ) -> dict[str, str]:
-    """按优先级通过备选通道检索豆瓣候选 {subject_id: title}：CF 反代 → 本机 Cookie 直连。"""
+    """按优先级通过备选通道检索豆瓣候选 {subject_id: title}：CF 反代（带平滑限流/缓存/302退避）→ 本机 Cookie 直连。"""
     cfg = _effective_config()
     diag = diagnostics if diagnostics is not None else []
+    q_norm = str(query or "").strip()
+    if not q_norm:
+        return {}
+
+    cached_hits = _cache_get(_SEARCH_CACHE, q_norm)
+    if isinstance(cached_hits, dict):
+        diag.append(
+            {
+                "source": "cf_proxy_suggest",
+                "query": q_norm,
+                "status": "returned" if cached_hits else "empty",
+                "candidate_count": len(cached_hits),
+                "reason": "命中本次豆瓣检索缓存" if cached_hits else "命中缓存（空列表）",
+            }
+        )
+        return dict(cached_hits)
+
     found: dict[str, str] = {}
 
-    # 1. Cloudflare Workers 反代通道
+    # 1. Cloudflare Workers 反代通道（带全局平滑限流与 302/403 退避，防止并发轰炸同一边缘 IP）
     if cfg["proxy_base"]:
-        try:
-            resp = await http_client.get(
-                f"{cfg['proxy_base']}/suggest",
-                params={"q": query},
-                headers=_build_cf_headers(cfg),
-            )
-            if resp.status_code == 200:
-                hits = search_items(resp.json())
+        if is_cf_proxy_in_backoff():
+            reason = str(_STATE.get("cf_backoff_reason") or "CF 反代风控退避中，已跳过连续请求")
+            diag.append({"source": "cf_proxy_suggest", "query": q_norm, "status": "blocked", "reason": reason})
+        else:
+            try:
+                await _throttle_cf_proxy(cf_throttle_seconds)
+                resp = await http_client.get(
+                    f"{cfg['proxy_base']}/suggest",
+                    params={"q": q_norm},
+                    headers=_build_cf_headers(cfg),
+                )
+                if resp.status_code == 200:
+                    hits = search_items(resp.json())
+                    _cache_suggest_items_meta(hits)
+                    diag.append(
+                        {
+                            "source": "cf_proxy_suggest",
+                            "query": q_norm,
+                            "status": "returned" if hits else "empty",
+                            "candidate_count": len(hits),
+                            "reason": "CF 反代返回候选" if hits else "CF 反代返回空列表",
+                        }
+                    )
+                    for it in hits:
+                        did = str(it.get("id") or "")
+                        if did.isdigit():
+                            found[did] = it.get("title") or ""
+                    _cache_set(_SEARCH_CACHE, q_norm, dict(found))
+                    if found:
+                        _STATE["last_active_channel"] = "cf_proxy"
+                        _STATE["last_fallback_error"] = ""
+                        _STATE["cf_backoff_until"] = 0.0
+                        return found
+                elif resp.status_code in (302, 403):
+                    reason = _record_cf_backoff(resp.status_code)
+                    diag.append({"source": "cf_proxy_suggest", "query": q_norm, "status": "blocked", "reason": reason})
+                else:
+                    reason = f"CF 反代 HTTP {resp.status_code}"
+                    _STATE["last_fallback_error"] = reason
+                    diag.append({"source": "cf_proxy_suggest", "query": q_norm, "status": "failed", "reason": reason})
+            except Exception as exc:
+                reason = lookup_error_reason(exc)
+                _STATE["last_fallback_error"] = reason
                 diag.append(
                     {
                         "source": "cf_proxy_suggest",
-                        "query": query,
-                        "status": "returned" if hits else "empty",
-                        "candidate_count": len(hits),
-                        "reason": "CF 反代返回候选" if hits else "CF 反代返回空列表",
+                        "query": q_norm,
+                        "status": "failed",
+                        "reason": reason,
+                        "error_type": type(exc).__name__,
                     }
                 )
-                for it in hits:
-                    did = str(it.get("id") or "")
-                    if did.isdigit():
-                        found[did] = it.get("title") or ""
-                if found:
-                    _STATE["last_active_channel"] = "cf_proxy"
-                    _STATE["last_fallback_error"] = ""
-                    return found
-            else:
-                reason = f"CF 反代 HTTP {resp.status_code}"
-                _STATE["last_fallback_error"] = reason
-                diag.append({"source": "cf_proxy_suggest", "query": query, "status": "failed", "reason": reason})
-        except Exception as exc:
-            reason = lookup_error_reason(exc)
-            _STATE["last_fallback_error"] = reason
-            diag.append(
-                {
-                    "source": "cf_proxy_suggest",
-                    "query": query,
-                    "status": "failed",
-                    "reason": reason,
-                    "error_type": type(exc).__name__,
-                }
-            )
 
     # 2. 本机 Cookie 直连通道（带单 IP 限流与 004/验证码熔断）
     if cfg["cookie_header"]:
@@ -393,15 +528,16 @@ async def search_fallback(
             await _throttle_direct_cookie(throttle_seconds)
             resp = await http_client.get(
                 "https://movie.douban.com/j/subject_suggest",
-                params={"q": query},
+                params={"q": q_norm},
                 headers=_build_direct_headers("suggest", cfg["cookie_header"]),
             )
             if resp.status_code == 200 and not _is_blocked_response(resp.status_code, resp.text):
                 hits = search_items(resp.json())
+                _cache_suggest_items_meta(hits)
                 diag.append(
                     {
                         "source": "douban_cookie_suggest",
-                        "query": query,
+                        "query": q_norm,
                         "status": "returned" if hits else "empty",
                         "candidate_count": len(hits),
                         "reason": "Cookie 通道返回候选" if hits else "Cookie 通道返回空列表",
@@ -411,6 +547,7 @@ async def search_fallback(
                     did = str(it.get("id") or "")
                     if did.isdigit():
                         found[did] = it.get("title") or ""
+                _cache_set(_SEARCH_CACHE, q_norm, dict(found))
                 if found:
                     _STATE["last_active_channel"] = "direct_cookie"
                     _STATE["last_fallback_error"] = ""
@@ -418,14 +555,14 @@ async def search_fallback(
             else:
                 reason = "Cookie 已失效或触发豆瓣验证/004拦截" if _is_blocked_response(resp.status_code, resp.text) else f"HTTP {resp.status_code}"
                 _STATE["last_fallback_error"] = reason
-                diag.append({"source": "douban_cookie_suggest", "query": query, "status": "blocked", "reason": reason})
+                diag.append({"source": "douban_cookie_suggest", "query": q_norm, "status": "blocked", "reason": reason})
         except Exception as exc:
             reason = lookup_error_reason(exc)
             _STATE["last_fallback_error"] = reason
             diag.append(
                 {
                     "source": "douban_cookie_suggest",
-                    "query": query,
+                    "query": q_norm,
                     "status": "failed",
                     "reason": reason,
                     "error_type": type(exc).__name__,
@@ -441,8 +578,9 @@ async def fetch_detail_fallback(
     *,
     diagnostics: list[dict[str, Any]] | None = None,
     throttle_seconds: float = _DIRECT_COOKIE_MIN_INTERVAL,
+    cf_throttle_seconds: float = _CF_PROXY_MIN_INTERVAL,
 ) -> dict[str, Any]:
-    """按优先级通过备选通道拉取豆瓣单条目详情（兼容 Rexxar / Frodo / Subject HTML）。"""
+    """按优先级通过备选通道拉取豆瓣单条目详情（Rexxar 优先 + TTL 缓存 + Suggest 元数据兜底）。"""
     cfg = _effective_config()
     diag = diagnostics if diagnostics is not None else []
     sid = str(subject_id or "").strip()
@@ -456,27 +594,44 @@ async def fetch_detail_fallback(
             or (d.get("title") and str(d.get("type") or "").casefold() in ("电影", "movie"))
         )
 
-    # 1. Cloudflare Workers 反代（Rexxar → Frodo → Subject HTML）
+    cached_detail = _cache_get(_DETAIL_CACHE, sid)
+    if isinstance(cached_detail, dict) and _is_usable_detail(cached_detail):
+        return dict(cached_detail)
+
+    # 1. Cloudflare Workers 反代（优先 Rexxar；404 直接终止；仅在配置了 Cookie 时才尝试网页 /subject 兜底，避免无 Cookie 必出 302）
     if cfg["proxy_base"]:
-        cf_headers = _build_cf_headers(cfg)
-        for ch_name, path, is_html in (
-            ("cf_proxy_rexxar", f"/rexxar/tv/{sid}", False),
-            ("cf_proxy_frodo", f"/frodo/tv/{sid}", False),
-            ("cf_proxy_subject", f"/subject/{sid}", True),
-        ):
-            try:
-                resp = await http_client.get(f"{cfg['proxy_base']}{path}", headers=cf_headers)
-                if resp.status_code != 200:
-                    diag.append({"source": ch_name, "subject_id": sid, "status": "failed", "reason": f"HTTP {resp.status_code}"})
-                    continue
-                detail = subject_page_detail(resp.text, sid) if is_html else normalize_detail(resp.json())
-                if _is_usable_detail(detail):
-                    _STATE["last_active_channel"] = "cf_proxy"
-                    _STATE["last_fallback_error"] = ""
-                    return detail
-                diag.append({"source": ch_name, "subject_id": sid, "status": "unavailable", "reason": "详情缺少季集数"})
-            except Exception as exc:
-                diag.append({"source": ch_name, "subject_id": sid, "status": "failed", "reason": lookup_error_reason(exc)})
+        if is_cf_proxy_in_backoff():
+            reason = str(_STATE.get("cf_backoff_reason") or "CF 反代风控退避中")
+            diag.append({"source": "cf_proxy_rexxar", "subject_id": sid, "status": "blocked", "reason": reason})
+        else:
+            cf_headers = _build_cf_headers(cfg)
+            cf_channels: list[tuple[str, str, bool]] = [("cf_proxy_rexxar", f"/rexxar/tv/{sid}", False)]
+            if cfg["cookie_header"]:
+                cf_channels.append(("cf_proxy_subject", f"/subject/{sid}", True))
+            for ch_name, path, is_html in cf_channels:
+                try:
+                    await _throttle_cf_proxy(cf_throttle_seconds)
+                    resp = await http_client.get(f"{cfg['proxy_base']}{path}", headers=cf_headers)
+                    if resp.status_code == 404:
+                        diag.append({"source": ch_name, "subject_id": sid, "status": "unavailable", "reason": "非剧集条目 (HTTP 404)"})
+                        break
+                    if resp.status_code in (302, 403):
+                        reason = _record_cf_backoff(resp.status_code)
+                        diag.append({"source": ch_name, "subject_id": sid, "status": "blocked", "reason": reason})
+                        break
+                    if resp.status_code != 200:
+                        diag.append({"source": ch_name, "subject_id": sid, "status": "failed", "reason": f"HTTP {resp.status_code}"})
+                        continue
+                    detail = subject_page_detail(resp.text, sid) if is_html else normalize_detail(resp.json())
+                    if _is_usable_detail(detail):
+                        _STATE["last_active_channel"] = "cf_proxy"
+                        _STATE["last_fallback_error"] = ""
+                        _STATE["cf_backoff_until"] = 0.0
+                        _cache_set(_DETAIL_CACHE, sid, dict(detail))
+                        return detail
+                    diag.append({"source": ch_name, "subject_id": sid, "status": "unavailable", "reason": "详情缺少季集数"})
+                except Exception as exc:
+                    diag.append({"source": ch_name, "subject_id": sid, "status": "failed", "reason": lookup_error_reason(exc)})
 
     # 2. 本机 Cookie 直连（Rexxar → Subject HTML）
     if cfg["cookie_header"]:
@@ -496,9 +651,16 @@ async def fetch_detail_fallback(
                 if _is_usable_detail(detail):
                     _STATE["last_active_channel"] = "direct_cookie"
                     _STATE["last_fallback_error"] = ""
+                    _cache_set(_DETAIL_CACHE, sid, dict(detail))
                     return detail
             except Exception as exc:
                 diag.append({"source": ch_name, "subject_id": sid, "status": "failed", "reason": lookup_error_reason(exc)})
+
+    # 3. /suggest 阶段已返回的明确剧集元数据兜底（当详情接口短暂退避或被限流时仍可输出准确集数与年份）
+    suggest_detail = get_suggest_cached_detail(sid)
+    if _is_usable_detail(suggest_detail):
+        _cache_set(_DETAIL_CACHE, sid, dict(suggest_detail))
+        return suggest_detail
 
     return {}
 

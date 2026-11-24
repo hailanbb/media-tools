@@ -4,7 +4,7 @@
 
 **专为 115网盘 · CloudDrive2 · MoviePilot · Emby / Jellyfin 打造的下一代智能化媒体治理与生命周期工作流引擎**
 
-[![Release](https://img.shields.io/badge/Release-v2.5.75-6366f1?style=for-the-badge&logo=github)](VERSIONING.md)
+[![Release](https://img.shields.io/badge/Release-v2.5.76-6366f1?style=for-the-badge&logo=github)](VERSIONING.md)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776ab?style=for-the-badge&logo=python)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20Native%20%7C%20Docker-0078d4?style=for-the-badge&logo=windows)](#-快速启动与部署)
 [![MoviePilot](https://img.shields.io/badge/MoviePilot-v2.x%20Ready-ff5722?style=for-the-badge&logo=fastapi)](https://github.com/jxxghp/MoviePilot)
@@ -20,7 +20,7 @@
   <a href="#-配置指南-env">配置指南</a> •
   <a href="#-零数据丢失安全防线">安全防线</a> •
   <a href="#-技术方案与规范索引">文档索引</a> •
-  <a href="#-版本演进与重要里程碑">版本演进 (v2.5.75)</a>
+  <a href="#-版本演进与重要里程碑">版本演进 (v2.5.76)</a>
 </p>
 
 </div>
@@ -238,7 +238,8 @@ MediaFlow 所有配置项均以 `MF_` 前缀开头，大小写不敏感：
 
 | 版本号 | 发布日期 | 关键特性与核心演进 | 状态 |
 | :---: | :---: | :--- | :---: |
-| **`v2.5.75`** | **2026-11-24** | • **初检执行期页面抖动（CLS）彻底治理**：移除实时看板与进度条 `transition-all` 布局动画，全面启用 `contain: layout style paint` 与中英混排固定行高/等宽数字槽位，进度条升级为 GPU 合成层 `transform: scaleX(...)` 零重排渲染，同步消除启动首包延迟与背景重绘抖动 | **最新稳定版** |
+| **`v2.5.76`** | **2026-11-24** | • **豆瓣 CF 反代防 `302/403` 限流缓存治理 + 弹窗即时提示修复**：为 CF 反代加入 `1.1s` 平滑节流、10 分钟 TTL 缓存、`/suggest` 集数元数据兜底与 `302` 自动退避，初检备选搜索改为精简短路并取消无 Cookie 裸连 `403`；豆瓣配置弹窗结果区置顶，「强制重探状态」与「保存并测试连通性」补全加载态与明确连通结论 | **最新稳定版** |
+| **`v2.5.75`** | **2026-11-24** | • **初检执行期页面抖动（CLS）彻底治理**：移除实时看板与进度条 `transition-all` 布局动画，全面启用 `contain: layout style paint` 与中英混排固定行高/等宽数字槽位，进度条升级为 GPU 合成层 `transform: scaleX(...)` 零重排渲染，同步消除启动首包延迟与背景重绘抖动 | 历史里程碑 |
 | **`v2.5.74`** | **2026-11-24** | • **豆瓣主备自动切换与 Cloudflare 反代 / Cookie-Editor 一键导入**：MoviePilot 豆瓣主通道异常时自动熔断切换至 Cloudflare Workers 反代（`cloudflare-douban-proxy/`）或个人 Cookie 直连，恢复后自动回切；前端顶栏「豆瓣」状态灯新增青色 `豆瓣 (备选)` 态并可点击热配置与三通道实测 | 历史里程碑 |
 | **`v2.5.73`** | **2026-11-24** | • **「待复核清理」目录组独立行卡片重构与零重叠去重**：废除嵌套折叠外框，每组待确认归档目标以独立 `app-card` 行卡片平铺展示（行内直出全部关联路径与集数摘要），与下方单季清理列表职责彻底切分并分开计数<br/>• **覆盖矩阵逻辑纠偏**：消除多季目录组笛卡尔积 `0集` 假行与历史季膨胀；归档库未含本季如实标注 `本季未归档` 与 `—` | 历史里程碑 |
 | **`v2.5.72`** | **2026-11-24** | • **种子缓存 4 小时 TTL + 失败自动换种**：为可下载种子缓存增加 4h 有效期防 PT 签名直链过期；推送失败自动触发实时重搜并切换其他站点活种重试，同步清理 MP 转移记录；前后端完整透出每部失败作品的站点与报错原因 | 历史里程碑 |
@@ -275,7 +276,7 @@ media-tools/
 ├── 剧集整理docker页面设计/    # UI 原型设计与前端视觉规范稿
 ├── 媒体整理需求/             # 历史基线需求与 MoviePilot 接口接入技术白皮书
 ├── README.md               # 仓库主说明文档
-└── VERSIONING.md           # 完整版本全量变更日志 (v1.0 ~ v2.5.75)
+└── VERSIONING.md           # 完整版本全量变更日志 (v1.0 ~ v2.5.76)
 ```
 
 ---

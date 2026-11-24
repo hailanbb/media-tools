@@ -68,6 +68,8 @@ class TestDoubanNormalizeDetail(unittest.TestCase):
         raw = {
             "id": "25853071",
             "title": "庆余年 第一季",
+            "sub_title": "Joy of Life",
+            "aka": ["庆余年1", "Joy of Life Season 1"],
             "type": "tv",
             "episodes_count": 46,
             "pubdate": ["2019-11-26(中国大陆)"],
@@ -77,6 +79,8 @@ class TestDoubanNormalizeDetail(unittest.TestCase):
         self.assertEqual(norm["number_of_episodes"], 46)
         self.assertEqual(norm["type"], "电视剧")
         self.assertEqual(norm["year"], "2019")
+        self.assertIn("庆余年1", norm["names"])
+        self.assertIn("Joy of Life", norm["names"])
 
 
 class TestDoubanGatewayFailoverAndApi(unittest.IsolatedAsyncioTestCase):
@@ -208,6 +212,55 @@ class TestDoubanGatewayFailoverAndApi(unittest.IsolatedAsyncioTestCase):
                     r_health = await client.get("/api/system/health?force_refresh=true")
                 self.assertEqual(r_health.status_code, 200)
                 self.assertEqual(r_health.json()["services"]["douban"], "fallback:cf_proxy")
+
+    async def test_cf_proxy_cache_backoff_and_suggest_meta_fallback(self):
+        douban_gateway.save_runtime_config(
+            {
+                "proxy_base": "https://douban.ubaby.top",
+                "proxy_token": "tok123",
+            }
+        )
+
+        # 1. /suggest 命中后自动缓存查询结果与单条剧集元数据（episode/year），二次查询零网络请求
+        suggest_resp = SimpleNamespace(
+            status_code=200,
+            json=lambda: [
+                {
+                    "id": "25853071",
+                    "title": "庆余年 第一季",
+                    "sub_title": "Joy of Life",
+                    "year": "2019",
+                    "episode": "46",
+                    "type": "movie",
+                }
+            ],
+        )
+        fake_http = SimpleNamespace(get=AsyncMock(return_value=suggest_resp))
+        h1 = await douban_gateway.search_fallback("庆余年", fake_http, cf_throttle_seconds=0.0)
+        h2 = await douban_gateway.search_fallback("庆余年", fake_http, cf_throttle_seconds=0.0)
+        self.assertEqual(h1, {"25853071": "庆余年 第一季"})
+        self.assertEqual(h2, h1)
+        self.assertEqual(fake_http.get.await_count, 1)
+
+        # 2. /rexxar 遭遇 HTTP 302 时：触发 CF 风控退避，不再盲打 /frodo 或无 Cookie /subject，且自动由 /suggest 缓存兜底返回集数
+        diag = []
+        resp_302 = SimpleNamespace(status_code=302, text="302 Found")
+        fake_http_302 = SimpleNamespace(get=AsyncMock(return_value=resp_302))
+        detail = await douban_gateway.fetch_detail_fallback(
+            "25853071", fake_http_302, diagnostics=diag, cf_throttle_seconds=0.0
+        )
+        self.assertEqual(fake_http_302.get.await_count, 1)
+        self.assertTrue(douban_gateway.is_cf_proxy_in_backoff())
+        self.assertEqual(detail["number_of_episodes"], 46)
+        self.assertEqual(detail["year"], "2019")
+        self.assertTrue(any("HTTP 302" in d.get("reason", "") and "Cookie-Editor" in d.get("reason", "") for d in diag))
+
+        # 3. 退避期内发起新搜索直接短路跳过，不再向 CF 边缘 IP 连续轰炸
+        diag2 = []
+        fake_http_skip = SimpleNamespace(get=AsyncMock(side_effect=AssertionError("backoff should skip CF call")))
+        skipped = await douban_gateway.search_fallback("三体", fake_http_skip, diagnostics=diag2, cf_throttle_seconds=0.0)
+        self.assertEqual(skipped, {})
+        self.assertTrue(any(d.get("status") == "blocked" for d in diag2))
 
 
 if __name__ == "__main__":

@@ -1269,4 +1269,104 @@ console.log("===================================================================
     assert.strictEqual(progEls['task-card-bar-t1'].style.width, '', '侧边栏进度条不得写入 style.width 触发重排');
     console.log('✓ 初检执行期防抖契约与合成层 scaleX 渲染回归测试通过');
   }
+
+  // ======================================================================
+  // 验证 v2.5.76 豆瓣配置弹窗「强制重探状态」与「保存并测试连通性」即时置顶提示反馈
+  // ======================================================================
+  {
+    const idxCard = htmlContent.indexOf('id="doubanGatewayStatusCard"');
+    const idxBox = htmlContent.indexOf('id="doubanTestResultBox"');
+    const idxCookieArea = htmlContent.indexOf('id="doubanRawCookieInput"');
+    assert(idxCard > 0 && idxBox > idxCard && idxBox < idxCookieArea, '#doubanTestResultBox 必须置顶于状态卡下方、Cookie 输入框上方，确保结果立即可见');
+
+    const mkNode = () => {
+      const cls = new Set();
+      return {
+        disabled: false,
+        textContent: '',
+        innerHTML: '',
+        className: '',
+        value: '',
+        checked: false,
+        scrollIntoView() {},
+        classList: {
+          add(c) { cls.add(c); },
+          remove(c) { cls.delete(c); },
+          contains(c) { return cls.has(c); }
+        }
+      };
+    };
+    const dbEls = {
+      doubanTestResultBox: mkNode(),
+      doubanRefreshHealthBtn: mkNode(),
+      doubanRefreshHealthIcon: mkNode(),
+      doubanRefreshHealthText: mkNode(),
+      doubanSaveBtn: mkNode(),
+      doubanProxyBaseInput: mkNode(),
+      doubanProxyTokenInput: mkNode(),
+      doubanClearTokenCheck: mkNode(),
+      doubanRawCookieInput: mkNode(),
+      doubanProxyTokenBadge: mkNode(),
+      doubanCookieSummaryBar: mkNode(),
+      doubanStatusSummaryText: mkNode(),
+      doubanStatusSubText: mkNode(),
+    };
+    dbEls.doubanSaveBtn.textContent = '保存并测试连通性';
+    dbEls.doubanProxyBaseInput.value = 'https://douban.ubaby.top';
+
+    const dbCtx = {
+      document: { getElementById: (id) => dbEls[id] || null },
+      window: {},
+      escapeHtml: (s) => String(s ?? ''),
+      checkHealth: async () => {},
+      api: async (url, opts) => {
+        if (url === '/api/system/health?force_refresh=true') {
+          return { services: { douban: 'fallback:cf_proxy' }, douban_status: { active_channel: 'cf_proxy', mp_retry_in_seconds: 210, mp_last_error: '返回空结果' } };
+        }
+        if (url === '/api/system/douban/config' && (!opts || opts.method !== 'POST')) {
+          return { proxy_base: 'https://douban.ubaby.top', has_proxy_token: true, cookie_summary: { configured: false }, status: { active_channel: 'cf_proxy', mp_state: 'cooldown', mp_retry_in_seconds: 210 } };
+        }
+        if (url === '/api/system/douban/config' && opts && opts.method === 'POST') {
+          return {
+            ok: true,
+            config: { proxy_base: 'https://douban.ubaby.top', has_proxy_token: true, cookie_summary: { configured: false }, status: { active_channel: 'cf_proxy' } },
+            test: {
+              ok: true,
+              results: {
+                moviepilot: { configured: true, ok: false, reason: 'MP 返回空列表', latency_ms: 120 },
+                cf_proxy: { configured: true, ok: true, reason: 'CF 反代在线', sample_title: '庆余年 第一季', latency_ms: 350 },
+                direct_cookie: { configured: false, ok: false, reason: '未导入豆瓣 Cookie', latency_ms: 0 },
+              }
+            }
+          };
+        }
+        throw new Error('Unexpected url: ' + url);
+      }
+    };
+    const extractFn = name => {
+      const m = htmlContent.match(new RegExp(`(?:async\\s+)?function\\s+${name}\\b[^]*?\\n    \\}`));
+      assert(m, `找不到函数 ${name}`);
+      return m[0];
+    };
+    vm.createContext(dbCtx);
+    vm.runInContext([
+      extractFn('_renderDoubanModalConfig'),
+      extractFn('_showDoubanFeedbackBanner'),
+      extractFn('_renderDoubanTestResults'),
+      extractFn('refreshDoubanHealthNow'),
+      extractFn('saveDoubanGatewayConfig'),
+    ].join(';\n'), dbCtx);
+
+    await dbCtx.refreshDoubanHealthNow();
+    assert(dbEls.doubanTestResultBox.innerHTML.includes('强制重探完成'), '强制重探完成后必须在弹窗顶部反馈区给出明确提示');
+    assert(dbEls.doubanTestResultBox.innerHTML.includes('Cloudflare Workers 反代'), '强制重探提示必须写明当前接管通道');
+    assert.strictEqual(dbEls.doubanRefreshHealthBtn.disabled, false, '重探结束后按钮必须恢复可点击');
+
+    await dbCtx.saveDoubanGatewayConfig();
+    assert(dbEls.doubanTestResultBox.innerHTML.includes('配置已保存'), '保存并测试后必须明确提示配置已保存');
+    assert(dbEls.doubanTestResultBox.innerHTML.includes('连通性正常'), '保存并测试后必须明确给出连通性结论');
+    assert(dbEls.doubanTestResultBox.innerHTML.includes('庆余年 第一季'), '保存并测试结果必须展示命中样本剧名');
+    assert.strictEqual(dbEls.doubanSaveBtn.disabled, false, '保存测试结束后按钮必须恢复可点击');
+    console.log('✓ 豆瓣弹窗强制重探与保存测试即时反馈契约测试通过');
+  }
 })().catch(error => {console.error(error); process.exitCode = 1;});

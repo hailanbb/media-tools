@@ -2198,11 +2198,13 @@
             <div class="font-semibold text-slate-800 dark:text-slate-100" id="doubanStatusSummaryText">正在读取通道状态...</div>
             <div class="text-[11px] text-slate-500 dark:text-slate-400" id="doubanStatusSubText">MoviePilot 异常时自动切换备选通道；MP 恢复后冷却期满自动回切。</div>
           </div>
-          <button type="button" onclick="refreshDoubanHealthNow()" class="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-semibold transition flex items-center gap-1.5">
-            <i class="fa-solid fa-rotate text-[11px]"></i>
-            <span>强制重探状态</span>
+          <button type="button" id="doubanRefreshHealthBtn" onclick="refreshDoubanHealthNow()" class="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-semibold transition flex items-center gap-1.5 disabled:opacity-60">
+            <i id="doubanRefreshHealthIcon" class="fa-solid fa-rotate text-[11px]"></i>
+            <span id="doubanRefreshHealthText">强制重探状态</span>
           </button>
         </div>
+
+        <div id="doubanTestResultBox" role="status" aria-live="polite" class="hidden p-3.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/90 dark:bg-slate-800/60 space-y-2"></div>
 
         <div class="p-3.5 rounded-xl border border-cyan-200/80 dark:border-cyan-900/60 bg-cyan-50/40 dark:bg-cyan-950/20 space-y-2.5">
           <div class="flex items-center justify-between gap-2">
@@ -2245,8 +2247,6 @@
           <div id="doubanCookieSummaryBar" class="text-[11px] px-2.5 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">尚未导入豆瓣 Cookie</div>
           <textarea id="doubanRawCookieInput" rows="4" placeholder='粘贴 Cookie-Editor 导出的 JSON 数组（[{"name":"dbcl2",...}]）、Netscape 或 Cookie 字符串；若无需更新 Cookie 请留空' class="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white font-mono text-[11px]"></textarea>
         </div>
-
-        <div id="doubanTestResultBox" class="hidden p-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/70 dark:bg-slate-800/40 space-y-2"></div>
       </div>
       <div class="px-5 py-3 border-t border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2 bg-slate-50/50 dark:bg-slate-900">
         <form method="dialog">
@@ -2495,31 +2495,63 @@
       }
     }
 
-    function _renderDoubanTestResults(testRes, parseResult) {
+    function _showDoubanFeedbackBanner(level, titleText, detailHtml = '') {
       const box = document.getElementById('doubanTestResultBox');
-      if (!box || !testRes || !testRes.results) return;
+      if (!box) return;
+      const safeEsc = (typeof escapeHtml === 'function')
+        ? escapeHtml
+        : (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+      const toneMap = {
+        ok: 'border-emerald-300 dark:border-emerald-700 bg-emerald-50/90 dark:bg-emerald-950/40 text-emerald-900 dark:text-emerald-100',
+        warn: 'border-amber-300 dark:border-amber-700 bg-amber-50/90 dark:bg-amber-950/40 text-amber-900 dark:text-amber-100',
+        error: 'border-rose-300 dark:border-rose-700 bg-rose-50/90 dark:bg-rose-950/40 text-rose-900 dark:text-rose-100',
+        info: 'border-cyan-300 dark:border-cyan-700 bg-cyan-50/90 dark:bg-cyan-950/40 text-cyan-900 dark:text-cyan-100',
+      };
+      box.className = `p-3.5 rounded-xl border space-y-2 ${toneMap[level] || toneMap.info}`;
+      box.innerHTML = `<div class="font-bold text-xs flex items-center justify-between gap-2"><span>${safeEsc(titleText)}</span><span class="text-[10px] font-mono opacity-75">${new Date().toLocaleTimeString('zh-CN', { hour12: false })}</span></div>${detailHtml}`;
+      if (typeof box.scrollIntoView === 'function') {
+        try { box.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); } catch (_) {}
+      }
+    }
+
+    function _renderDoubanTestResults(testRes, parseResult, actionPrefix = '') {
+      const box = document.getElementById('doubanTestResultBox');
+      if (!box) return;
+      if (!testRes || !testRes.results) {
+        _showDoubanFeedbackBanner('warn', `${actionPrefix ? actionPrefix + ' · ' : ''}未收到连通性测试明细`, '<div class="text-[11px] opacity-80">请点击「强制重探状态」或稍后重试。</div>');
+        return;
+      }
+      const safeEsc = (typeof escapeHtml === 'function')
+        ? escapeHtml
+        : (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
       const names = {
         moviepilot: 'MoviePilot 主通道',
         cf_proxy: 'Cloudflare Workers 反代',
         direct_cookie: '本机 Cookie 直连',
       };
+      const okChannels = [];
       const rows = Object.entries(testRes.results).map(([key, r]) => {
+        if (r && r.ok) okChannels.push(names[key] || key);
         const icon = r.ok ? '🟢' : (r.configured === false ? '⚪' : '🔴');
-        const extra = r.sample_title ? ` · 命中「${escapeHtml(r.sample_title)}」` : '';
+        const extra = r.sample_title ? ` · 命中「${safeEsc(r.sample_title)}」` : '';
         const ms = r.latency_ms ? ` (${r.latency_ms}ms)` : '';
         return `
-          <div class="flex items-center justify-between gap-2 text-[11px] py-1 border-b border-slate-200/60 dark:border-slate-700/60 last:border-0">
-            <span class="font-semibold text-slate-800 dark:text-slate-200">${icon} ${escapeHtml(names[key] || key)}</span>
-            <span class="text-slate-600 dark:text-slate-300 text-right">${escapeHtml(r.reason || '-')}${extra}${ms}</span>
+          <div class="flex items-center justify-between gap-2 text-[11px] py-1 border-b border-current/10 last:border-0">
+            <span class="font-semibold">${icon} ${safeEsc(names[key] || key)}</span>
+            <span class="text-right opacity-90">${safeEsc(r.reason || '-')}${extra}${ms}</span>
           </div>`;
       }).join('');
 
       const warnings = (parseResult && Array.isArray(parseResult.warnings) && parseResult.warnings.length > 0)
-        ? `<div class="text-[11px] text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 rounded-lg px-2.5 py-1.5">${parseResult.warnings.map(w => escapeHtml(w)).join('；')}</div>`
+        ? `<div class="text-[11px] text-amber-800 dark:text-amber-200 bg-amber-100/70 dark:bg-amber-900/40 border border-amber-300/70 dark:border-amber-700 rounded-lg px-2.5 py-1.5">${parseResult.warnings.map(w => safeEsc(w)).join('；')}</div>`
         : '';
 
-      box.classList.remove('hidden');
-      box.innerHTML = `<div class="font-bold text-slate-800 dark:text-slate-100">三通道实测结果</div>${warnings}${rows}`;
+      const anyOk = okChannels.length > 0;
+      const prefix = actionPrefix ? `${actionPrefix} · ` : '';
+      const headline = anyOk
+        ? `✅ ${prefix}连通性正常（可用：${okChannels.join(' / ')}）`
+        : `⚠️ ${prefix}所有已配置通道均未连通，请检查下方明细`;
+      _showDoubanFeedbackBanner(anyOk ? 'ok' : 'warn', headline, `${warnings}<div class="pt-0.5">${rows}</div>`);
     }
 
     async function openDoubanConfigModal() {
@@ -2530,23 +2562,53 @@
         const cfg = await api('/api/system/douban/config');
         _renderDoubanModalConfig(cfg);
       } catch (e) {
-        alert(`读取豆瓣通道配置失败: ${e.message}`);
+        _showDoubanFeedbackBanner('error', `读取豆瓣通道配置失败：${e.message || e}`);
       }
       if (dlg && typeof dlg.showModal === 'function') dlg.showModal();
     }
 
     async function refreshDoubanHealthNow() {
-      await checkHealth(true);
+      const btn = document.getElementById('doubanRefreshHealthBtn');
+      const icon = document.getElementById('doubanRefreshHealthIcon');
+      const textEl = document.getElementById('doubanRefreshHealthText');
+      if (btn) btn.disabled = true;
+      if (icon) icon.classList.add('fa-spin');
+      if (textEl) textEl.textContent = '重探中...';
+      _showDoubanFeedbackBanner('info', '⏳ 正在强制绕过缓存重探 MoviePilot 与豆瓣备选通道...');
       try {
+        const health = await api('/api/system/health?force_refresh=true');
+        await checkHealth(false);
         const cfg = await api('/api/system/douban/config');
         _renderDoubanModalConfig(cfg);
-      } catch (_) {}
+        const dbVal = (health && health.services && health.services.douban) || 'unknown';
+        const st = (health && health.douban_status) || (cfg && cfg.status) || {};
+        if (dbVal === 'online') {
+          _showDoubanFeedbackBanner('ok', '✅ 强制重探完成：MoviePilot 豆瓣主通道在线', '<div class="text-[11px] opacity-90">当前已切回并优先使用 MoviePilot 主通道。</div>');
+        } else if (dbVal.startsWith('fallback:')) {
+          const fbName = dbVal === 'fallback:cf_proxy' ? 'Cloudflare Workers 反代' : '本机 Cookie 直连';
+          const retryHint = st.mp_retry_in_seconds > 0 ? ` · MP 冷却剩余 ${st.mp_retry_in_seconds}s 后自动探测回切` : '';
+          const mpErr = st.mp_last_error ? `MP 主通道原因：${st.mp_last_error}` : 'MP 主通道当前不可用';
+          _showDoubanFeedbackBanner('info', `🔵 强制重探完成：已由备选通道 [${fbName}] 正常接管`, `<div class="text-[11px] opacity-90">${escapeHtml(mpErr)}${escapeHtml(retryHint)}</div>`);
+        } else if (dbVal === 'not_configured') {
+          _showDoubanFeedbackBanner('warn', '⚪ 强制重探完成：尚未配置豆瓣备选通道且 MP 未在线', '<div class="text-[11px] opacity-90">请在下方填写 Cloudflare 反代地址或导入 Cookie-Editor 后保存。</div>');
+        } else {
+          const errDetail = st.last_fallback_error || st.mp_last_error || dbVal;
+          _showDoubanFeedbackBanner('error', '🔴 强制重探完成：豆瓣主备通道均未连通', `<div class="text-[11px] opacity-90">诊断详情：${escapeHtml(errDetail)}</div>`);
+        }
+      } catch (e) {
+        _showDoubanFeedbackBanner('error', `🔴 强制重探失败：${e.message || e}`);
+      } finally {
+        if (btn) btn.disabled = false;
+        if (icon) icon.classList.remove('fa-spin');
+        if (textEl) textEl.textContent = '强制重探状态';
+      }
     }
 
     async function testDoubanGatewayDraft() {
       const btn = document.getElementById('doubanTestOnlyBtn');
       const oldText = btn ? btn.textContent : '';
       if (btn) { btn.disabled = true; btn.textContent = '探测中...'; }
+      _showDoubanFeedbackBanner('info', '⏳ 正在探测当前输入的反代与 Cookie 连通性（不落盘）...');
       try {
         const payload = {
           proxy_base: (document.getElementById('doubanProxyBaseInput')?.value || '').trim(),
@@ -2558,9 +2620,9 @@
           method: 'POST',
           body: JSON.stringify(payload),
         });
-        _renderDoubanTestResults(res, res.parse_preview);
+        _renderDoubanTestResults(res, res.parse_preview, '草稿实测完成');
       } catch (e) {
-        alert(`测试失败: ${e.message}`);
+        _showDoubanFeedbackBanner('error', `🔴 连通性测试失败：${e.message || e}`);
       } finally {
         if (btn) { btn.disabled = false; btn.textContent = oldText; }
       }
@@ -2570,6 +2632,7 @@
       const btn = document.getElementById('doubanSaveBtn');
       const oldText = btn ? btn.textContent : '';
       if (btn) { btn.disabled = true; btn.textContent = '保存并探测中...'; }
+      _showDoubanFeedbackBanner('info', '⏳ 正在保存配置并逐一探测三通道连通性...');
       try {
         const payload = {
           proxy_base: (document.getElementById('doubanProxyBaseInput')?.value || '').trim(),
@@ -2583,10 +2646,14 @@
           body: JSON.stringify(payload),
         });
         if (res.config) _renderDoubanModalConfig(res.config);
-        if (res.test) _renderDoubanTestResults(res.test, res.parse_result);
+        _renderDoubanTestResults(res.test, res.parse_result, '配置已保存');
         await checkHealth(true);
+        try {
+          const latestCfg = await api('/api/system/douban/config');
+          _renderDoubanModalConfig(latestCfg);
+        } catch (_) {}
       } catch (e) {
-        alert(`保存失败: ${e.message}`);
+        _showDoubanFeedbackBanner('error', `🔴 保存或测试失败：${e.message || e}`);
       } finally {
         if (btn) { btn.disabled = false; btn.textContent = oldText; }
       }
@@ -2601,8 +2668,9 @@
         });
         if (res.config) _renderDoubanModalConfig(res.config);
         await checkHealth(true);
+        _showDoubanFeedbackBanner('info', '✓ 已清空保存的豆瓣 Cookie 并刷新状态');
       } catch (e) {
-        alert(`清空失败: ${e.message}`);
+        _showDoubanFeedbackBanner('error', `🔴 清空 Cookie 失败：${e.message || e}`);
       }
     }
 

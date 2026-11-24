@@ -61,6 +61,16 @@ def normalize_detail(payload):
         detail["type"] = "电影"
     if not detail.get("douban_id") and str(detail.get("id") or "").isdigit():
         detail["douban_id"] = str(detail["id"])
+    # 兼容 Rexxar / Frodo 原生别名数组 aka 与副标题 sub_title，便于外文/译名剧集身份匹配
+    existing_names = [a for a in (detail.get("names") or []) if isinstance(a, str) and a.strip()]
+    for extra in (detail.get("aka") if isinstance(detail.get("aka"), list) else []):
+        if isinstance(extra, str) and extra.strip() and extra.strip() not in existing_names:
+            existing_names.append(extra.strip())
+    sub_title = detail.get("sub_title")
+    if isinstance(sub_title, str) and sub_title.strip() and sub_title.strip() not in existing_names:
+        existing_names.append(sub_title.strip())
+    if existing_names:
+        detail["names"] = existing_names
     if not detail.get("year"):
         pub_candidates = []
         pubdate = detail.get("pubdate")

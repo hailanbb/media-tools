@@ -3067,7 +3067,7 @@ async def _fetch_seasons_via_douban(mp_client, show_name, log=None, needed_seaso
                 if not _detail_has_core_info(detail) and douban_gateway.has_fallback_configured():
                     async with httpx.AsyncClient(timeout=8.0) as http:
                         detail = await douban_gateway.fetch_detail_fallback(subject_id, http, diagnostics=diagnostics)
-                if not _detail_has_core_info(detail):
+                if not _detail_has_core_info(detail) and not douban_gateway.has_fallback_configured():
                     async with httpx.AsyncClient(timeout=8.0) as http:
                         response = await http.get(f"https://movie.douban.com/subject/{subject_id}/", headers={"User-Agent":"Mozilla/5.0"})
                         if response.status_code != 200:
@@ -3114,15 +3114,16 @@ async def _fetch_seasons_via_douban(mp_client, show_name, log=None, needed_seaso
                 seasonal.append(f"{base_queries[0]}{sn}")
         queries = list(dict.fromkeys(base_queries[:1] + seasonal + base_queries[1:] + list(extra_queries or [])))
         candidates = {}
-        search_sem = asyncio.Semaphore(3)
+        use_gateway_fallback = douban_gateway.has_fallback_configured()
+        search_sem = asyncio.Semaphore(1 if use_gateway_fallback else 3)
         async with httpx.AsyncClient(timeout=8.0) as http:
             async def search(q):
                 async with search_sem:
                     found = {}
-                    if douban_gateway.has_fallback_configured():
+                    if use_gateway_fallback:
                         fb_hits = await douban_gateway.search_fallback(q, http, diagnostics=diagnostics)
                         found.update(fb_hits)
-                    if not found:
+                    if not found and not use_gateway_fallback:
                         try:
                             resp = await http.get("https://movie.douban.com/j/subject_suggest", params={"q": q},
                                                   headers={"User-Agent": "Mozilla/5.0"})
@@ -3149,32 +3150,52 @@ async def _fetch_seasons_via_douban(mp_client, show_name, log=None, needed_seaso
                                     mp_added = True
                             if mp_added:
                                 douban_gateway.record_mp_success()
-                            elif found and douban_gateway.has_fallback_configured():
+                            elif found and use_gateway_fallback:
                                 douban_gateway.record_mp_failure("MoviePilot 豆瓣搜索返回空列表")
                         except Exception as exc:
-                            if douban_gateway.has_fallback_configured():
+                            if use_gateway_fallback:
                                 douban_gateway.record_mp_failure(f"MoviePilot 豆瓣搜索异常: {type(exc).__name__}")
                             diagnostics.append({"source":"moviepilot_douban", "query":q, "status":"failed", "reason":lookup_error_reason(exc), "error_type":type(exc).__name__})
                     return found
-            for found in await asyncio.gather(*(search(q) for q in queries[:8])):
-                candidates.update(found)
+            if use_gateway_fallback and douban_gateway.should_skip_mp():
+                # 备选通道下顺序精简查询并提前短路，避免 9 路并发连轰 8 词瞬间触发豆瓣 302 限流
+                for q in queries[:4]:
+                    found = await search(q)
+                    candidates.update(found)
+                    if douban_gateway.is_cf_proxy_in_backoff() and not candidates:
+                        break
+                    if candidates and (not unbound or any(_parse_season_from_text(t) in unbound for t in candidates.values()) or len(candidates) >= 6):
+                        break
+            else:
+                for found in await asyncio.gather(*(search(q) for q in queries[:8])):
+                    candidates.update(found)
         matches = {}
-        # 优先读取标题中命中季号的候选，详情预算随本次涉及的季数增长。
+        # 优先读取标题中命中季号的候选，详情预算随本次涉及的季数增长；备选通道限精简预算防风控。
         ranked = sorted(candidates.items(), key=lambda item: _parse_season_from_text(item[1]) not in unbound)
-        detail_sem = asyncio.Semaphore(3)
+        detail_sem = asyncio.Semaphore(1 if (use_gateway_fallback and douban_gateway.should_skip_mp()) else 3)
+        detail_limit = min(8, max(4, 2 * len(unbound))) if (use_gateway_fallback and douban_gateway.should_skip_mp()) else min(48, max(24, 4 * len(unbound)))
         async def bounded_read(did, title):
             async with detail_sem:
                 return await read(did, title)
-        for found in await asyncio.gather(*(bounded_read(did, title) for did, title in ranked[:min(48, max(24, 4 * len(unbound)))])):
-            for sn, info in found.items():
-                if sn not in result:
-                    matches.setdefault(sn, []).append(info)
+        if use_gateway_fallback and douban_gateway.should_skip_mp():
+            for did, title in ranked[:detail_limit]:
+                found = await bounded_read(did, title)
+                for sn, info in found.items():
+                    if sn not in result:
+                        matches.setdefault(sn, []).append(info)
+                if unbound and unbound.issubset(set(result) | set(matches)):
+                    break
+        else:
+            for found in await asyncio.gather(*(bounded_read(did, title) for did, title in ranked[:detail_limit])):
+                for sn, info in found.items():
+                    if sn not in result:
+                        matches.setdefault(sn, []).append(info)
         for sn, hits in matches.items():
             if len(hits) == 1:
                 result[sn] = hits[0]
             else:
                 diagnostics.append({"source": "douban", "season": sn, "status": "ambiguous", "reason": "多个候选均匹配，未自动绑定"})
-        if not result or (wanted - set(result)):
+        if (not result or (wanted - set(result))) and not use_gateway_fallback:
             async with httpx.AsyncClient(timeout=8.0) as http:
                 web_queries = [(q, source, url, params) for q in queries[:2] for source, url, params in (
                     ("douban_search_page", "https://search.douban.com/movie/subject_search", {"search_text":q,"cat":"1002"}),
