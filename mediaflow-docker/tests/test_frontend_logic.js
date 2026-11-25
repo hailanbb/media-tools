@@ -1293,6 +1293,7 @@ console.log("===================================================================
         className: '',
         value: '',
         checked: false,
+        focus() {},
         scrollIntoView() {},
         classList: {
           add(c) { cls.add(c); },
@@ -1306,6 +1307,8 @@ console.log("===================================================================
       doubanRefreshHealthBtn: mkNode(),
       doubanRefreshHealthIcon: mkNode(),
       doubanRefreshHealthText: mkNode(),
+      doubanTestOnlyBtn: mkNode(),
+      doubanTestQueryInput: mkNode(),
       doubanSaveBtn: mkNode(),
       doubanProxyBaseInput: mkNode(),
       doubanProxyTokenInput: mkNode(),
@@ -1316,8 +1319,10 @@ console.log("===================================================================
       doubanStatusSummaryText: mkNode(),
       doubanStatusSubText: mkNode(),
     };
+    dbEls.doubanTestOnlyBtn.textContent = '仅测试当前输入';
     dbEls.doubanSaveBtn.textContent = '保存并测试连通性';
     dbEls.doubanProxyBaseInput.value = 'https://douban.ubaby.top';
+    let capturedTestPayload = null;
 
     const dbCtx = {
       document: { getElementById: (id) => dbEls[id] || null },
@@ -1325,8 +1330,32 @@ console.log("===================================================================
       escapeHtml: (s) => String(s ?? ''),
       checkHealth: async () => {},
       api: async (url, opts) => {
-        if (url === '/api/system/health?force_refresh=true') {
-          return { services: { douban: 'fallback:cf_proxy' }, douban_status: { active_channel: 'cf_proxy', mp_retry_in_seconds: 210, mp_last_error: '返回空结果' } };
+        if (url === '/api/system/health?force_refresh=true&scope=douban') {
+          return {
+            services: { douban: 'fallback:cf_proxy' },
+            douban_status: {
+              active_channel: 'cf_proxy',
+              mp_retry_in_seconds: 210,
+              mp_last_error: '返回空结果',
+              channel_results: {
+                moviepilot: { configured: true, ok: false, reason: '豆瓣搜索返回空', latency_ms: 150 },
+                cf_proxy: { configured: true, ok: true, reason: '正常可用', sample_title: '庆余年 第一季 (2019) · 46集', latency_ms: 980 },
+                direct_cookie: { configured: false, ok: false, reason: '未导入', latency_ms: 0 },
+              }
+            }
+          };
+        }
+        if (url === '/api/system/douban/test' && opts && opts.method === 'POST') {
+          capturedTestPayload = JSON.parse(opts.body);
+          return {
+            ok: true,
+            test_query: capturedTestPayload.test_query,
+            results: {
+              moviepilot: { configured: true, ok: false, reason: `未搜到「${capturedTestPayload.test_query}」`, latency_ms: 140 },
+              cf_proxy: { configured: true, ok: true, reason: '搜到 14 条结果', sample_titles: ['少年泰坦出击 第九季 (2025) · 52集'], latency_ms: 1320 },
+              direct_cookie: { configured: false, ok: false, reason: '未导入', latency_ms: 0 },
+            }
+          };
         }
         if (url === '/api/system/douban/config' && (!opts || opts.method !== 'POST')) {
           return { proxy_base: 'https://douban.ubaby.top', has_proxy_token: true, cookie_summary: { configured: false }, status: { active_channel: 'cf_proxy', mp_state: 'cooldown', mp_retry_in_seconds: 210 } };
@@ -1339,7 +1368,7 @@ console.log("===================================================================
               ok: true,
               results: {
                 moviepilot: { configured: true, ok: false, reason: 'MP 返回空列表', latency_ms: 120 },
-                cf_proxy: { configured: true, ok: true, reason: 'CF 反代在线', sample_title: '庆余年 第一季', latency_ms: 350 },
+                cf_proxy: { configured: true, ok: true, reason: '正常可用', sample_title: '庆余年 第一季', latency_ms: 350 },
                 direct_cookie: { configured: false, ok: false, reason: '未导入豆瓣 Cookie', latency_ms: 0 },
               }
             }
@@ -1356,22 +1385,34 @@ console.log("===================================================================
     vm.createContext(dbCtx);
     vm.runInContext([
       extractFn('_renderDoubanModalConfig'),
+      extractFn('fillDoubanTestQuery'),
+      extractFn('_formatDoubanLatency'),
       extractFn('_showDoubanFeedbackBanner'),
       extractFn('_renderDoubanTestResults'),
       extractFn('refreshDoubanHealthNow'),
+      extractFn('testDoubanGatewayDraft'),
       extractFn('saveDoubanGatewayConfig'),
     ].join(';\n'), dbCtx);
 
     await dbCtx.refreshDoubanHealthNow();
     assert(dbEls.doubanTestResultBox.innerHTML.includes('强制重探完成'), '强制重探完成后必须在弹窗顶部反馈区给出明确提示');
     assert(dbEls.doubanTestResultBox.innerHTML.includes('Cloudflare Workers 反代'), '强制重探提示必须写明当前接管通道');
+    assert(dbEls.doubanTestResultBox.innerHTML.includes('豆瓣查询正常可用'), '强制重探必须给出通俗易懂的中文总结结论');
     assert.strictEqual(dbEls.doubanRefreshHealthBtn.disabled, false, '重探结束后按钮必须恢复可点击');
 
+    dbCtx.fillDoubanTestQuery('少年泰坦出击 第九季');
+    assert.strictEqual(dbEls.doubanTestQueryInput.value, '少年泰坦出击 第九季');
+    await dbCtx.testDoubanGatewayDraft();
+    assert.strictEqual(capturedTestPayload && capturedTestPayload.test_query, '少年泰坦出击 第九季', '仅测试当前输入必须透传手动输入的影视剧名称');
+    assert(dbEls.doubanTestResultBox.innerHTML.includes('少年泰坦出击 第九季 (2025) · 52集'), '实测结果必须展示命中的剧名与集数');
+    assert.strictEqual(dbEls.doubanTestOnlyBtn.disabled, false, '草稿实测结束后按钮必须恢复可点击');
+
+    dbEls.doubanTestQueryInput.value = '';
     await dbCtx.saveDoubanGatewayConfig();
     assert(dbEls.doubanTestResultBox.innerHTML.includes('配置已保存'), '保存并测试后必须明确提示配置已保存');
     assert(dbEls.doubanTestResultBox.innerHTML.includes('连通性正常'), '保存并测试后必须明确给出连通性结论');
     assert(dbEls.doubanTestResultBox.innerHTML.includes('庆余年 第一季'), '保存并测试结果必须展示命中样本剧名');
     assert.strictEqual(dbEls.doubanSaveBtn.disabled, false, '保存测试结束后按钮必须恢复可点击');
-    console.log('✓ 豆瓣弹窗强制重探与保存测试即时反馈契约测试通过');
+    console.log('✓ 豆瓣弹窗极速重探、自定义剧名实测与通俗反馈契约测试通过');
   }
 })().catch(error => {console.error(error); process.exitCode = 1;});

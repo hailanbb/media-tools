@@ -2255,13 +2255,27 @@
           <textarea id="doubanRawCookieInput" rows="4" placeholder='粘贴 Cookie-Editor 导出的 JSON 数组（[{"name":"dbcl2",...}]）、Netscape 或 Cookie 字符串；若无需更新 Cookie 请留空' class="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white font-mono text-[11px]"></textarea>
         </div>
       </div>
-      <div class="px-5 py-3 border-t border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2 bg-slate-50/50 dark:bg-slate-900">
-        <form method="dialog">
-          <button type="submit" class="px-3.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-xs font-medium transition">关闭</button>
-        </form>
-        <div class="flex items-center gap-2">
-          <button type="button" id="doubanTestOnlyBtn" onclick="testDoubanGatewayDraft()" class="px-3.5 py-1.5 rounded-lg border border-cyan-300 dark:border-cyan-700 bg-cyan-50 dark:bg-cyan-950/40 hover:bg-cyan-100 dark:hover:bg-cyan-900/60 text-cyan-800 dark:text-cyan-200 text-xs font-semibold transition">仅测试当前输入</button>
-          <button type="button" id="doubanSaveBtn" onclick="saveDoubanGatewayConfig()" class="px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-sm transition">保存并测试连通性</button>
+      <div class="px-5 py-3 border-t border-slate-200 dark:border-slate-800 space-y-2.5 bg-slate-50/60 dark:bg-slate-900">
+        <div class="flex flex-col sm:flex-row sm:items-center gap-2">
+          <label for="doubanTestQueryInput" class="text-[11px] font-semibold text-slate-600 dark:text-slate-300 shrink-0 flex items-center gap-1">
+            <i class="fa-solid fa-magnifying-glass text-cyan-600 dark:text-cyan-400"></i>
+            <span>测试剧名（可选）</span>
+          </label>
+          <div class="flex-1 flex items-center gap-1.5 min-w-0">
+            <input id="doubanTestQueryInput" type="text" placeholder="留空仅测连通性；输入剧名如：少年泰坦出击 第九季 / 狂飙 / 三体" onkeydown="if(event.key==='Enter'){event.preventDefault();testDoubanGatewayDraft();}" class="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 text-slate-900 dark:text-white text-xs">
+            <button type="button" onclick="fillDoubanTestQuery('少年泰坦出击 第九季')" class="hidden sm:inline-flex px-2 py-1 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-[10px] text-slate-600 dark:text-slate-300 shrink-0 transition" title="填入示例剧名">泰坦S9</button>
+            <button type="button" onclick="fillDoubanTestQuery('狂飙')" class="hidden sm:inline-flex px-2 py-1 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-[10px] text-slate-600 dark:text-slate-300 shrink-0 transition" title="填入示例剧名">狂飙</button>
+            <button type="button" onclick="fillDoubanTestQuery('三体')" class="hidden sm:inline-flex px-2 py-1 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-[10px] text-slate-600 dark:text-slate-300 shrink-0 transition" title="填入示例剧名">三体</button>
+          </div>
+        </div>
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <form method="dialog">
+            <button type="submit" class="px-3.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-xs font-medium transition">关闭</button>
+          </form>
+          <div class="flex items-center gap-2">
+            <button type="button" id="doubanTestOnlyBtn" onclick="testDoubanGatewayDraft()" class="px-3.5 py-1.5 rounded-lg border border-cyan-300 dark:border-cyan-700 bg-cyan-50 dark:bg-cyan-950/40 hover:bg-cyan-100 dark:hover:bg-cyan-900/60 text-cyan-800 dark:text-cyan-200 text-xs font-semibold transition">仅测试当前输入</button>
+            <button type="button" id="doubanSaveBtn" onclick="saveDoubanGatewayConfig()" class="px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-sm transition">保存并测试连通性</button>
+          </div>
         </div>
       </div>
     </div>
@@ -2482,24 +2496,39 @@
       if (statusSumEl) {
         const ch = st.active_channel || 'moviepilot';
         const chMap = {
-          moviepilot: '当前通道：MoviePilot 主通道',
-          cf_proxy: '当前通道：Cloudflare Workers 反代（备选接管中）',
-          direct_cookie: '当前通道：Cookie 直连（备选接管中）',
+          moviepilot: '🟢 当前可用：优先使用 MoviePilot 主通道',
+          cf_proxy: '🟢 当前可用：已自动切换 Cloudflare 反代兜底',
+          direct_cookie: '🟢 当前可用：已自动切换本机 Cookie 直连',
         };
         statusSumEl.textContent = chMap[ch] || `当前通道：${ch}`;
       }
       if (statusSubEl) {
         const parts = [];
         if (st.mp_state === 'cooldown' && st.mp_retry_in_seconds > 0) {
-          parts.push(`MP 主通道冷却中（${st.mp_retry_in_seconds}s 后自动探测回切）`);
+          const mins = Math.max(1, Math.ceil(st.mp_retry_in_seconds / 60));
+          parts.push(`MoviePilot 刚才查询未命中，系统已自动改走备选通道（约 ${mins} 分钟后会自动再试主通道，期间搜剧完全正常）`);
         } else if (st.mp_last_error) {
-          parts.push(`MP 最近异常：${st.mp_last_error}`);
+          parts.push(`MoviePilot 提示：${st.mp_last_error}`);
         } else {
-          parts.push('MP 主通道就绪');
+          parts.push('主备双轨就绪：平时走 MoviePilot，搜不到或异常时自动走反代补位。');
         }
-        if (st.last_fallback_error) parts.push(`备选提示：${st.last_fallback_error}`);
+        if (st.last_fallback_error) parts.push(`备选提醒：${st.last_fallback_error}`);
         statusSubEl.textContent = parts.join(' · ');
       }
+    }
+
+    function fillDoubanTestQuery(name) {
+      const inp = document.getElementById('doubanTestQueryInput');
+      if (inp) {
+        inp.value = String(name || '');
+        if (typeof inp.focus === 'function') inp.focus();
+      }
+    }
+
+    function _formatDoubanLatency(ms) {
+      const n = Number(ms || 0);
+      if (!n || n <= 0) return '';
+      return n >= 1000 ? `${(n / 1000).toFixed(1)}秒` : `${n}ms`;
     }
 
     function _showDoubanFeedbackBanner(level, titleText, detailHtml = '') {
@@ -2521,7 +2550,7 @@
       }
     }
 
-    function _renderDoubanTestResults(testRes, parseResult, actionPrefix = '') {
+    function _renderDoubanTestResults(testRes, parseResult, actionPrefix = '', footerTip = '') {
       const box = document.getElementById('doubanTestResultBox');
       if (!box) return;
       if (!testRes || !testRes.results) {
@@ -2536,16 +2565,32 @@
         cf_proxy: 'Cloudflare Workers 反代',
         direct_cookie: '本机 Cookie 直连',
       };
+      const testedQuery = String(testRes.test_query || '').trim();
       const okChannels = [];
       const rows = Object.entries(testRes.results).map(([key, r]) => {
-        if (r && r.ok) okChannels.push(names[key] || key);
-        const icon = r.ok ? '🟢' : (r.configured === false ? '⚪' : '🔴');
-        const extra = r.sample_title ? ` · 命中「${safeEsc(r.sample_title)}」` : '';
-        const ms = r.latency_ms ? ` (${r.latency_ms}ms)` : '';
+        const item = r || {};
+        if (item.ok) okChannels.push(names[key] || key);
+        const badge = item.ok
+          ? '<span class="px-1.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-900/60 text-emerald-700 dark:text-emerald-300 font-semibold text-[10px]">正常</span>'
+          : (item.configured === false
+              ? '<span class="px-1.5 py-0.5 rounded bg-slate-200/80 dark:bg-slate-700 text-slate-600 dark:text-slate-300 font-medium text-[10px]">未配置</span>'
+              : '<span class="px-1.5 py-0.5 rounded bg-rose-100 dark:bg-rose-900/60 text-rose-700 dark:text-rose-300 font-semibold text-[10px]">未命中/异常</span>');
+        const icon = item.ok ? '🟢' : (item.configured === false ? '⚪' : '🔴');
+        const latencyStr = _formatDoubanLatency(item.latency_ms);
+        const ms = latencyStr ? ` · ${latencyStr}` : '';
+        const samples = Array.isArray(item.sample_titles) && item.sample_titles.length > 0
+          ? item.sample_titles
+          : (item.sample_title ? [item.sample_title] : []);
+        const sampleLine = samples.length > 0
+          ? `<div class="text-[10px] opacity-80 pl-5 truncate" title="${safeEsc(samples.join(' / '))}">命中结果：${safeEsc(samples.join('、'))}</div>`
+          : '';
         return `
-          <div class="flex items-center justify-between gap-2 text-[11px] py-1 border-b border-current/10 last:border-0">
-            <span class="font-semibold">${icon} ${safeEsc(names[key] || key)}</span>
-            <span class="text-right opacity-90">${safeEsc(r.reason || '-')}${extra}${ms}</span>
+          <div class="py-1.5 border-b border-current/10 last:border-0 space-y-0.5">
+            <div class="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+              <span class="font-semibold flex items-center gap-1.5">${icon} ${safeEsc(names[key] || key)} ${badge}</span>
+              <span class="text-right opacity-90">${safeEsc(item.reason || '-')}${safeEsc(ms)}</span>
+            </div>
+            ${sampleLine}
           </div>`;
       }).join('');
 
@@ -2555,10 +2600,25 @@
 
       const anyOk = okChannels.length > 0;
       const prefix = actionPrefix ? `${actionPrefix} · ` : '';
+      const queryTag = testedQuery ? `实测剧名「${testedQuery}」· ` : '';
       const headline = anyOk
-        ? `✅ ${prefix}连通性正常（可用：${okChannels.join(' / ')}）`
-        : `⚠️ ${prefix}所有已配置通道均未连通，请检查下方明细`;
-      _showDoubanFeedbackBanner(anyOk ? 'ok' : 'warn', headline, `${warnings}<div class="pt-0.5">${rows}</div>`);
+        ? `✅ ${prefix}${queryTag}连通性正常（可用：${okChannels.join(' / ')}）`
+        : `⚠️ ${prefix}${queryTag}当前未搜到结果或通道未连通，请看下方明细`;
+
+      let autoTip = footerTip;
+      if (!autoTip) {
+        const mpOk = Boolean(testRes.results.moviepilot && testRes.results.moviepilot.ok);
+        const cfOk = Boolean(testRes.results.cf_proxy && testRes.results.cf_proxy.ok);
+        if (testedQuery && !mpOk && cfOk) {
+          autoTip = `结论：MoviePilot 没搜到「${testedQuery}」，但 Cloudflare 反代已搜到；实际初检时系统会自动由反代补位，不受影响。`;
+        } else if (anyOk) {
+          autoTip = '结论：只要上面任意一条通道显示「正常」，日常初检查豆瓣集数即可正常使用，无需额外操作。';
+        } else {
+          autoTip = '结论：目前没有可用通道，建议检查反代地址/密钥，或导入最新豆瓣 Cookie。';
+        }
+      }
+      const tipHtml = `<div class="text-[11px] pt-1 opacity-90 font-medium">💡 ${safeEsc(autoTip)}</div>`;
+      _showDoubanFeedbackBanner(anyOk ? 'ok' : 'warn', headline, `${warnings}<div class="pt-0.5">${rows}</div>${tipHtml}`);
     }
 
     async function openDoubanConfigModal() {
@@ -2581,23 +2641,35 @@
       if (btn) btn.disabled = true;
       if (icon) icon.classList.add('fa-spin');
       if (textEl) textEl.textContent = '重探中...';
-      _showDoubanFeedbackBanner('info', '⏳ 正在强制绕过缓存重探 MoviePilot 与豆瓣备选通道...');
+      _showDoubanFeedbackBanner('info', '⏳ 正在并行检测豆瓣主备通道（预计 1～2 秒）...');
       try {
-        const health = await api('/api/system/health?force_refresh=true');
-        await checkHealth(false);
+        const health = await api('/api/system/health?force_refresh=true&scope=douban');
         const cfg = await api('/api/system/douban/config');
         _renderDoubanModalConfig(cfg);
+        if (typeof checkHealth === 'function') {
+          checkHealth(false).catch(() => {});
+        }
         const dbVal = (health && health.services && health.services.douban) || 'unknown';
         const st = (health && health.douban_status) || (cfg && cfg.status) || {};
-        if (dbVal === 'online') {
-          _showDoubanFeedbackBanner('ok', '✅ 强制重探完成：MoviePilot 豆瓣主通道在线', '<div class="text-[11px] opacity-90">当前已切回并优先使用 MoviePilot 主通道。</div>');
+        if (st && st.channel_results && Object.keys(st.channel_results).length > 0) {
+          let tip = '';
+          if (dbVal === 'online') {
+            tip = '结论：MoviePilot 豆瓣主通道正常，系统优先走主通道；如果某些剧搜不到，也会自动切到反代补位。';
+          } else if (dbVal.startsWith('fallback:')) {
+            const fbName = dbVal === 'fallback:cf_proxy' ? 'Cloudflare Workers 反代' : '本机 Cookie 直连';
+            tip = `结论：豆瓣查询正常可用！当前已自动由「${fbName}」接管兜底，日常初检完全不受影响。`;
+          } else {
+            tip = '结论：主备通道均未连通，请检查上方红灯项或重新保存配置。';
+          }
+          _renderDoubanTestResults({ ok: dbVal === 'online' || dbVal.startsWith('fallback:'), results: st.channel_results }, null, '强制重探完成', tip);
+        } else if (dbVal === 'online') {
+          _showDoubanFeedbackBanner('ok', '✅ 强制重探完成：MoviePilot 豆瓣主通道正常可用', '<div class="text-[11px] opacity-90">💡 结论：当前优先走 MoviePilot 主通道，豆瓣查集数可正常使用。</div>');
         } else if (dbVal.startsWith('fallback:')) {
           const fbName = dbVal === 'fallback:cf_proxy' ? 'Cloudflare Workers 反代' : '本机 Cookie 直连';
-          const retryHint = st.mp_retry_in_seconds > 0 ? ` · MP 冷却剩余 ${st.mp_retry_in_seconds}s 后自动探测回切` : '';
-          const mpErr = st.mp_last_error ? `MP 主通道原因：${st.mp_last_error}` : 'MP 主通道当前不可用';
-          _showDoubanFeedbackBanner('info', `🔵 强制重探完成：已由备选通道 [${fbName}] 正常接管`, `<div class="text-[11px] opacity-90">${escapeHtml(mpErr)}${escapeHtml(retryHint)}</div>`);
+          const mpErr = st.mp_last_error ? `MoviePilot 状态：${st.mp_last_error}` : 'MoviePilot 暂时未命中';
+          _showDoubanFeedbackBanner('ok', `✅ 强制重探完成：已由 [${fbName}] 自动兜底，搜剧正常`, `<div class="text-[11px] opacity-90">${escapeHtml(mpErr)}<br>💡 结论：豆瓣查集数可正常使用，系统会在几分钟后自动复查 MoviePilot。</div>`);
         } else if (dbVal === 'not_configured') {
-          _showDoubanFeedbackBanner('warn', '⚪ 强制重探完成：尚未配置豆瓣备选通道且 MP 未在线', '<div class="text-[11px] opacity-90">请在下方填写 Cloudflare 反代地址或导入 Cookie-Editor 后保存。</div>');
+          _showDoubanFeedbackBanner('warn', '⚪ 强制重探完成：尚未配置豆瓣备选通道且 MoviePilot 未在线', '<div class="text-[11px] opacity-90">请在下方填写 Cloudflare 反代地址或导入 Cookie-Editor 后保存。</div>');
         } else {
           const errDetail = st.last_fallback_error || st.mp_last_error || dbVal;
           _showDoubanFeedbackBanner('error', '🔴 强制重探完成：豆瓣主备通道均未连通', `<div class="text-[11px] opacity-90">诊断详情：${escapeHtml(errDetail)}</div>`);
@@ -2614,14 +2686,21 @@
     async function testDoubanGatewayDraft() {
       const btn = document.getElementById('doubanTestOnlyBtn');
       const oldText = btn ? btn.textContent : '';
-      if (btn) { btn.disabled = true; btn.textContent = '探测中...'; }
-      _showDoubanFeedbackBanner('info', '⏳ 正在探测当前输入的反代与 Cookie 连通性（不落盘）...');
+      const testQuery = (document.getElementById('doubanTestQueryInput')?.value || '').trim();
+      if (btn) { btn.disabled = true; btn.textContent = '实测中...'; }
+      _showDoubanFeedbackBanner(
+        'info',
+        testQuery
+          ? `⏳ 正在并发实测三通道搜索「${testQuery}」（不保存配置）...`
+          : '⏳ 正在并发探测当前输入的通道连通性（不保存配置）...'
+      );
       try {
         const payload = {
           proxy_base: (document.getElementById('doubanProxyBaseInput')?.value || '').trim(),
           proxy_token: (document.getElementById('doubanProxyTokenInput')?.value || '').trim(),
           clear_proxy_token: Boolean(document.getElementById('doubanClearTokenCheck')?.checked),
           raw_cookie: (document.getElementById('doubanRawCookieInput')?.value || '').trim(),
+          test_query: testQuery,
         };
         const res = await api('/api/system/douban/test', {
           method: 'POST',
@@ -2638,14 +2717,21 @@
     async function saveDoubanGatewayConfig() {
       const btn = document.getElementById('doubanSaveBtn');
       const oldText = btn ? btn.textContent : '';
+      const testQuery = (document.getElementById('doubanTestQueryInput')?.value || '').trim();
       if (btn) { btn.disabled = true; btn.textContent = '保存并探测中...'; }
-      _showDoubanFeedbackBanner('info', '⏳ 正在保存配置并逐一探测三通道连通性...');
+      _showDoubanFeedbackBanner(
+        'info',
+        testQuery
+          ? `⏳ 正在保存配置并并发实测「${testQuery}」...`
+          : '⏳ 正在保存配置并并发探测三通道连通性...'
+      );
       try {
         const payload = {
           proxy_base: (document.getElementById('doubanProxyBaseInput')?.value || '').trim(),
           proxy_token: (document.getElementById('doubanProxyTokenInput')?.value || '').trim(),
           clear_proxy_token: Boolean(document.getElementById('doubanClearTokenCheck')?.checked),
           raw_cookie: (document.getElementById('doubanRawCookieInput')?.value || '').trim(),
+          test_query: testQuery,
           run_test: true,
         };
         const res = await api('/api/system/douban/config', {
@@ -2654,7 +2740,9 @@
         });
         if (res.config) _renderDoubanModalConfig(res.config);
         _renderDoubanTestResults(res.test, res.parse_result, '配置已保存');
-        await checkHealth(true);
+        if (typeof checkHealth === 'function') {
+          checkHealth(false).catch(() => {});
+        }
         try {
           const latestCfg = await api('/api/system/douban/config');
           _renderDoubanModalConfig(latestCfg);

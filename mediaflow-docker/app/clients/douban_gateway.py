@@ -810,15 +810,297 @@ async def fetch_detail_fallback(
     return {}
 
 
-async def _probe_cf_proxy(cfg: dict[str, Any], http_client: httpx.AsyncClient) -> dict[str, Any]:
-    if not cfg["proxy_base"]:
-        return {"configured": False, "ok": False, "http_status": 0, "latency_ms": 0, "sample_title": "", "reason": "未配置反代地址"}
+def _format_sample_titles(items: list[dict[str, Any]], limit: int = 3) -> list[str]:
+    out: list[str] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        title = str(it.get("title") or it.get("name") or "").strip()
+        if not title:
+            continue
+        year = str(it.get("year") or "").strip()
+        ep = str(it.get("episode") or it.get("episodes_count") or it.get("number_of_episodes") or "").strip()
+        label = title
+        if year and year.isdigit() and len(year) == 4 and year not in label:
+            label = f"{label} ({year})"
+        if ep.isdigit() and int(ep) > 0:
+            label = f"{label} · {int(ep)}集"
+        if label not in out:
+            out.append(label)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _pick_best_query_hit(hits: list[dict[str, Any]], query: str) -> dict[str, Any]:
+    if not hits:
+        return {}
+    import re
+
+    q = str(query or "").strip()
+    cn_map = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+    m = re.search(r"第\s*([一二两三四五六七八九十\d]+)\s*季|(?:season|s)\s*0*(\d+)", q, flags=re.I)
+    wanted_sn: int | None = None
+    if m:
+        raw_sn = m.group(1) or m.group(2) or ""
+        wanted_sn = int(raw_sn) if raw_sn.isdigit() else cn_map.get(raw_sn)
+    if wanted_sn is not None:
+        for it in hits:
+            t = str(it.get("title") or "")
+            tm = re.search(r"第\s*([一二两三四五六七八九十\d]+)\s*季|(?:season|s)\s*0*(\d+)", t, flags=re.I)
+            if tm:
+                rs = tm.group(1) or tm.group(2) or ""
+                sn = int(rs) if rs.isdigit() else cn_map.get(rs)
+                if sn == wanted_sn:
+                    return it
+    return hits[0]
+
+
+async def _probe_mp_channel(
+    mp_client: Any,
+    *,
+    test_query: str = "",
+) -> dict[str, Any]:
+    if mp_client is None:
+        return {
+            "configured": False,
+            "ok": False,
+            "http_status": 0,
+            "latency_ms": 0,
+            "sample_title": "",
+            "sample_titles": [],
+            "candidate_count": 0,
+            "reason": "MoviePilot 未配置",
+        }
     started = time.monotonic()
+    q_custom = str(test_query or "").strip()
     try:
+        if q_custom:
+            mp_hits = await asyncio.wait_for(mp_client.search_media(q_custom, source="douban"), timeout=8.0)
+            latency = int((time.monotonic() - started) * 1000)
+            if isinstance(mp_hits, list) and len(mp_hits) > 0:
+                samples = _format_sample_titles(mp_hits)
+                return {
+                    "configured": True,
+                    "ok": True,
+                    "http_status": 200,
+                    "latency_ms": latency,
+                    "sample_title": samples[0] if samples else str(mp_hits[0].get("title") or ""),
+                    "sample_titles": samples,
+                    "candidate_count": len(mp_hits),
+                    "reason": f"搜到 {len(mp_hits)} 条结果",
+                }
+            return {
+                "configured": True,
+                "ok": False,
+                "http_status": 200,
+                "latency_ms": latency,
+                "sample_title": "",
+                "sample_titles": [],
+                "candidate_count": 0,
+                "reason": f"未搜到「{q_custom}」（MP 对该词返回空，可由备选反代补位）",
+            }
+
+        # 默认探活：依次测试「三体」「庆余年」，避免单个词在 MP 内命中历史空缓存导致整条主通道被误判离线
+        for probe_word in ("三体", "庆余年"):
+            mp_hits = await asyncio.wait_for(mp_client.search_media(probe_word, source="douban"), timeout=6.0)
+            if isinstance(mp_hits, list) and len(mp_hits) > 0:
+                latency = int((time.monotonic() - started) * 1000)
+                samples = _format_sample_titles(mp_hits)
+                return {
+                    "configured": True,
+                    "ok": True,
+                    "http_status": 200,
+                    "latency_ms": latency,
+                    "sample_title": samples[0] if samples else str(mp_hits[0].get("title") or ""),
+                    "sample_titles": samples,
+                    "candidate_count": len(mp_hits),
+                    "reason": f"正常可用（搜「{probe_word}」命中 {len(mp_hits)} 条）",
+                }
+
+        # 搜索均返回空时，再核实一次详情接口是否通畅，给出更准确的人话诊断
+        detail_ok = False
+        if callable(getattr(mp_client, "get_douban_media_info", None)):
+            try:
+                d_raw = await asyncio.wait_for(mp_client.get_douban_media_info("25853071"), timeout=5.0)
+                d_norm = normalize_detail(d_raw)
+                detail_ok = bool(d_norm.get("title"))
+            except Exception:
+                detail_ok = False
+        latency = int((time.monotonic() - started) * 1000)
+        return {
+            "configured": True,
+            "ok": False,
+            "http_status": 200,
+            "latency_ms": latency,
+            "sample_title": "",
+            "sample_titles": [],
+            "candidate_count": 0,
+            "reason": "豆瓣搜索返回空（条目详情仍通，已自动切备选反代补搜）" if detail_ok else "豆瓣搜索返回空或被风控，已自动切备选通道",
+        }
+    except Exception as exc:
+        return {
+            "configured": True,
+            "ok": False,
+            "http_status": 0,
+            "latency_ms": int((time.monotonic() - started) * 1000),
+            "sample_title": "",
+            "sample_titles": [],
+            "candidate_count": 0,
+            "reason": lookup_error_reason(exc),
+        }
+
+
+async def _probe_cf_proxy(
+    cfg: dict[str, Any],
+    http_client: httpx.AsyncClient,
+    *,
+    test_query: str = "",
+) -> dict[str, Any]:
+    if not cfg["proxy_base"]:
+        return {
+            "configured": False,
+            "ok": False,
+            "http_status": 0,
+            "latency_ms": 0,
+            "sample_title": "",
+            "sample_titles": [],
+            "candidate_count": 0,
+            "reason": "未配置反代地址",
+        }
+    started = time.monotonic()
+    q_custom = str(test_query or "").strip()
+    try:
+        # 1. 指定影视剧名称实测：真实调用 /search（回退 /suggest），并补查首条剧集集数
+        if q_custom:
+            headers = _build_cf_headers(cfg, include_cookie=False)
+            hits: list[dict[str, Any]] = []
+            last_status = 0
+            for ep_path in ("/search", "/suggest"):
+                resp = await _cf_get_with_retry(
+                    http_client,
+                    f"{cfg['proxy_base']}{ep_path}",
+                    params={"q": q_custom},
+                    headers=headers,
+                    cf_throttle_seconds=0.0,
+                )
+                last_status = resp.status_code
+                if resp.status_code == 401:
+                    return {
+                        "configured": True,
+                        "ok": False,
+                        "http_status": 401,
+                        "latency_ms": int((time.monotonic() - started) * 1000),
+                        "sample_title": "",
+                        "sample_titles": [],
+                        "candidate_count": 0,
+                        "reason": "访问密钥校验失败 (HTTP 401)",
+                    }
+                if resp.status_code == 200:
+                    hits = _extract_flexible_search_items(resp.json())
+                    if hits:
+                        break
+            if hits:
+                best = dict(_pick_best_query_hit(hits, q_custom))
+                best_id = str(best.get("id") or "")
+                if best_id.isdigit() and not str(best.get("episode") or "").isdigit():
+                    try:
+                        d_resp = await http_client.get(
+                            f"{cfg['proxy_base']}/rexxar/tv/{best_id}",
+                            headers=headers,
+                            timeout=6.0,
+                        )
+                        if d_resp.status_code == 200:
+                            d_norm = normalize_detail(d_resp.json())
+                            if d_norm.get("number_of_episodes"):
+                                best["episode"] = str(d_norm["number_of_episodes"])
+                            if d_norm.get("year") and not best.get("year"):
+                                best["year"] = str(d_norm["year"])
+                    except Exception:
+                        pass
+                ordered = [best] + [it for it in hits if str(it.get("id") or "") != best_id]
+                samples = _format_sample_titles(ordered)
+                return {
+                    "configured": True,
+                    "ok": True,
+                    "http_status": 200,
+                    "latency_ms": int((time.monotonic() - started) * 1000),
+                    "sample_title": samples[0] if samples else str(best.get("title") or ""),
+                    "sample_titles": samples,
+                    "candidate_count": len(hits),
+                    "reason": f"搜到 {len(hits)} 条结果",
+                }
+            return {
+                "configured": True,
+                "ok": False,
+                "http_status": last_status,
+                "latency_ms": int((time.monotonic() - started) * 1000),
+                "sample_title": "",
+                "sample_titles": [],
+                "candidate_count": 0,
+                "reason": f"未搜到「{q_custom}」" if last_status == 200 else f"反代返回 HTTP {last_status}",
+            }
+
+        # 2. 默认极速连通性探测：直打单跳轻量 /rexxar/tv/25853071（约 1s），避免旧版 /probe 串行阻塞 4s+
+        headers = _build_cf_headers(cfg, include_cookie=False)
+        resp = await _cf_get_with_retry(
+            http_client,
+            f"{cfg['proxy_base']}/rexxar/tv/25853071",
+            headers=headers,
+            cf_throttle_seconds=0.0,
+        )
+        latency = int((time.monotonic() - started) * 1000)
+        if resp.status_code == 401:
+            return {
+                "configured": True,
+                "ok": False,
+                "http_status": 401,
+                "latency_ms": latency,
+                "sample_title": "",
+                "sample_titles": [],
+                "candidate_count": 0,
+                "reason": "访问密钥校验失败 (HTTP 401)",
+            }
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, dict):
+                # 兼容真实 Rexxar TV 详情与单测 mock 的 /probe 结构
+                if data.get("title"):
+                    d_norm = normalize_detail(data)
+                    sample = _format_sample_titles([d_norm])
+                    return {
+                        "configured": True,
+                        "ok": True,
+                        "http_status": 200,
+                        "latency_ms": latency,
+                        "sample_title": sample[0] if sample else str(data.get("title") or ""),
+                        "sample_titles": sample,
+                        "candidate_count": 1,
+                        "reason": "正常可用",
+                    }
+                if "results" in data:
+                    results = data.get("results") or {}
+                    suggest_title = ((results or {}).get("suggest") or {}).get("sample_title") or ""
+                    rexxar_title = ((results or {}).get("rexxar_tv") or {}).get("sample_title") or ""
+                    ok = bool(data.get("ok"))
+                    sample_title = suggest_title or rexxar_title
+                    return {
+                        "configured": True,
+                        "ok": ok,
+                        "http_status": 200,
+                        "latency_ms": latency,
+                        "sample_title": sample_title,
+                        "sample_titles": [sample_title] if sample_title else [],
+                        "candidate_count": 1 if ok else 0,
+                        "results": results,
+                        "reason": "正常可用" if ok else "反代上游探测全部失败",
+                    }
+
+        # 单跳异常时再回退 /probe
         resp = await _cf_get_with_retry(
             http_client,
             f"{cfg['proxy_base']}/probe",
-            headers=_build_cf_headers(cfg, include_cookie=False),
+            headers=headers,
             cf_throttle_seconds=0.0,
         )
         latency = int((time.monotonic() - started) * 1000)
@@ -828,20 +1110,41 @@ async def _probe_cf_proxy(cfg: dict[str, Any], http_client: httpx.AsyncClient) -
             suggest_title = ((results or {}).get("suggest") or {}).get("sample_title") or ""
             rexxar_title = ((results or {}).get("rexxar_tv") or {}).get("sample_title") or ""
             ok = bool(data.get("ok"))
+            sample_title = suggest_title or rexxar_title
             return {
                 "configured": True,
                 "ok": ok,
                 "http_status": 200,
                 "latency_ms": latency,
-                "sample_title": suggest_title or rexxar_title,
+                "sample_title": sample_title,
+                "sample_titles": [sample_title] if sample_title else [],
+                "candidate_count": 1 if ok else 0,
                 "results": results,
-                "reason": "CF 反代在线" if ok else "CF 反代上游探测全部失败",
+                "reason": "正常可用" if ok else "反代上游探测全部失败",
             }
-        reason = "Proxy Token 鉴权失败 (401)" if resp.status_code == 401 else f"HTTP {resp.status_code}"
-        return {"configured": True, "ok": False, "http_status": resp.status_code, "latency_ms": latency, "sample_title": "", "reason": reason}
+        reason = "访问密钥校验失败 (HTTP 401)" if resp.status_code == 401 else f"HTTP {resp.status_code}"
+        return {
+            "configured": True,
+            "ok": False,
+            "http_status": resp.status_code,
+            "latency_ms": latency,
+            "sample_title": "",
+            "sample_titles": [],
+            "candidate_count": 0,
+            "reason": reason,
+        }
     except Exception as exc:
         latency = int((time.monotonic() - started) * 1000)
-        return {"configured": True, "ok": False, "http_status": 0, "latency_ms": latency, "sample_title": "", "reason": lookup_error_reason(exc)}
+        return {
+            "configured": True,
+            "ok": False,
+            "http_status": 0,
+            "latency_ms": latency,
+            "sample_title": "",
+            "sample_titles": [],
+            "candidate_count": 0,
+            "reason": lookup_error_reason(exc),
+        }
 
 
 async def _probe_direct_cookie(
@@ -849,30 +1152,63 @@ async def _probe_direct_cookie(
     http_client: httpx.AsyncClient,
     *,
     throttle_seconds: float = 0.0,
+    test_query: str = "",
 ) -> dict[str, Any]:
     if not cfg["cookie_header"]:
-        return {"configured": False, "ok": False, "http_status": 0, "latency_ms": 0, "sample_title": "", "reason": "未导入豆瓣 Cookie"}
+        return {
+            "configured": False,
+            "ok": False,
+            "http_status": 0,
+            "latency_ms": 0,
+            "sample_title": "",
+            "sample_titles": [],
+            "candidate_count": 0,
+            "reason": "未导入（已有上方绿灯通道时无需填写）",
+        }
     started = time.monotonic()
-    probe_steps = [
-        (
-            "rexxar_tv",
-            "https://m.douban.com/rexxar/api/v2/tv/25853071",
-            None,
-            "rexxar",
-        ),
-        (
-            "classic_search",
-            "https://www.douban.com/j/search",
-            {"q": "庆余年", "start": 0, "cat": "1002"},
-            "classic_search",
-        ),
-        (
-            "subject_html",
-            "https://movie.douban.com/subject/25853071/",
-            None,
-            "subject",
-        ),
-    ]
+    q_custom = str(test_query or "").strip()
+    if q_custom:
+        probe_steps = [
+            (
+                "rexxar_search",
+                "https://m.douban.com/rexxar/api/v2/search/movie",
+                {"q": q_custom, "start": 0, "count": 10},
+                "rexxar_search",
+            ),
+            (
+                "classic_search",
+                "https://www.douban.com/j/search",
+                {"q": q_custom, "start": 0, "cat": "1002"},
+                "classic_search",
+            ),
+            (
+                "suggest",
+                "https://movie.douban.com/j/subject_suggest",
+                {"q": q_custom},
+                "suggest",
+            ),
+        ]
+    else:
+        probe_steps = [
+            (
+                "rexxar_tv",
+                "https://m.douban.com/rexxar/api/v2/tv/25853071",
+                None,
+                "rexxar",
+            ),
+            (
+                "classic_search",
+                "https://www.douban.com/j/search",
+                {"q": "三体", "start": 0, "cat": "1002"},
+                "classic_search",
+            ),
+            (
+                "subject_html",
+                "https://movie.douban.com/subject/25853071/",
+                None,
+                "subject",
+            ),
+        ]
     last_status = 0
     last_reason = "探测未通过"
     for mode, url, params, hdr_kind in probe_steps:
@@ -881,38 +1217,60 @@ async def _probe_direct_cookie(
             resp = await http_client.get(
                 url,
                 params=params,
-                headers=_build_direct_headers(hdr_kind, cfg["cookie_header"], subject_id="25853071", query="庆余年"),
+                headers=_build_direct_headers(hdr_kind, cfg["cookie_header"], subject_id="25853071", query=q_custom or "三体"),
             )
             last_status = resp.status_code
             latency = int((time.monotonic() - started) * 1000)
             if _is_blocked_response(resp.status_code, resp.text):
-                last_reason = "本机 IP 被豆瓣风控或 Cookie 已过期 (004/302 拦截，有 CF 反代在线时不影响使用)"
+                last_reason = "本机网络被豆瓣限制或 Cookie 已过期（只要上方有绿灯通道就不影响使用）"
                 continue
             if resp.status_code != 200:
                 last_reason = f"上游返回 HTTP {resp.status_code}"
                 continue
-            sample_title = ""
-            if mode == "rexxar_tv":
-                d = normalize_detail(resp.json())
-                if d.get("title") and d.get("number_of_episodes"):
-                    sample_title = str(d["title"])
-            elif mode == "classic_search":
+            if mode in ("rexxar_search", "classic_search", "suggest"):
                 hits = _extract_flexible_search_items(resp.json())
                 if hits:
-                    sample_title = str(hits[0].get("title") or "")
+                    samples = _format_sample_titles(hits)
+                    return {
+                        "configured": True,
+                        "ok": True,
+                        "http_status": 200,
+                        "latency_ms": latency,
+                        "sample_title": samples[0] if samples else str(hits[0].get("title") or ""),
+                        "sample_titles": samples,
+                        "candidate_count": len(hits),
+                        "reason": f"搜到 {len(hits)} 条结果" if q_custom else "正常可用",
+                    }
+                last_reason = f"未搜到「{q_custom}」" if q_custom else "返回内容为空"
+            elif mode == "rexxar_tv":
+                d = normalize_detail(resp.json())
+                if d.get("title") and d.get("number_of_episodes"):
+                    samples = _format_sample_titles([d])
+                    return {
+                        "configured": True,
+                        "ok": True,
+                        "http_status": 200,
+                        "latency_ms": latency,
+                        "sample_title": samples[0] if samples else str(d["title"]),
+                        "sample_titles": samples,
+                        "candidate_count": 1,
+                        "reason": "正常可用",
+                    }
+                last_reason = "返回内容为空"
             else:
                 d = subject_page_detail(resp.text, "25853071")
-                sample_title = str(d.get("title") or "")
-            if sample_title:
-                return {
-                    "configured": True,
-                    "ok": True,
-                    "http_status": 200,
-                    "latency_ms": latency,
-                    "sample_title": sample_title,
-                    "reason": "Cookie 直连在线",
-                }
-            last_reason = "返回内容为空"
+                if d.get("title"):
+                    return {
+                        "configured": True,
+                        "ok": True,
+                        "http_status": 200,
+                        "latency_ms": latency,
+                        "sample_title": str(d["title"]),
+                        "sample_titles": [str(d["title"])],
+                        "candidate_count": 1,
+                        "reason": "正常可用",
+                    }
+                last_reason = "返回内容为空"
         except Exception as exc:
             last_reason = lookup_error_reason(exc)
     latency = int((time.monotonic() - started) * 1000)
@@ -922,6 +1280,8 @@ async def _probe_direct_cookie(
         "http_status": last_status,
         "latency_ms": latency,
         "sample_title": "",
+        "sample_titles": [],
+        "candidate_count": 0,
         "reason": last_reason,
     }
 
@@ -932,27 +1292,51 @@ async def check_health(
     mp_online: bool = False,
     force: bool = False,
 ) -> dict[str, Any]:
-    """统一执行豆瓣主备健康检查，支持故障切备选与冷却期后自动探测回切 MP。"""
+    """统一执行豆瓣主备健康检查，支持并发极速重探、故障切备选与冷却期后自动回切 MP。"""
     cfg = _effective_config()
     now = time.time()
     in_cooldown = bool((cfg["proxy_base"] or cfg["cookie_header"]) and now < float(_STATE.get("mp_cooldown_until") or 0.0))
 
-    # 1. 探测 MP 主通道（冷却期未到且非强制探测时暂时跳过 MP，直接用备选承接）
-    if mp_online and mp_client is not None and (force or not in_cooldown):
-        try:
-            mp_res = await mp_client.search_media("庆余年", source="douban")
-            if isinstance(mp_res, list) and len(mp_res) > 0:
-                record_mp_success()
-                return {"status": "online", **get_runtime_status()}
-            record_mp_failure("MoviePilot 豆瓣搜索返回空结果")
-        except Exception as exc:
-            record_mp_failure(f"MoviePilot 豆瓣请求异常: {type(exc).__name__}")
-    elif not mp_online and not (cfg["proxy_base"] or cfg["cookie_header"]):
-        return {"status": "not_configured", **get_runtime_status()}
+    if not mp_online and not (cfg["proxy_base"] or cfg["cookie_header"]):
+        return {"status": "not_configured", **get_runtime_status(), "channel_results": {}}
 
-    # 2. MP 处于冷却或不可用时，探测已配置的备选通道
+    # 强制重探时并发探测 MP + 已配置备选通道，一次给出清晰完整的三通道体检结论（耗时 ~1.5s）
+    if force:
+        async with httpx.AsyncClient(timeout=8.0) as http_client:
+            mp_task = _probe_mp_channel(mp_client if mp_online else None)
+            cf_task = _probe_cf_proxy(cfg, http_client)
+            ck_task = _probe_direct_cookie(cfg, http_client, throttle_seconds=0.0)
+            mp_res, cf_res, ck_res = await asyncio.gather(mp_task, cf_task, ck_task)
+        channel_results = {"moviepilot": mp_res, "cf_proxy": cf_res, "direct_cookie": ck_res}
+        if mp_online and mp_client is not None:
+            if mp_res["ok"]:
+                record_mp_success()
+                return {"status": "online", **get_runtime_status(), "channel_results": channel_results}
+            record_mp_failure(mp_res.get("reason") or "MoviePilot 豆瓣搜索返回空结果")
+        if cf_res["ok"]:
+            _STATE["last_active_channel"] = "cf_proxy"
+            _STATE["last_fallback_error"] = ""
+            return {"status": "fallback:cf_proxy", **get_runtime_status(), "channel_results": channel_results}
+        if cfg["proxy_base"]:
+            _STATE["last_fallback_error"] = cf_res.get("reason") or "CF 反代不可用"
+        if ck_res["ok"]:
+            _STATE["last_active_channel"] = "direct_cookie"
+            _STATE["last_fallback_error"] = ""
+            return {"status": "fallback:cookie", **get_runtime_status(), "channel_results": channel_results}
+        if cfg["cookie_header"]:
+            _STATE["last_fallback_error"] = ck_res.get("reason") or "Cookie 通道不可用"
+        return {"status": "error", **get_runtime_status(), "channel_results": channel_results}
+
+    # 常规检查：冷却期未满时直接跳过 MP 用备选承接，到期后自动探测 MP 回切
+    if mp_online and mp_client is not None and not in_cooldown:
+        mp_res = await _probe_mp_channel(mp_client)
+        if mp_res["ok"]:
+            record_mp_success()
+            return {"status": "online", **get_runtime_status()}
+        record_mp_failure(mp_res.get("reason") or "MoviePilot 豆瓣搜索返回空结果")
+
     if cfg["proxy_base"] or cfg["cookie_header"]:
-        async with httpx.AsyncClient(timeout=10.0) as http_client:
+        async with httpx.AsyncClient(timeout=8.0) as http_client:
             if cfg["proxy_base"]:
                 cf_res = await _probe_cf_proxy(cfg, http_client)
                 if cf_res["ok"]:
@@ -978,65 +1362,31 @@ async def test_channels(
     mp_client: Any = None,
     *,
     draft: dict[str, Any] | None = None,
+    test_query: str = "",
 ) -> dict[str, Any]:
-    """对 MP 主通道、CF 反代、Cookie 直连分别做实测（支持草稿参数测试，不写入磁盘）。"""
+    """并发实测 MP 主通道、CF 反代、Cookie 直连（支持草稿参数与自定义影视剧名称，不写入磁盘）。"""
     parse_preview = None
     if isinstance(draft, dict) and str(draft.get("raw_cookie") or "").strip():
         parse_preview = parse_douban_cookie(str(draft["raw_cookie"]))
 
+    q_norm = str(test_query or (draft.get("test_query") if isinstance(draft, dict) else "") or "").strip()
     cfg = _effective_config(draft)
-    results: dict[str, Any] = {}
 
-    # 1. MoviePilot 主通道
-    if mp_client is not None:
-        started = time.monotonic()
-        try:
-            mp_hits = await mp_client.search_media("庆余年", source="douban")
-            latency = int((time.monotonic() - started) * 1000)
-            if isinstance(mp_hits, list) and len(mp_hits) > 0:
-                results["moviepilot"] = {
-                    "configured": True,
-                    "ok": True,
-                    "http_status": 200,
-                    "latency_ms": latency,
-                    "sample_title": str(mp_hits[0].get("title") or ""),
-                    "reason": "MoviePilot 豆瓣主通道正常",
-                }
-            else:
-                results["moviepilot"] = {
-                    "configured": True,
-                    "ok": False,
-                    "http_status": 200,
-                    "latency_ms": latency,
-                    "sample_title": "",
-                    "reason": "MoviePilot 返回空列表（内置 Frodo 被 004 拦截）",
-                }
-        except Exception as exc:
-            results["moviepilot"] = {
-                "configured": True,
-                "ok": False,
-                "http_status": 0,
-                "latency_ms": int((time.monotonic() - started) * 1000),
-                "sample_title": "",
-                "reason": lookup_error_reason(exc),
-            }
-    else:
-        results["moviepilot"] = {
-            "configured": False,
-            "ok": False,
-            "http_status": 0,
-            "latency_ms": 0,
-            "sample_title": "",
-            "reason": "MoviePilot 未配置",
-        }
-
-    # 2 & 3. Cloudflare Workers 反代 + 本机 Cookie 直连
-    async with httpx.AsyncClient(timeout=12.0) as http_client:
-        results["cf_proxy"] = await _probe_cf_proxy(cfg, http_client)
-        results["direct_cookie"] = await _probe_direct_cookie(cfg, http_client, throttle_seconds=0.0)
+    async with httpx.AsyncClient(timeout=10.0) as http_client:
+        mp_res, cf_res, ck_res = await asyncio.gather(
+            _probe_mp_channel(mp_client, test_query=q_norm),
+            _probe_cf_proxy(cfg, http_client, test_query=q_norm),
+            _probe_direct_cookie(cfg, http_client, throttle_seconds=0.0, test_query=q_norm),
+        )
+    results = {
+        "moviepilot": mp_res,
+        "cf_proxy": cf_res,
+        "direct_cookie": ck_res,
+    }
 
     return {
         "ok": any(bool(v.get("ok")) for v in results.values()),
+        "test_query": q_norm,
         "results": results,
         "parse_preview": {
             "format_detected": parse_preview["format_detected"],

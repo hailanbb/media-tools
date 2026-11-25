@@ -396,6 +396,59 @@ class TestDoubanGatewayFailoverAndApi(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(res_rejected, {})
 
+    async def test_custom_test_query_searches_mp_and_cf_in_parallel_with_episodes(self):
+        douban_gateway.reset_state_for_tests()
+        douban_gateway.save_runtime_config(
+            {
+                "proxy_base": "https://douban.ubaby.top",
+                "proxy_token": "tok123",
+            }
+        )
+        mp_stub = SimpleNamespace(search_media=AsyncMock(return_value=[]))
+
+        async def _fake_get(url, params=None, headers=None, timeout=None):
+            if url.endswith("/search") and (params or {}).get("q") == "少年泰坦出击 第九季":
+                return SimpleNamespace(
+                    status_code=200,
+                    json=lambda: [
+                        {"id": "22622973", "title": "少年泰坦出击 第一季", "year": "2013", "episode": "", "type": "tv"},
+                        {"id": "37283814", "title": "少年泰坦出击 第九季", "year": "2025", "episode": "", "type": "tv"},
+                    ],
+                )
+            if url.endswith("/rexxar/tv/37283814"):
+                return SimpleNamespace(
+                    status_code=200,
+                    json=lambda: {"id": "37283814", "title": "少年泰坦出击 第九季", "year": "2025", "episodes_count": 52, "type": "tv"},
+                )
+            return SimpleNamespace(status_code=404, json=lambda: {})
+
+        with patch("app.clients.douban_gateway.httpx.AsyncClient") as mock_cls:
+            inst = mock_cls.return_value.__aenter__.return_value
+            inst.get = AsyncMock(side_effect=_fake_get)
+            res = await douban_gateway.test_channels(mp_stub, test_query="少年泰坦出击 第九季")
+
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["test_query"], "少年泰坦出击 第九季")
+        self.assertFalse(res["results"]["moviepilot"]["ok"])
+        self.assertIn("少年泰坦出击 第九季", res["results"]["moviepilot"]["reason"])
+        self.assertTrue(res["results"]["cf_proxy"]["ok"])
+        self.assertEqual(res["results"]["cf_proxy"]["candidate_count"], 2)
+        self.assertIn("52集", res["results"]["cf_proxy"]["sample_title"])
+
+    async def test_mp_default_probe_avoids_single_keyword_empty_cache_false_negative(self):
+        douban_gateway.reset_state_for_tests()
+
+        async def _mp_search(title, source="douban"):
+            if title == "三体":
+                return [{"title": "三体", "year": "2023", "douban_id": "26647087"}]
+            return []
+
+        mp_stub = SimpleNamespace(search_media=AsyncMock(side_effect=_mp_search))
+        res = await douban_gateway._probe_mp_channel(mp_stub)
+        self.assertTrue(res["ok"])
+        self.assertIn("三体", res["reason"])
+        self.assertEqual(res["candidate_count"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
