@@ -1581,6 +1581,110 @@ class TestV2563SubscriptionGovernance(unittest.IsolatedAsyncioTestCase):
         finally:
             sgs._audit_jobs.pop(fake_tv_audit, None)
 
+    async def test_21_unified_tv_movie_identity_and_media_info_guard(self):
+        import asyncio
+        from unittest.mock import AsyncMock
+        from app.clients.moviepilot import is_valid_download_payload
+        from app.services import download_service as ds
+        from app.services import subscription_governance_service as sgs
+
+        # 1. 验证 moviepilot 入口契约与订阅治理共用同一组载荷有效性断言
+        self.assertIs(sgs._select_best_movie_candidate, ds.select_best_movie_candidate)
+        self.assertFalse(is_valid_download_payload({}, {"enclosure": "https://pt/1"}))
+        self.assertTrue(is_valid_download_payload({"tmdb_id": 100}, {"title": "Show.S01E01"}))
+
+        # 2. 验证统一 verify_candidate_media_identity 在 TV 关键词回退下阻断同名异片/早期翻拍，放行严格同作
+        tv_wrong_other = {
+            "media_info": {},
+            "meta_info": {"begin_season": 1, "season_list": [1], "episode_list": [3], "en_name": "Wrong Show"},
+            "torrent_info": {"title": "Wrong Show S01E03 1080p", "site": 15, "site_name": "天空", "seeders": 12, "size": 1024**3},
+        }
+        tv_wrong_remake = {
+            "media_info": {},
+            "meta_info": {"begin_season": 1, "season_list": [1], "episode_list": [3], "year": "1990"},
+            "torrent_info": {"title": "The Flash 1990 S01E03 1080p", "site": 15, "site_name": "天空", "seeders": 20, "size": 1024**3},
+        }
+        tv_true_empty_mi = {
+            "media_info": {},
+            "meta_info": {"begin_season": 1, "season_list": [1], "episode_list": [3], "year": "2014"},
+            "torrent_info": {"title": "The Flash 2014 S01E03 1080p WEB-DL", "enclosure": "https://pt/flash-e3", "site": 15, "site_name": "天空", "seeders": 8, "size": 2 * 1024**3},
+        }
+        st_evals, _, rej_tv = ds._evaluate_raw_candidates(
+            [tv_wrong_other, tv_wrong_remake, tv_true_empty_mi],
+            tmdb_id_num=60735,
+            season_num=1,
+            total_eps=23,
+            missing_eps=[3],
+            by_period=False,
+            parts_mode=False,
+            part_episode_mapping=None,
+            keyword_fallback=True,
+            min_seeders=2,
+            min_resolution="",
+            require_chinese=False,
+            allowed_site_ids={15},
+            site_priority_map={15: 0},
+            expected_titles=["闪电侠", "The Flash"],
+            expected_year="2014",
+        )
+        self.assertEqual(len(st_evals), 1)
+        self.assertEqual(st_evals[0].cand["torrent_info"]["title"], "The Flash 2014 S01E03 1080p WEB-DL")
+        self.assertIn("作品身份不符", rej_tv)
+
+        # 3. 续季跨年容差验证：2013 首播剧在 2025 年发布的 S09（关键词回退无 media_info）仍允许通过边界匹配
+        tv_later_season = {
+            "media_info": {},
+            "meta_info": {"begin_season": 9, "season_list": [9], "episode_list": [10], "year": "2025"},
+            "torrent_info": {"title": "Teen Titans Go 2025 S09E10 1080p WEB-DL", "enclosure": "https://pt/ttg-s09e10", "site": 15, "site_name": "天空", "seeders": 6, "size": 500 * 1024**2},
+        }
+        ok_s9, _, eff_s9 = ds.verify_candidate_media_identity(
+            tv_later_season,
+            media_type="tv",
+            search_tmdb_id=45140,
+            search_season=9,
+            source_tmdb_id=45140,
+            source_season=9,
+            keyword_fallback=True,
+            expected_titles=["少年泰坦出击", "Teen Titans Go!"],
+            expected_year="2013",
+        )
+        self.assertTrue(ok_s9)
+        self.assertEqual(eff_s9, 9)
+
+        # 4. 订阅治理 TV 分支关键词回退时共用 get_media_info 别名扩充与完整 MediaInfo 回填
+        sub_tv = {
+            "id": 9951, "name": "闪电侠", "year": "2014", "type": "电视剧",
+            "tmdbid": 60735, "season": 1, "total_episode": 4, "completed_episode": 2,
+            "lack_episode": 2, "state": "R", "username": "admin", "poster": "http://ok",
+            "cd2_verified": True, "cd2_episode_numbers": [1, 2, 4], "cd2_total_episodes": 3,
+        }
+        async def _fake_tv_search(tmdb_id=None, title=None, season=None, media_type="tv", **kwargs):
+            if tmdb_id:
+                return []
+            return [tv_wrong_remake, tv_true_empty_mi]
+
+        mp_tv = AsyncMock()
+        mp_tv.search_resources = AsyncMock(side_effect=_fake_tv_search)
+        mp_tv.get_media_info = AsyncMock(return_value={
+            "tmdb_id": 60735, "title": "闪电侠", "en_title": "The Flash",
+            "original_title": "The Flash", "year": "2014", "type": "电视剧",
+        })
+        tmdb_tv = AsyncMock()
+        audited_tv = await sgs._audit_single_subscription_item(
+            sub_tv,
+            mp=mp_tv,
+            tmdb=tmdb_tv,
+            category_plans={"non_anime": {"ready": True, "sites_param": "15", "active_ordered_ids": [15], "site_priority_map": {15: 0}}},
+            active_downloads=[],
+            sem=asyncio.Semaphore(1),
+            is_aborted_fn=lambda: False,
+            min_seeders=2, tier_ratio=0.10, min_slack=1, min_resolution="", require_chinese=False,
+        )
+        self.assertEqual(audited_tv["audit_status"], "downloadable")
+        self.assertEqual(audited_tv["selected_torrents"][0]["title"], "The Flash 2014 S01E03 1080p WEB-DL")
+        self.assertEqual(audited_tv["_selected_payloads"][0]["media_info"]["tmdb_id"], 60735)
+        self.assertEqual(audited_tv["_selected_payloads"][0]["media_info"]["title"], "闪电侠")
+
 
 if __name__ == "__main__":
     unittest.main()

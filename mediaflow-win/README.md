@@ -4,7 +4,7 @@
 
 **专为 115网盘 · CloudDrive2 · MoviePilot · Emby / Jellyfin 打造的下一代智能化媒体治理与生命周期工作流引擎**
 
-[![Release](https://img.shields.io/badge/Release-v2.5.78-6366f1?style=for-the-badge&logo=github)](VERSIONING.md)
+[![Release](https://img.shields.io/badge/Release-v2.5.82-6366f1?style=for-the-badge&logo=github)](VERSIONING.md)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776ab?style=for-the-badge&logo=python)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20Native%20%7C%20Docker-0078d4?style=for-the-badge&logo=windows)](#-快速启动与部署)
 [![MoviePilot](https://img.shields.io/badge/MoviePilot-v2.x%20Ready-ff5722?style=for-the-badge&logo=fastapi)](https://github.com/jxxghp/MoviePilot)
@@ -20,7 +20,7 @@
   <a href="#-配置指南-env">配置指南</a> •
   <a href="#-零数据丢失安全防线">安全防线</a> •
   <a href="#-技术方案与规范索引">文档索引</a> •
-  <a href="#-版本演进与重要里程碑">版本演进 (v2.5.78)</a>
+  <a href="#-版本演进与重要里程碑">版本演进 (v2.5.82)</a>
 </p>
 
 </div>
@@ -228,7 +228,7 @@ MediaFlow 所有配置项均以 `MF_` 前缀开头，大小写不敏感：
 | **会话交接与最新进展** | [MediaFlow 会话交接摘要 (v2.5.61)](MediaFlow会话交接摘要-v2.5.61-2026-11-21.md)<br/>[MediaFlow 会话交接摘要 (v2.5.60)](MediaFlow会话交接摘要-v2.5.60-2026-11-20.md)<br/>[MediaFlow 会话交接摘要 (v2.5.59)](MediaFlow会话交接摘要-v2.5.59-2026-11-20.md) | **v2.5.61** |
 | **整体重构方案** | [五模块处理流程重构与智能清理方案](MediaFlow五模块处理流程重构与智能清理方案-v2.5.44.md)<br/>[五模块一致性核查报告](MediaFlow五模块一致性核查-v2.5.56-2026-11-20.md) | **v2.5.44 ~ v2.5.56** |
 | **专项扩展方案** | [媒体整理智能修复需求与交互方案](MediaFlow媒体整理智能修复需求与交互方案-v2.5.40.md)<br/>[电影订阅智能清理需求与交互方案](MediaFlow电影订阅智能清理需求与交互方案-v2.5.72.md)<br/>[剧集订阅智能清理需求与交互方案](MediaFlow剧集订阅智能清理需求与交互方案-v2.5.72.md) | **v2.5.40 ~ v2.5.72** |
-| **历史版本与迁移** | [完整版本演进历史与全量修改记录](VERSIONING.md)<br/>[媒体脚本迁移记录 (油猴版至统一仓库)](MIGRATION.md) | **v1.0 ~ v2.5.74** |
+| **历史版本与迁移** | [完整版本演进历史与全量修改记录](VERSIONING.md)<br/>[媒体脚本迁移记录 (油猴版至统一仓库)](MIGRATION.md) | **v1.0 ~ v2.5.82** |
 
 ---
 
@@ -238,7 +238,11 @@ MediaFlow 所有配置项均以 `MF_` 前缀开头，大小写不敏感：
 
 | 版本号 | 发布日期 | 关键特性与核心演进 | 状态 |
 | :---: | :---: | :--- | :---: |
-| **`v2.5.78`** | **2026-11-24** | • **初检执行期页面左右抖动像素级根治**：修复奇数 `5px` 滚动条引发居中容器落在 `.5px` 半像素并在合成层升降级时左右跳动的问题（改为偶数 `6px` + `overflow-x: clip` 消除嵌套双滚动容器）；进度条升级为 `will-change: transform` 常驻 `translate3d` 平移，弹窗开启期间冻结背景重绘并按总位数补零锁定计数宽度，Chrome 全缩放比逐帧截图零像素偏移 | **最新稳定版** |
+| **`v2.5.82`** | **2026-11-25** | • **跨模块选种与媒体身份防线统一收口至 `download_service` 单一底座**：抽离 MoviePilot 下载载荷前置契约（`has_valid_media_info` / `is_valid_download_payload`）及电影/剧集共用站点门槛、精确片名边界、年份校验与 `MediaInfo` 自动回填纯函数；统一剧集与电影关键词回退搜索流水线，同步补齐订阅治理 TV 分支在关键词回退下的同名异片与早期翻拍拦截，并全量对齐多端版本文档 | **最新稳定版** |
+| **`v2.5.81`** | **2026-11-25** | • **电影「往年老片死种」批量补缺推送 HTTP 500 与同名异片根治**：关键词回退强制拉取 MP 详情执行「精确 4 位年份 + 严格片名边界」双核验并回填完整 `MediaInfo`；`MoviePilotClient.submit_download` 前置拦空 `media_info` 并透出真实 `detail` 报错；修复实时重搜重试站点规则参数错位（`db, mp, cat_key`）并自愈历史脏缓存 | 历史里程碑 |
+| **`v2.5.80`** | **2026-11-25** | • **豆瓣通道体验升级**：支持手动输入影视剧名三通道并发实测，「强制重探状态」并发提速至 ~1.5s，升级 MP 多词探活避免单关键词缓存误判，输出大白话诊断清单与总结结论 | 历史里程碑 |
+| **`v2.5.79`** | **2026-11-24** | • **豆瓣多源核验一揽子治理**：引入续季跨年 `±1` 年容差与 `≥2` 年翻拍刚性拦截、候选分层预筛减噪至最低 1 次详情请求、CF 瞬态 1 次自动重试与 404 短路、Worker 并发 `/probe` 与本机 3 步诊断 | 历史里程碑 |
+| **`v2.5.78`** | **2026-11-24** | • **初检执行期页面左右抖动像素级根治**：修复奇数 `5px` 滚动条引发居中容器落在 `.5px` 半像素并在合成层升降级时左右跳动的问题（改为偶数 `6px` + `overflow-x: clip` 消除嵌套双滚动容器）；进度条升级为 `will-change: transform` 常驻 `translate3d` 平移，弹窗开启期间冻结背景重绘并按总位数补零锁定计数宽度，Chrome 全缩放比逐帧截图零像素偏移 | 历史里程碑 |
 | **`v2.5.77`** | **2026-11-24** | • **豆瓣备选通道升级全文检索双引擎，根治多季/新季漏搜与跨区 Cookie 静默空列表**：CF 反代新增 `/search` 全文检索（Rexxar 全文 + 经典 `j/search` + H5 搜索）且与 Cookie 直连双端接入；CF 公开查询优先干净匿名 `bid` 防国内登录态跨区静默空列表，并修正初检多季搜索过早短路 | 历史里程碑 |
 | **`v2.5.76`** | **2026-11-24** | • **豆瓣 CF 反代防 `302/403` 限流缓存治理 + 弹窗即时提示修复**：为 CF 反代加入 `1.1s` 平滑节流、10 分钟 TTL 缓存、`/suggest` 集数元数据兜底与 `302` 自动退避，初检备选搜索改为精简短路并取消无 Cookie 裸连 `403`；豆瓣配置弹窗结果区置顶，「强制重探状态」与「保存并测试连通性」补全加载态与明确连通结论 | 历史里程碑 |
 | **`v2.5.75`** | **2026-11-24** | • **初检执行期页面抖动（CLS）彻底治理**：移除实时看板与进度条 `transition-all` 布局动画，全面启用 `contain: layout style paint` 与中英混排固定行高/等宽数字槽位，进度条升级为 GPU 合成层 `transform: scaleX(...)` 零重排渲染，同步消除启动首包延迟与背景重绘抖动 | 历史里程碑 |
@@ -278,7 +282,7 @@ media-tools/
 ├── 剧集整理docker页面设计/    # UI 原型设计与前端视觉规范稿
 ├── 媒体整理需求/             # 历史基线需求与 MoviePilot 接口接入技术白皮书
 ├── README.md               # 仓库主说明文档
-└── VERSIONING.md           # 完整版本全量变更日志 (v1.0 ~ v2.5.78)
+└── VERSIONING.md           # 完整版本全量变更日志 (v1.0 ~ v2.5.82)
 ```
 
 ---

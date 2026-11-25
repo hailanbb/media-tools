@@ -1,5 +1,64 @@
 # MediaFlow 版本管理
 
+## v2.5.82（2026-11-25，已同步 GitHub）
+
+- **跨模块选种与媒体身份校验统一收口至「缺集待补」单一事实底座（消除剧集/电影双轨漂移与重复逻辑）**：
+  - **统一 MoviePilot 下载载荷前置契约（`app/clients/moviepilot.py`）**：抽离模块级纯函数 `has_valid_media_info`、`has_valid_torrent_info` 与 `is_valid_download_payload`，使 `MoviePilotClient.submit_download` 与订阅治理缓存校验 `_has_valid_download_payloads` 严格共用同一套非空识别守卫，彻底消除两处手写判断分叉。
+  - **电影与剧集选种、身份核验及别名回填收敛至 `download_service.py`**：
+    - 抽离共用纯函数 `extract_media_info_aliases`、`fetch_mp_media_context`、`ensure_candidate_media_info`、`extract_candidate_year`、`candidate_title_matches_aliases`、`_precheck_candidate_site_and_seeders`、`verify_candidate_media_identity` 与 `select_best_movie_candidate`（保留 `subscription_governance_service._select_best_movie_candidate` 兼容别名）。
+    - `_evaluate_raw_candidates`、`select_best_movie_candidate` 与 `execute_gap_fill_download` 全面共用站点白名单过滤、最低做种门槛、精确边界片名匹配、同片异年防护及提交前 `MediaInfo` 自动回填。
+  - **修复订阅治理 TV 分支关键词回退盲区（`subscription_governance_service.py`）**：
+    - 新增统一 `_search_subscription_resources_with_fallback`，让剧集与电影共用「TMDB 精确检索 → 拉取 MP 官方别名/年份 → 关键词回退重搜」流水线；
+    - 修复剧集分支关键词回退后仍硬编码 `keyword_fallback=False` 的隐患，剧集在关键词回退下现已同步强制执行「严格别名边界 + 非早期翻拍年份冲突（兼容跨年续季）」拦截及 `MediaInfo` 自动回填核验。
+  - **版本与多端文档全景校准**：全量同步 `README.md` 与 `VERSIONING.md`（补齐 `v2.5.79` 至 `v2.5.82` 里程碑，保持 `mediaflow`、`media-tools` 根目录及 `mediaflow-win` / `mediaflow-docker` 双版本完全一致）。
+
+## v2.5.81（2026-11-25，本地实现，已同步本地 media-tools）
+
+- **电影「往年老片死种」批量补缺推送全报 MoviePilot HTTP 500 与同名异片误命中彻底根治**：
+  - **拦截未识别同名异片与强制「精确年份 + 片名别名」双核验**（`subscription_governance_service.py`）：
+    - 修复 `_audit_single_subscription_item` 电影分支在 `/api/v1/search/media/tmdb:{tid}` 无结果后，回退至 `/api/v1/search/title`（MoviePilot 原生未识别接口，返回 `media_info={}`）时，`_select_best_movie_candidate` 因 `cand_tid` 为空直接跳过 TMDB ID 校验的严重漏洞（此前将《大闹天宫 (2021)》误配为 1961 版《大闹天宫》、将《害群之马 (1968)》误配为 1996 版 *Black Sheep*、将《逃亡者 (2023)》误配为 2026 版 *The Runner*）。
+    - 回退关键词搜索现在强制先拉取 `mp.get_media_info(tid, type_name="电影")` 获取官方片名/英文原名/别名及上映年份，要求候选必须通过**精确 4 位年份 + 严格片名边界匹配**，并强制回填完整 `MediaInfo`；未能取得有效 `media_info` 的候选一律标记为 `no_resource` 拦截推送。
+  - **MoviePilot 下载提交前置守卫与真实错误透出**（`app/clients/moviepilot.py`）：
+    - `submit_download` 提交前校验 `media_info` 与 `torrent_info` 非空关键字段，杜绝发送 `"media_in": {}` 触发 MoviePilot `/api/v1/download/` `500 Internal Server Error`。
+    - 新增 `_raise_for_status_with_detail`，提取 MoviePilot HTTP 4xx/5xx 响应体中的真实 `detail` / `message`，去除无意义的 `developer.mozilla.org` 样板尾巴。
+  - **修复实时重搜重试忽略站点规则的静默参数错位 Bug**：修正 `execute_batch_subscription_gap_fill` 中 `resolve_category_gap_fill_sites(db, cat_key, mp=mp)` 传参顺序错误（原写法触发 `TypeError` 并被静默吞掉，导致失败重搜无视用户配置的补缺站点、擅自跨站搜到「馒头」「彩虹岛」），统一改为 `resolve_category_gap_fill_sites(db, mp, cat_key)`。
+  - **历史脏缓存自愈**：`load_resource_audit_cache` 自动扫描并作废此前缓存中 `media_info={}` 的虚假可下载电影条目，消除刷新与推送之间的缓存错位。
+
+## v2.5.80（2026-11-25，本地实现，已同步本地 media-tools）
+
+- **豆瓣通道配置体验全面升级：自定义剧名实测、极速重探（~1.5s）、通俗化三通道体检与 MP 探活去误判**：
+  - **「仅测试当前输入」支持手动输入影视剧名称实测**：豆瓣弹窗底部常驻「测试剧名（可选）」输入框与一键示例标签（`泰坦S9` / `狂飙` / `三体`，支持回车直接测）；`POST /api/system/douban/test` 与 `douban_gateway.test_channels()` 支持并发对 MoviePilot、Cloudflare 反代、Cookie 直连三通道按指定剧名做真实搜剧，反代侧额外自动补查首条匹配剧集的总集数（如 `少年泰坦出击 第九季 (2025) · 52集`）。
+  - **「强制重探状态」提速 5–8 倍（从 10–15s 降至 ~1.5s）**：
+    - `GET /api/system/health` 新增 `scope=douban` 专项重探模式（跳过 CD2 与 TMDB 串行重复探测，全量健康检查亦改为 `asyncio.gather` 并发）；
+    - `douban_gateway.check_health(force=True)` 与 `test_channels()` 改为三通道全并发探测；
+    - CF 反代默认连通性探测由串行 `/probe`（4s+）改为单跳轻量 `/rexxar/tv/25853071`（~1s，异常时自动回退 `/probe`）。
+  - **修复 MoviePilot 豆瓣主通道单关键词误判离线**：实测发现 MP 对历史高频词「庆余年」命中空缓存（155ms 返回 `[]`）但对「三体」「狂飙」「繁花」及详情接口均正常可用；默认探活升级为多词探测（「三体」→「庆余年」→详情核验），不再因单关键词空返将整个 MP 主通道误报为“被 004 拦截”。
+  - **结果展示全面通俗化**：强制重探与草稿实测统一输出「正常 / 未配置 / 未命中」三通道清晰列表、命中剧名/集数示例、秒级耗时与底部一句大白话总结结论（消除“冷却剩余 XXs 自动回切”等晦涩术语）。
+
+## v2.5.79（2026-11-24，本地实现，已同步本地 media-tools）
+
+- **豆瓣多源元数据核验与备选链路一揽子彻底治理**：
+  - **跨年开播（±1 年）首播年份容差与翻拍安全拦截（`inspector.py`）**：
+    - 引入 `_years_compatible(db_year, ref_year, allow_adjacent=(sn >= 2))`：允许海外欧美剧、日漫等续季跨年开播/提前点映产生的 ±1 年首播年份差距（如 TMDB S09 首集于 `2024` 年底播出，豆瓣标 `2025` 年上映），彻底修复《少年泰坦出击 第九季》（`37283814`）此前虽被命中却因 `2024 != 2025` 被误判“未取得可匹配的季号、年份或连续集数资料”而拒绝采纳的核心硬伤。
+    - 保留对 ≥2 年大跨度年份差距（如 1994 与 2019 年同名翻拍剧）的刚性拦截，杜绝跨时代同名作品串台混淆。
+    - 精细化拒绝诊断原因：明确区分并展示“条目年份 (xxxx) 与目标季年份差距过大”、“候选为第 X 季，与当前待核验季不符”、“候选是电影，未采纳”等精准语义。
+  - **候选精准分层预筛（`_candidate_tier`）与降噪压减**：
+    - 在初检阶段对豆瓣候选列表执行分层打分（Tier 0: 系列名精确匹配且季号匹配；Tier 1: 精确系列名；Tier 2: 系列名前缀匹配；Tier 3: 其它），并在备选通道下仅优先抓取 Tier 0/1 候选；
+    - 自动剔除明写其它无关季号、大电影/剧场版或同季无关节目（如“花儿与少年 第九季”、“少年爱迪生 第九季”、“少年厨艺大师 第九季”、“少年泰坦出击大战少年泰坦”），将单剧豆瓣详情 HTTP 请求从过去数十次骤降至最精准的 **1 次**，彻底消除无谓的详情风控与超时。
+  - **解绑 `if mp_client:` 硬门禁**：
+    - 初检引擎全面升级为 `_can_query_douban(mp_client)`（支持 `mp_client` 在线或已配置备选反代/Cookie 通道），确保在 MoviePilot 处于冷却或未配置时，备选通道能完整接管所有深度核对、季资料比对与 TMDB 自愈校准。
+  - **CF 反代网关偶发抖动自动重试与 404 短路拦截（`douban_gateway.py`）**：
+    - 增加 `_cf_get_with_retry`，对 CF 跨境 Anycast 握手偶发超时、连接重置或 502/503/504/52x 瞬态抖动自动重试 1 次；
+    - 当 CF `/rexxar/tv/{id}` 返回 HTTP 404（确认非电视剧条目）时，立即短路返回空字典并记录明确原因，不再盲目穿透到本机 Cookie 通道引发无谓的 004 报错。
+  - **CF 反代 Worker 探活并行加速（`cloudflare-douban-proxy/src/index.js`）**：
+    - `/probe` 端点由原先串行逐个请求升级为 `Promise.all` 并发探活，针对 suggest/rexxar/frodo 分别设置精细超时（6s / 3.5s），将探活耗时由约 `4041ms` 大幅压缩至 `~1200ms`。
+  - **本机 Cookie 直连通道 3 步平滑探活与友好诊断**：
+    - `_probe_direct_cookie` 升级为 3 步探测（rexxar/tv → classic_search → subject_html），并在遭遇本机 IP 004/302 时给出“本机 IP 被豆瓣风控或 Cookie 过期（有 CF 反代在线时不影响使用）”的友好提示，消除歧义。
+  - **全链路测试覆盖**：
+    - Worker 单测 `worker.test.mjs` 8/8 通过；
+    - 后端网关与核验测试 `test_douban_gateway.py`（10/10）及回归测试 `test_v2551_review_closure.py`、`test_v2552_recommended.py`（40/40）全部通过；
+    - 真实浏览器 E2E 冒烟测试 `tests/e2e_browser_smoke.py` 100% 通过（零 JS 异常、零 5xx）。
+
 ## v2.5.78（2026-11-24，本地实现，已同步本地 media-tools）
 
 - **初检执行期页面左右抖动（半像素栅格取整、双滚动条与遮罩背光波动）像素级根治**：

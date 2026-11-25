@@ -22,7 +22,12 @@ from unittest.mock import Mock
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.clients.moviepilot import MoviePilotClient
+from app.clients.moviepilot import (
+    MoviePilotClient,
+    has_valid_media_info,
+    has_valid_torrent_info,
+    is_valid_download_payload,
+)
 from app.config import get_settings
 from app.core.episode_parser import is_video_file, parse_episode
 from app.core.identity_resolver import (
@@ -1741,7 +1746,163 @@ def select_best_candidates(
     return [(ev.cand, list(ev.covered_missing), False) for ev in plan_evals]
 
 
-# ── 候选评估分类（独立散集分支与独立整季验证分支） ────────────
+# ── 统一媒体识别、关键词别名提取与跨模块选种基线 ────────────────────
+
+_CANDIDATE_YEAR_RE = re.compile(r"(?:^|[\s.\-_\(\[（【])((?:19\d{2}|20[0-3]\d))(?=$|[\s.\-_)\]）】])")
+_TECH_TITLE_SPLIT_RE = re.compile(
+    r"(?:[\s.\-_(\[（【]+(?:S\d{1,2}(?:E\d{1,4})?\b|第\s*\d+\s*季|(?:19\d{2}|20[0-3]\d)\b|2160p|1080[pi]|720p|480p|4K|UHD|Blu[- ]?Ray|BDRip|REMUX|WEB[- ]?DL|WEBRip|HDR|DV|HEVC|[Hx]\.?26[45]))",
+    re.IGNORECASE,
+)
+
+
+def extract_media_info_aliases(mp_media: dict[str, Any] | None) -> tuple[list[str], str]:
+    """从 MoviePilot MediaInfo 中提取去重片名/别名列表与 4 位上映年份。"""
+    if not isinstance(mp_media, dict):
+        return [], ""
+    aliases: list[str] = []
+    for alias_key in ("title", "en_title", "original_title"):
+        av = str(mp_media.get(alias_key) or "").strip()
+        if av and av not in aliases:
+            aliases.append(av)
+    for av in mp_media.get("names") or []:
+        s_av = str(av or "").strip()
+        if s_av and s_av not in aliases:
+            aliases.append(s_av)
+    raw_yr = str(mp_media.get("year") or "").strip()
+    year = raw_yr if (raw_yr.isdigit() and len(raw_yr) == 4) else ""
+    return aliases, year
+
+
+async def fetch_mp_media_context(
+    mp: Any,
+    tid_num: int,
+    *,
+    type_name: str = "电视剧",
+) -> tuple[dict[str, Any], list[str], str]:
+    """安全拉取 MoviePilot 媒体详情及官方片名/别名/年份（兼容仅接受位置参数的 Mock）。"""
+    if tid_num <= 0 or mp is None or not callable(getattr(mp, "get_media_info", None)):
+        return {}, [], ""
+    res_mi: Any = {}
+    try:
+        res_mi = await mp.get_media_info(tid_num, type_name=type_name)
+    except TypeError:
+        try:
+            res_mi = await mp.get_media_info(tid_num)
+        except Exception:
+            res_mi = {}
+    except Exception:
+        res_mi = {}
+    if isinstance(res_mi, dict) and any(
+        str(res_mi.get(k) or "").strip()
+        for k in ("title", "en_title", "original_title", "tmdb_id", "media_id")
+    ):
+        aliases, year = extract_media_info_aliases(res_mi)
+        return res_mi, aliases, year
+    return {}, [], ""
+
+
+async def ensure_candidate_media_info(
+    mp: Any,
+    raw_media_info: Any,
+    *,
+    tmdb_id_num: int,
+    type_name: str = "电视剧",
+    cached_mp_media: dict[str, Any] | None = None,
+    prefer_complete: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """确保下载提交的 media_info 有效完整，必要时通过 MoviePilot 回填（杜绝 {} 引发 MP 500）。"""
+    m_info = dict(raw_media_info) if isinstance(raw_media_info, dict) else {}
+    mp_media = dict(cached_mp_media) if isinstance(cached_mp_media, dict) and cached_mp_media else {}
+
+    has_tid_and_title = bool(
+        str(m_info.get("tmdb_id") or "").strip() and str(m_info.get("title") or "").strip()
+    )
+    need_backfill = (not has_valid_media_info(m_info)) or (prefer_complete and not has_tid_and_title)
+    if need_backfill and tmdb_id_num > 0:
+        if not mp_media:
+            mp_media, _, _ = await fetch_mp_media_context(mp, tmdb_id_num, type_name=type_name)
+        if mp_media and has_valid_media_info(mp_media):
+            merged = dict(mp_media)
+            for k, v in m_info.items():
+                if v not in (None, "", [], {}):
+                    merged[k] = v
+            m_info = merged
+    return m_info, mp_media
+
+
+def extract_candidate_year(t: dict[str, Any], meta: dict[str, Any]) -> str:
+    """从候选种子元数据或标题中提取 4 位发行/上映年份。"""
+    m_yr = str(meta.get("year") or "").strip()
+    if m_yr.isdigit() and len(m_yr) == 4:
+        return m_yr
+    title = str(t.get("title") or "")
+    matches = _CANDIDATE_YEAR_RE.findall(title)
+    return str(matches[-1]) if matches else ""
+
+
+def candidate_title_matches_aliases(
+    t: dict[str, Any],
+    meta: dict[str, Any],
+    expected_titles: list[str],
+) -> bool:
+    """严格比对候选种子片名与目标作品片名/别名（精确边界命中，严防弱子串误撞同名异片）。"""
+    exp_tokens: set[str] = set()
+    for raw_title in expected_titles:
+        tok = normalize_title_token(raw_title)
+        if len(tok) >= 2:
+            exp_tokens.add(tok)
+            for art in ("the", "an", "a"):
+                if tok.startswith(art) and len(tok) > len(art) + 2:
+                    exp_tokens.add(tok[len(art):])
+    if not exp_tokens:
+        return False
+
+    raw_title = str(t.get("title") or "").strip()
+    prefix_title = _TECH_TITLE_SPLIT_RE.split(raw_title, maxsplit=1)[0].strip() if raw_title else ""
+    cand_sources = [
+        str(meta.get("cn_name") or "").strip(),
+        str(meta.get("en_name") or "").strip(),
+        str(meta.get("title") or "").strip(),
+        prefix_title,
+    ]
+    bilingual_parts: list[str] = []
+    if prefix_title:
+        bilingual_parts.extend(
+            re.findall(r"[\u4e00-\u9fff0-9·：:！!？?]+|[A-Za-z0-9][A-Za-z0-9\s'&:,\-!]+", prefix_title)
+        )
+
+    for src in cand_sources + bilingual_parts:
+        tok = normalize_title_token(src)
+        if not tok:
+            continue
+        if tok in exp_tokens:
+            return True
+        for art in ("the", "an", "a"):
+            if tok.startswith(art) and len(tok) > len(art) + 2 and tok[len(art):] in exp_tokens:
+                return True
+    return False
+
+
+def _precheck_candidate_site_and_seeders(
+    cand: dict[str, Any],
+    *,
+    allowed_site_ids: set[int] | None,
+    site_priority_map: dict[int, int] | None,
+    min_seeders: int,
+    low_seeder_reason: str = "做种不足",
+) -> tuple[bool, int | None, int, int, str]:
+    """共用站点白名单、站点优先级解析与最低做种数门槛检查。"""
+    sid = _candidate_site_id(cand)
+    seeds = _candidate_seeders(cand)
+    if allowed_site_ids is not None and (sid is None or sid not in allowed_site_ids):
+        return False, sid, 999999, seeds, f"站点未在允许列表中(site_id={sid})"
+    if seeds < min_seeders:
+        return False, sid, 999999, seeds, low_seeder_reason
+    site_pri = site_priority_map.get(sid, 999999) if (site_priority_map and sid is not None) else 999999
+    return True, sid, site_pri, seeds, ""
+
+
+# ── 候选评估分类（独立散集分支、独立整季分支与统一作品身份核验） ────
 
 def _candidate_matches_mapped_identity(
     cand: dict[str, Any],
@@ -1753,8 +1914,10 @@ def _candidate_matches_mapped_identity(
     allowed_titles: list[str] | None = None,
     rejected_titles: list[str] | None = None,
     keyword_fallback: bool = False,
+    expected_titles: list[str] | None = None,
+    expected_year: str = "",
 ) -> tuple[bool, str, int]:
-    """核验候选种子的作品归属与有效搜片季号，阻止跨条目误撞同名作品。"""
+    """核验剧集候选种子的作品归属与有效搜片季号，阻止跨条目或关键词回退误撞同名异片。"""
     t = cand.get("torrent_info") or {}
     m_info = cand.get("media_info") or {}
     meta = cand.get("meta_info") or {}
@@ -1766,15 +1929,31 @@ def _candidate_matches_mapped_identity(
     norm_title = normalize_title_token(title)
 
     if rejected_titles:
+        allow_override = allowed_titles or expected_titles or []
         for rej in rejected_titles:
             rtok = normalize_title_token(rej)
-            if rtok and len(rtok) >= 4 and rtok in norm_title and not any(normalize_title_token(a) in norm_title for a in (allowed_titles or []) if a):
+            if rtok and len(rtok) >= 4 and rtok in norm_title and not any(normalize_title_token(a) in norm_title for a in allow_override if a):
                 return False, "作品身份不符", search_season
 
     if not is_mapped:
         if search_tmdb_id:
             if keyword_fallback and cand_id != str(search_tmdb_id):
-                return False, "作品身份不符", search_season
+                # 关键词回退且 MP 未识别出 TMDB ID：仅当显式提供别名集合且通过严格片名边界+非冲突年代校验证明同作时放行
+                exp_yr = str(expected_year or "").strip()
+                cand_yr = extract_candidate_year(t, meta)
+                year_conflict = bool(
+                    exp_yr.isdigit() and len(exp_yr) == 4
+                    and cand_yr.isdigit() and len(cand_yr) == 4
+                    and (int(cand_yr) < int(exp_yr) - 1 or (search_season <= 1 and int(cand_yr) > int(exp_yr) + 2))
+                )
+                strict_alias_ok = bool(
+                    not cand_id
+                    and expected_titles
+                    and not year_conflict
+                    and candidate_title_matches_aliases(t, meta, expected_titles)
+                )
+                if not strict_alias_ok:
+                    return False, "作品身份不符", search_season
             if cand_id and cand_id != str(search_tmdb_id):
                 return False, "TMDB_ID不符", search_season
         if not single_ok or (meta_season is not None and meta_season != search_season):
@@ -1809,6 +1988,68 @@ def _candidate_matches_mapped_identity(
     return True, "", eff_season
 
 
+def verify_candidate_media_identity(
+    cand: dict[str, Any],
+    *,
+    media_type: str = "tv",
+    search_tmdb_id: int = 0,
+    search_season: int = 0,
+    source_tmdb_id: int = 0,
+    source_season: int = 0,
+    expected_year: str = "",
+    expected_titles: list[str] | None = None,
+    allowed_titles: list[str] | None = None,
+    rejected_titles: list[str] | None = None,
+    keyword_fallback: bool = False,
+) -> tuple[bool, str, int]:
+    """统一核验电影与电视剧候选种子的作品身份与防同名异片门禁（单一事实来源）。"""
+    mtype = (media_type or "tv").strip().lower()
+    if mtype == "movie":
+        t = cand.get("torrent_info") or {}
+        m_info = cand.get("media_info") or {}
+        meta = cand.get("meta_info") or {}
+        title = str(t.get("title") or "")
+        cand_id = str(m_info.get("tmdb_id") or "").strip()
+
+        if rejected_titles:
+            norm_title = normalize_title_token(title)
+            allow_override = expected_titles or allowed_titles or []
+            for rej in rejected_titles:
+                rtok = normalize_title_token(rej)
+                if rtok and len(rtok) >= 4 and rtok in norm_title and not any(normalize_title_token(a) in norm_title for a in allow_override if a):
+                    return False, "作品身份不符", 0
+
+        if cand_id:
+            if search_tmdb_id > 0 and cand_id != str(search_tmdb_id):
+                return False, "TMDB ID 不符", 0
+            return True, "", 0
+
+        if keyword_fallback or search_tmdb_id > 0:
+            exp_yr = str(expected_year or "").strip()
+            if not (exp_yr.isdigit() and len(exp_yr) == 4):
+                exp_yr = ""
+            cand_yr = extract_candidate_year(t, meta)
+            if not exp_yr or not cand_yr or cand_yr != exp_yr:
+                return False, f"电影年份不符({cand_yr or '未知'}≠{exp_yr or '未知'})", 0
+            titles_pool = expected_titles or allowed_titles or []
+            if not titles_pool or not candidate_title_matches_aliases(t, meta, titles_pool):
+                return False, "片名未匹配目标作品别名", 0
+        return True, "", 0
+
+    return _candidate_matches_mapped_identity(
+        cand,
+        search_tmdb_id=search_tmdb_id,
+        search_season=search_season,
+        source_tmdb_id=source_tmdb_id,
+        source_season=source_season,
+        allowed_titles=allowed_titles,
+        rejected_titles=rejected_titles,
+        keyword_fallback=keyword_fallback,
+        expected_titles=expected_titles,
+        expected_year=expected_year,
+    )
+
+
 def _evaluate_raw_candidates(
     raw_results: list[dict[str, Any]],
     *,
@@ -1829,6 +2070,8 @@ def _evaluate_raw_candidates(
     rejected_titles: list[str] | None = None,
     allowed_site_ids: set[int] | None = None,
     site_priority_map: dict[int, int] | None = None,
+    expected_titles: list[str] | None = None,
+    expected_year: str = "",
 ) -> tuple[list[CandidateEval], list[CandidateEval], list[str]]:
     """将原始检索结果分别按散集分支与整季包分支验证（不相互提前过滤）。"""
     missing_set = set(missing_eps)
@@ -1842,28 +2085,28 @@ def _evaluate_raw_candidates(
         t = c.get("torrent_info") or {}
         m_info = c.get("media_info") or {}
         meta = c.get("meta_info") or {}
-        if not t or not (m_info or allowed_titles):
+        if not t or not (m_info or allowed_titles or (keyword_fallback and expected_titles)):
             continue
 
-        site_id = _candidate_site_id(c)
-        if allowed_site_ids is not None:
-            if site_id is None or site_id not in allowed_site_ids:
-                reject_reasons.append(f"站点未在允许列表中(site_id={site_id})")
-                continue
-
-        site_pri = site_priority_map.get(site_id, 999999) if (site_priority_map and site_id is not None) else 999999
-
-        seeds = _candidate_seeders(c)
-        if seeds < min_seeders:
-            reject_reasons.append("做种不足")
-            continue
-
-        id_ok, id_reason, eff_season = _candidate_matches_mapped_identity(
+        pre_ok, site_id, site_pri, seeds, pre_reason = _precheck_candidate_site_and_seeders(
             c,
+            allowed_site_ids=allowed_site_ids,
+            site_priority_map=site_priority_map,
+            min_seeders=min_seeders,
+        )
+        if not pre_ok:
+            reject_reasons.append(pre_reason)
+            continue
+
+        id_ok, id_reason, eff_season = verify_candidate_media_identity(
+            c,
+            media_type="tv",
             search_tmdb_id=tmdb_id_num,
             search_season=season_num,
             source_tmdb_id=eff_source_tmdb,
             source_season=eff_source_season,
+            expected_year=expected_year,
+            expected_titles=expected_titles,
             allowed_titles=allowed_titles,
             rejected_titles=rejected_titles,
             keyword_fallback=keyword_fallback,
@@ -1939,6 +2182,91 @@ def _evaluate_raw_candidates(
             reject_reasons.append(f"整季包核验：{sp_note}")
 
     return standalone_evals, pack_evals, reject_reasons
+
+
+def select_best_movie_candidate(
+    raw_results: list[dict[str, Any]],
+    *,
+    tmdb_id_num: int,
+    min_seeders: int,
+    tier_ratio: float,
+    min_slack: int,
+    min_resolution: str,
+    require_chinese: bool,
+    allowed_site_ids: set[int] | None,
+    site_priority_map: dict[int, int] | None,
+    expected_year: str = "",
+    expected_titles: list[str] | None = None,
+    keyword_fallback: bool = False,
+) -> tuple[dict[str, Any] | None, int, list[str]]:
+    """共用补缺选种底座（电影分支）：站点白名单与做种门槛 -> 作品身份/年份别名防线 -> 显式过滤 -> 站点优先级 -> 同档省容量升序。"""
+    qualified: list[dict[str, Any]] = []
+    reject_reasons: list[str] = []
+    max_seeders_seen = 0
+
+    for c in raw_results:
+        t = c.get("torrent_info") or {}
+        meta = c.get("meta_info") or {}
+        if not t:
+            continue
+
+        pre_ok, _, pri, seeds, pre_reason = _precheck_candidate_site_and_seeders(
+            c,
+            allowed_site_ids=allowed_site_ids,
+            site_priority_map=site_priority_map,
+            min_seeders=min_seeders,
+            low_seeder_reason=f"做种不足(<{min_seeders})",
+        )
+        if seeds > max_seeders_seen:
+            max_seeders_seen = seeds
+        if not pre_ok:
+            reject_reasons.append(pre_reason)
+            continue
+
+        id_ok, id_reason, _ = verify_candidate_media_identity(
+            c,
+            media_type="movie",
+            search_tmdb_id=tmdb_id_num,
+            expected_year=expected_year,
+            expected_titles=expected_titles,
+            keyword_fallback=keyword_fallback,
+        )
+        if not id_ok:
+            reject_reasons.append(id_reason)
+            continue
+
+        if not _passes_explicit_filters(t, meta, min_resolution=min_resolution, require_chinese=require_chinese):
+            reject_reasons.append("未满足画质/中字过滤")
+            continue
+
+        qualified.append({
+            "cand": c,
+            "site_priority": pri,
+            "site_name": _candidate_site_name(c),
+            "seeders": seeds,
+            "size_bytes": _candidate_size_bytes(c),
+            "stable_key": _candidate_stable_key(c),
+        })
+
+    if not qualified:
+        return None, max_seeders_seen, list(dict.fromkeys(reject_reasons))[:4]
+
+    best_pri = min(x["site_priority"] for x in qualified)
+    pri_pool = [x for x in qualified if x["site_priority"] == best_pri]
+
+    h = max(x["seeders"] for x in pri_pool)
+    floor_s = _seeder_tier_floor(h, tier_ratio=tier_ratio, min_slack=min_slack)
+    tier_pool = [x for x in pri_pool if x["seeders"] >= floor_s]
+
+    tier_pool.sort(
+        key=lambda x: (
+            x["size_bytes"] is None,
+            x["size_bytes"] if x["size_bytes"] is not None else 0,
+            -x["seeders"],
+            x["stable_key"],
+        )
+    )
+    return tier_pool[0], max_seeders_seen, []
 
 
 def _collect_returned_sites(raw_results: list[dict[str, Any]], id_to_name: dict[int, str]) -> list[str]:
@@ -2496,13 +2824,11 @@ async def execute_gap_fill_download(
                 if not raw_results and (search_tmdb_id or is_mapped):
                     fallback_candidates: list[str] = []
                     if search_tmdb_id:
-                        try:
-                            media = await mp.get_media_info(search_tmdb_id)
-                            orig = (media or {}).get("original_title") or (media or {}).get("en_title")
-                            if orig:
-                                fallback_candidates.append(str(orig))
-                        except Exception:
-                            pass
+                        fb_media, _, _ = await fetch_mp_media_context(mp, search_tmdb_id, type_name="电视剧")
+                        for kw_field in ("original_title", "en_title"):
+                            kw_v = str(fb_media.get(kw_field) or "").strip()
+                            if kw_v and kw_v not in fallback_candidates:
+                                fallback_candidates.append(kw_v)
                     for kw in mapped_keywords:
                         if kw not in fallback_candidates:
                             fallback_candidates.append(kw)
@@ -3047,6 +3373,13 @@ async def execute_gap_fill_download(
                 msg = ""
                 reply: Any = None
                 try:
+                    if not has_valid_media_info(cand_m):
+                        cand_m, _ = await ensure_candidate_media_info(
+                            mp,
+                            cand_m,
+                            tmdb_id_num=search_tmdb_id or tmdb_id_num,
+                            type_name="电视剧",
+                        )
                     reply = await mp.submit_download(cand_m, cand_t)
                     is_ok = isinstance(reply, dict) and reply.get("success") is True
                     msg = sanitize_text_no_secrets(reply.get("message", "已提交") if isinstance(reply, dict) else "已提交")

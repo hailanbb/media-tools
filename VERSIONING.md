@@ -1,5 +1,17 @@
 # MediaFlow 版本管理
 
+## v2.5.82（2026-11-25，已同步 GitHub）
+
+- **跨模块选种与媒体身份校验统一收口至「缺集待补」单一事实底座（消除剧集/电影双轨漂移与重复逻辑）**：
+  - **统一 MoviePilot 下载载荷前置契约（`app/clients/moviepilot.py`）**：抽离模块级纯函数 `has_valid_media_info`、`has_valid_torrent_info` 与 `is_valid_download_payload`，使 `MoviePilotClient.submit_download` 与订阅治理缓存校验 `_has_valid_download_payloads` 严格共用同一套非空识别守卫，彻底消除两处手写判断分叉。
+  - **电影与剧集选种、身份核验及别名回填收敛至 `download_service.py`**：
+    - 抽离共用纯函数 `extract_media_info_aliases`、`fetch_mp_media_context`、`ensure_candidate_media_info`、`extract_candidate_year`、`candidate_title_matches_aliases`、`_precheck_candidate_site_and_seeders`、`verify_candidate_media_identity` 与 `select_best_movie_candidate`（保留 `subscription_governance_service._select_best_movie_candidate` 兼容别名）。
+    - `_evaluate_raw_candidates`、`select_best_movie_candidate` 与 `execute_gap_fill_download` 全面共用站点白名单过滤、最低做种门槛、精确边界片名匹配、同片异年防护及提交前 `MediaInfo` 自动回填。
+  - **修复订阅治理 TV 分支关键词回退盲区（`subscription_governance_service.py`）**：
+    - 新增统一 `_search_subscription_resources_with_fallback`，让剧集与电影共用「TMDB 精确检索 → 拉取 MP 官方别名/年份 → 关键词回退重搜」流水线；
+    - 修复剧集分支关键词回退后仍硬编码 `keyword_fallback=False` 的隐患，剧集在关键词回退下现已同步强制执行「严格别名边界 + 非早期翻拍年份冲突（兼容跨年续季）」拦截及 `MediaInfo` 自动回填核验。
+  - **版本与多端文档全景校准**：全量同步 `README.md` 与 `VERSIONING.md`（补齐 `v2.5.79` 至 `v2.5.82` 里程碑，保持 `mediaflow`、`media-tools` 根目录及 `mediaflow-win` / `mediaflow-docker` 双版本完全一致）。
+
 ## v2.5.81（2026-11-25，本地实现，已同步本地 media-tools）
 
 - **电影「往年老片死种」批量补缺推送全报 MoviePilot HTTP 500 与同名异片误命中彻底根治**：

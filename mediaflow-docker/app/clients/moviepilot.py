@@ -19,6 +19,29 @@ from app.config import get_settings
 log = logging.getLogger("mediaflow.moviepilot")
 
 
+def has_valid_media_info(media_info: Any) -> bool:
+    """校验候选载荷的 media_info 是否至少包含 title / tmdb_id / media_id 之一（防发送 {} 触发 MP 500）。"""
+    return isinstance(media_info, dict) and bool(
+        str(media_info.get("title") or "").strip()
+        or str(media_info.get("tmdb_id") or "").strip()
+        or str(media_info.get("media_id") or "").strip()
+    )
+
+
+def has_valid_torrent_info(torrent_info: Any) -> bool:
+    """校验候选载荷的 torrent_info 是否包含可下载链接或种子名称。"""
+    return isinstance(torrent_info, dict) and bool(
+        str(torrent_info.get("enclosure") or "").strip()
+        or str(torrent_info.get("page_url") or "").strip()
+        or str(torrent_info.get("title") or "").strip()
+    )
+
+
+def is_valid_download_payload(media_info: Any, torrent_info: Any) -> bool:
+    """判断单个下载载荷的 media_info 与 torrent_info 是否均满足 MoviePilot 提交要求。"""
+    return has_valid_media_info(media_info) and has_valid_torrent_info(torrent_info)
+
+
 def parse_season_str(s_str: Any) -> set[int]:
     """解析 MoviePilot 转移历史或元数据中的季度字符串（如 'S01', 'S01,S02', '1'）."""
     if not s_str:
@@ -652,17 +675,9 @@ class MoviePilotClient:
 
     # ── 下载 ──────────────────────────────────────────────
     async def submit_download(self, media_info: dict, torrent_info: dict) -> dict:
-        if not isinstance(media_info, dict) or not (
-            str(media_info.get("title") or "").strip()
-            or str(media_info.get("tmdb_id") or "").strip()
-            or str(media_info.get("media_id") or "").strip()
-        ):
+        if not has_valid_media_info(media_info):
             raise ValueError("候选资源缺少有效的影视元数据 (media_info 为空)，已拦截提交以防 MoviePilot 返回 500")
-        if not isinstance(torrent_info, dict) or not (
-            str(torrent_info.get("enclosure") or "").strip()
-            or str(torrent_info.get("page_url") or "").strip()
-            or str(torrent_info.get("title") or "").strip()
-        ):
+        if not has_valid_torrent_info(torrent_info):
             raise ValueError("候选资源缺少有效的种子信息 (torrent_info 为空)")
         body = {"media_in": media_info, "torrent_in": torrent_info, "downloader": None, "save_path": None}
         res = await self._post("/api/v1/download/", json=body)
