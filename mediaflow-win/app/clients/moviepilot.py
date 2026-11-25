@@ -73,19 +73,44 @@ class MoviePilotClient:
             headers["X-API-KEY"] = self.token
         return headers
 
+    @staticmethod
+    def _raise_for_status_with_detail(resp: httpx.Response) -> None:
+        if not resp.is_error:
+            return
+        detail = ""
+        try:
+            data = resp.json()
+            if isinstance(data, dict):
+                detail = str(data.get("detail") or data.get("message") or "").strip()
+        except Exception:
+            pass
+        if not detail:
+            try:
+                raw_txt = str(resp.text or "").strip()
+                if raw_txt and not raw_txt.lstrip().startswith("<"):
+                    detail = raw_txt[:220]
+            except Exception:
+                pass
+        req_path = resp.url.path if getattr(resp, "url", None) is not None else ""
+        if detail:
+            msg = f"MoviePilot HTTP {resp.status_code} ({req_path}): {detail}"
+        else:
+            msg = f"MoviePilot HTTP {resp.status_code} {resp.reason_phrase or ''} ({req_path})".strip()
+        raise httpx.HTTPStatusError(msg, request=resp.request, response=resp)
+
     async def _get(self, path: str, **params: Any) -> Any:
         clean = {k: v for k, v in params.items() if v is not None}
         resp = await self._client.get(
             f"{self.origin}{path}", params=clean, headers=self._headers()
         )
-        resp.raise_for_status()
+        self._raise_for_status_with_detail(resp)
         return resp.json()
 
     async def _post(self, path: str, json: dict | None = None) -> Any:
         resp = await self._client.post(
             f"{self.origin}{path}", json=json, headers=self._headers()
         )
-        resp.raise_for_status()
+        self._raise_for_status_with_detail(resp)
         return resp.json()
 
     async def _delete(self, path: str, **params: Any) -> Any:
@@ -93,7 +118,7 @@ class MoviePilotClient:
         resp = await self._client.delete(
             f"{self.origin}{path}", params=clean, headers=self._headers()
         )
-        resp.raise_for_status()
+        self._raise_for_status_with_detail(resp)
         return resp.json()
 
     # ── 媒体搜索 ─────────────────────────────────────────
@@ -627,6 +652,18 @@ class MoviePilotClient:
 
     # ── 下载 ──────────────────────────────────────────────
     async def submit_download(self, media_info: dict, torrent_info: dict) -> dict:
+        if not isinstance(media_info, dict) or not (
+            str(media_info.get("title") or "").strip()
+            or str(media_info.get("tmdb_id") or "").strip()
+            or str(media_info.get("media_id") or "").strip()
+        ):
+            raise ValueError("候选资源缺少有效的影视元数据 (media_info 为空)，已拦截提交以防 MoviePilot 返回 500")
+        if not isinstance(torrent_info, dict) or not (
+            str(torrent_info.get("enclosure") or "").strip()
+            or str(torrent_info.get("page_url") or "").strip()
+            or str(torrent_info.get("title") or "").strip()
+        ):
+            raise ValueError("候选资源缺少有效的种子信息 (torrent_info 为空)")
         body = {"media_in": media_info, "torrent_in": torrent_info, "downloader": None, "save_path": None}
         res = await self._post("/api/v1/download/", json=body)
         if isinstance(res, dict) and res.get("success") is False:

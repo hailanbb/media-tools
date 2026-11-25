@@ -1,5 +1,17 @@
 # MediaFlow 版本管理
 
+## v2.5.81（2026-11-25，本地实现，已同步本地 media-tools）
+
+- **电影「往年老片死种」批量补缺推送全报 MoviePilot HTTP 500 与同名异片误命中彻底根治**：
+  - **拦截未识别同名异片与强制「精确年份 + 片名别名」双核验**（`subscription_governance_service.py`）：
+    - 修复 `_audit_single_subscription_item` 电影分支在 `/api/v1/search/media/tmdb:{tid}` 无结果后，回退至 `/api/v1/search/title`（MoviePilot 原生未识别接口，返回 `media_info={}`）时，`_select_best_movie_candidate` 因 `cand_tid` 为空直接跳过 TMDB ID 校验的严重漏洞（此前将《大闹天宫 (2021)》误配为 1961 版《大闹天宫》、将《害群之马 (1968)》误配为 1996 版 *Black Sheep*、将《逃亡者 (2023)》误配为 2026 版 *The Runner*）。
+    - 回退关键词搜索现在强制先拉取 `mp.get_media_info(tid, type_name="电影")` 获取官方片名/英文原名/别名及上映年份，要求候选必须通过**精确 4 位年份 + 严格片名边界匹配**，并强制回填完整 `MediaInfo`；未能取得有效 `media_info` 的候选一律标记为 `no_resource` 拦截推送。
+  - **MoviePilot 下载提交前置守卫与真实错误透出**（`app/clients/moviepilot.py`）：
+    - `submit_download` 提交前校验 `media_info` 与 `torrent_info` 非空关键字段，杜绝发送 `"media_in": {}` 触发 MoviePilot `/api/v1/download/` `500 Internal Server Error`。
+    - 新增 `_raise_for_status_with_detail`，提取 MoviePilot HTTP 4xx/5xx 响应体中的真实 `detail` / `message`，去除无意义的 `developer.mozilla.org` 样板尾巴。
+  - **修复实时重搜重试忽略站点规则的静默参数错位 Bug**：修正 `execute_batch_subscription_gap_fill` 中 `resolve_category_gap_fill_sites(db, cat_key, mp=mp)` 传参顺序错误（原写法触发 `TypeError` 并被静默吞掉，导致失败重搜无视用户配置的补缺站点、擅自跨站搜到「馒头」「彩虹岛」），统一改为 `resolve_category_gap_fill_sites(db, mp, cat_key)`。
+  - **历史脏缓存自愈**：`load_resource_audit_cache` 自动扫描并作废此前缓存中 `media_info={}` 的虚假可下载电影条目，消除刷新与推送之间的缓存错位。
+
 ## v2.5.80（2026-11-25，本地实现，已同步本地 media-tools）
 
 - **豆瓣通道配置体验全面升级：自定义剧名实测、极速重探（~1.5s）、通俗化三通道体检与 MP 探活去误判**：

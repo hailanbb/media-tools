@@ -4,7 +4,7 @@
 
 **专为 115网盘 · CloudDrive2 · MoviePilot · Emby / Jellyfin 打造的下一代智能化媒体治理与生命周期工作流引擎**
 
-[![Release](https://img.shields.io/badge/Release-v2.5.80-6366f1?style=for-the-badge&logo=github)](VERSIONING.md)
+[![Release](https://img.shields.io/badge/Release-v2.5.81-6366f1?style=for-the-badge&logo=github)](VERSIONING.md)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776ab?style=for-the-badge&logo=python)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20Native%20%7C%20Docker-0078d4?style=for-the-badge&logo=windows)](#-快速启动与部署)
 [![MoviePilot](https://img.shields.io/badge/MoviePilot-v2.x%20Ready-ff5722?style=for-the-badge&logo=fastapi)](https://github.com/jxxghp/MoviePilot)
@@ -20,7 +20,7 @@
   <a href="#-配置指南-env">配置指南</a> •
   <a href="#-零数据丢失安全防线">安全防线</a> •
   <a href="#-技术方案与规范索引">文档索引</a> •
-  <a href="#-版本演进与重要里程碑">版本演进 (v2.5.80)</a>
+  <a href="#-版本演进与重要里程碑">版本演进 (v2.5.81)</a>
 </p>
 
 </div>

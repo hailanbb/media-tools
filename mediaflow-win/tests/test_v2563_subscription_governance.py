@@ -1426,6 +1426,161 @@ class TestV2563SubscriptionGovernance(unittest.IsolatedAsyncioTestCase):
         finally:
             sgs._audit_jobs.pop(fake_audit_id, None)
 
+    async def test_20_movie_gap_fill_blocks_homonym_empty_media_info_and_500_guard(self):
+        import asyncio
+        import json
+        import httpx
+        from unittest.mock import AsyncMock, patch
+        from app.clients.moviepilot import MoviePilotClient
+        from app.database import async_session
+        from app.models.metadata_cache import MetadataCache
+        from app.services import subscription_governance_service as sgs
+
+        # 1. 验证 MoviePilotClient.submit_download 前置拦截空 media_info（避免发送 {} 触发 MP 500）及真实 HTTP 500 detail 透出
+        mp_real = MoviePilotClient()
+        try:
+            with self.assertRaises(ValueError) as cm:
+                await mp_real.submit_download({}, {"enclosure": "https://hdsky.me/dl?id=1"})
+            self.assertIn("media_info 为空", str(cm.exception))
+
+            req = httpx.Request("POST", "https://mp.test/api/v1/download/")
+            resp_500 = httpx.Response(500, json={"detail": "downloader path missing"}, request=req)
+            with self.assertRaises(httpx.HTTPStatusError) as cm_http:
+                MoviePilotClient._raise_for_status_with_detail(resp_500)
+            self.assertIn("downloader path missing", str(cm_http.exception))
+            self.assertNotIn("developer.mozilla.org", str(cm_http.exception))
+        finally:
+            await mp_real.close()
+
+        # 2. 验证电影关键词回退时严格拦截同名异年错片（大闹天宫 2021 != 1961，逃亡者 2023 != The Runner 2026，害群之马 1968 != 1996）
+        wrong_cands = [
+            {
+                "media_info": {},
+                "meta_info": {"en_name": "The Monkey King", "year": "1961"},
+                "torrent_info": {"title": "The Monkey King 1961 WEB-DL 4K", "site": 15, "site_name": "天空", "seeders": 32, "size": 6 * 1024**3},
+            },
+            {
+                "media_info": {},
+                "meta_info": {"en_name": "The Runner", "year": "2026"},
+                "torrent_info": {"title": "The Runner 2026 2160p WEB-DL", "site": 15, "site_name": "天空", "seeders": 21, "size": 9 * 1024**3},
+            },
+        ]
+        best_wrong, _, rej_wrong = _select_best_movie_candidate(
+            wrong_cands,
+            tmdb_id_num=1063260,
+            min_seeders=2,
+            tier_ratio=0.10,
+            min_slack=1,
+            min_resolution="",
+            require_chinese=False,
+            allowed_site_ids={15},
+            site_priority_map={15: 0},
+            expected_year="2021",
+            expected_titles=["大闹天宫", "The Macaque Monkey"],
+            keyword_fallback=True,
+        )
+        self.assertIsNone(best_wrong)
+        self.assertTrue(any("电影年份不符" in r for r in rej_wrong))
+
+        # 3. 若关键词回退命中「同年份 + 同片名/别名」真种，自动通过 get_media_info 补齐 58 键 media_info 后放行
+        sub_real = {
+            "id": 9901, "name": "真命老片", "year": "2021", "type": "电影", "tmdbid": 555001,
+            "state": "R", "username": "admin", "poster": "http://ok",
+        }
+        async def _fake_movie_search(tmdb_id=None, title=None, media_type="movie", **kwargs):
+            if tmdb_id:
+                return []
+            return [
+                {
+                    "media_info": {},
+                    "meta_info": {"en_name": "Wrong Old", "year": "1961"},
+                    "torrent_info": {"title": "Wrong Old 1961 1080p", "enclosure": "https://pt/wrong", "site": 15, "site_name": "天空", "seeders": 50, "size": 5 * 1024**3},
+                },
+                {
+                    "media_info": {},
+                    "meta_info": {"en_name": "True Movie Alias", "year": "2021"},
+                    "torrent_info": {"title": "True Movie Alias 2021 1080p BluRay", "enclosure": "https://pt/true", "site": 15, "site_name": "天空", "seeders": 12, "size": 8 * 1024**3},
+                },
+            ]
+
+        mp_stub = AsyncMock()
+        mp_stub.search_resources = AsyncMock(side_effect=_fake_movie_search)
+        mp_stub.get_media_info = AsyncMock(return_value={
+            "tmdb_id": 555001, "title": "真命老片", "en_title": "True Movie Alias",
+            "original_title": "True Movie Alias", "year": "2021", "type": "电影",
+        })
+        tmdb_stub = AsyncMock()
+        audited = await sgs._audit_single_subscription_item(
+            sub_real,
+            mp=mp_stub,
+            tmdb=tmdb_stub,
+            category_plans={"non_anime": {"ready": True, "sites_param": "15", "active_ordered_ids": [15], "site_priority_map": {15: 0}}},
+            active_downloads=[],
+            sem=asyncio.Semaphore(1),
+            is_aborted_fn=lambda: False,
+            min_seeders=2, tier_ratio=0.10, min_slack=1, min_resolution="", require_chinese=False,
+        )
+        self.assertEqual(audited["audit_status"], "downloadable")
+        self.assertEqual(audited["selected_torrents"][0]["title"], "True Movie Alias 2021 1080p BluRay")
+        self.assertEqual(audited["_selected_payloads"][0]["media_info"]["tmdb_id"], 555001)
+        self.assertEqual(audited["_selected_payloads"][0]["media_info"]["title"], "真命老片")
+
+        # 4. 验证 load_resource_audit_cache 自动自愈历史空 media_info 的脏缓存 + resolve_category_gap_fill_sites 重试参数顺序正确
+        async with async_session() as db:
+            dirty_cache = {
+                "id:6725": {
+                    "id": 6725, "name": "大闹天宫", "media_type": "movie", "tmdb_id": 1063260,
+                    "audit_status": "downloadable", "checked_at": "2026-11-25 16:45:57",
+                    "selected_torrents": [{"title": "The Monkey King 1961", "site_name": "天空", "seeders": 32}],
+                    "_selected_payloads": [{"media_info": {}, "torrent_info": {"title": "The Monkey King 1961", "enclosure": "https://hdsky.me/dl"}}],
+                }
+            }
+            db.add(MetadataCache(
+                cache_key=sgs.UNIFIED_RESOURCE_CACHE_KEY,
+                source="sub_resource_audit", media_id="global", season_number=0,
+                payload_json=json.dumps(dirty_cache, ensure_ascii=False), verified=True, status="ok",
+            ))
+            await db.commit()
+            sgs._memory_resource_cache = None
+
+            healed = await sgs.load_resource_audit_cache(db)
+            self.assertEqual(healed["id:6725"]["audit_status"], "no_resource")
+            self.assertEqual(healed["id:6725"]["_selected_payloads"], [])
+            res_blocked = await sgs.execute_batch_subscription_gap_fill(db, audit_id="unified", sub_ids=[6725])
+            self.assertFalse(res_blocked["ok"])
+            self.assertIn("同名异片", res_blocked["message"])
+
+        # 5. 验证实时重搜回退调用 resolve_category_gap_fill_sites(db, mp, cat_key) 不再抛出 TypeError
+        fake_tv_audit = "audit-test-retry-args"
+        sgs._audit_jobs[fake_tv_audit] = {
+            "items": [{
+                "id": 9401, "name": "测试站点参数顺序", "media_type": "tv", "tmdb_id": 123456, "season": 1,
+                "audit_status": "downloadable",
+                "_selected_payloads": [{"media_info": {"title": "测试站点参数顺序"}, "torrent_info": {"site_name": "天空", "title": "T1", "enclosure": "https://pt/1"}}],
+            }]
+        }
+        captured_site_calls = []
+        async def _fake_resolve_sites(db_arg, mp_arg, cat_arg, instance_key=None):
+            captured_site_calls.append((mp_arg, cat_arg))
+            return {"ready": True, "sites_param": "15", "active_ordered_ids": [15], "site_priority_map": {15: 0}}
+        mp_retry = AsyncMock()
+        mp_retry.get_active_downloads = AsyncMock(return_value=[])
+        mp_retry.submit_download = AsyncMock(return_value={"success": False, "message": "expired"})
+        mp_retry.close = AsyncMock()
+        try:
+            with (
+                patch("app.services.subscription_governance_service.MoviePilotClient", return_value=mp_retry),
+                patch("app.services.subscription_governance_service.TMDBClient", return_value=AsyncMock(close=AsyncMock())),
+                patch("app.services.subscription_governance_service.resolve_category_gap_fill_sites", side_effect=_fake_resolve_sites),
+                patch("app.services.subscription_governance_service._audit_single_subscription_item", new=AsyncMock(return_value={"id": 9401, "audit_status": "no_resource", "reason": "none"})),
+            ):
+                async with async_session() as db:
+                    await sgs.execute_batch_subscription_gap_fill(db, audit_id=fake_tv_audit, sub_ids=[9401])
+            self.assertEqual([cat for _, cat in captured_site_calls], ["non_anime", "anime"])
+            self.assertTrue(all(mp_arg is mp_retry for mp_arg, _ in captured_site_calls))
+        finally:
+            sgs._audit_jobs.pop(fake_tv_audit, None)
+
 
 if __name__ == "__main__":
     unittest.main()

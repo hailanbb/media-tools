@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.clients.moviepilot import MoviePilotClient
 from app.clients.tmdb import TMDBClient
 from app.config import get_settings
+from app.core.identity_resolver import normalize_title_token
 from app.core.subscription_cleaner import diagnose_subscription, evaluate_subscriptions
 from app.models.metadata_cache import MetadataCache
 from app.models.operation import OperationLog
@@ -177,6 +178,49 @@ def _resource_cache_keys_for_sub(
     return keys
 
 
+def _has_valid_download_payloads(entry: dict[str, Any] | None) -> bool:
+    """校验可下载缓存条目是否携带非空 media_info 与 torrent_info（防止空 media_in 触发 MP 500）。"""
+    if not isinstance(entry, dict):
+        return False
+    payloads = entry.get("_selected_payloads")
+    if not isinstance(payloads, list) or not payloads:
+        return False
+    for p in payloads:
+        if not isinstance(p, dict):
+            return False
+        m = p.get("media_info")
+        t = p.get("torrent_info")
+        if not isinstance(m, dict) or not (
+            str(m.get("title") or "").strip()
+            or str(m.get("tmdb_id") or "").strip()
+            or str(m.get("media_id") or "").strip()
+        ):
+            return False
+        if not isinstance(t, dict) or not (
+            str(t.get("enclosure") or "").strip()
+            or str(t.get("page_url") or "").strip()
+            or str(t.get("title") or "").strip()
+        ):
+            return False
+    return True
+
+
+def _sanitize_poisoned_resource_cache(cache_data: dict[str, Any]) -> bool:
+    """自愈清理历史缺少 media_info 的脏 downloadable 缓存，避免 UI 误显示异片资源及触发 500。"""
+    changed = False
+    for k, v in list(cache_data.items()):
+        if isinstance(v, dict) and v.get("audit_status") == "downloadable" and not _has_valid_download_payloads(v):
+            clean_v = dict(v)
+            clean_v["audit_status"] = "no_resource"
+            clean_v["selected_torrents"] = []
+            clean_v["_selected_payloads"] = []
+            clean_v["plan_summary"] = ""
+            clean_v["reason"] = "旧缓存缺少有效的 TMDB/媒体识别信息（防止误下同名异片），请重新查询核验"
+            cache_data[k] = clean_v
+            changed = True
+    return changed
+
+
 async def load_resource_audit_cache(db: AsyncSession) -> dict[str, dict[str, Any]]:
     """从 SQLite metadata_cache 加载已搜寻过的站点补缺资源缓存。"""
     global _memory_resource_cache
@@ -191,6 +235,12 @@ async def load_resource_audit_cache(db: AsyncSession) -> dict[str, dict[str, Any
         if row and row.payload_json:
             parsed = json.loads(row.payload_json)
             if isinstance(parsed, dict):
+                if _sanitize_poisoned_resource_cache(parsed):
+                    try:
+                        row.payload_json = json.dumps(parsed, ensure_ascii=False)
+                        await db.commit()
+                    except Exception:
+                        await db.rollback()
                 _memory_resource_cache = parsed
                 return _memory_resource_cache
     except Exception as exc:
@@ -677,6 +727,65 @@ def _is_anime_subscription(sub: dict[str, Any]) -> bool:
     return False
 
 
+_MOVIE_YEAR_RE = re.compile(r"(?:^|[\s.\-_\(\[（【])((?:19\d{2}|20[0-3]\d))(?=$|[\s.\-_)\]）】])")
+_MOVIE_TECH_SPLIT_RE = re.compile(
+    r"(?:[\s.\-_(\[]*(?:(?:19\d{2}|20[0-3]\d)\b|2160p|1080[pi]|720p|480p|4K|UHD|Blu[- ]?Ray|BDRip|REMUX|WEB[- ]?DL|WEBRip|HDR|DV|HEVC|[Hx]\.?26[45]))",
+    re.IGNORECASE,
+)
+
+
+def _extract_candidate_movie_year(t: dict[str, Any], meta: dict[str, Any]) -> str:
+    """从候选种子元数据或标题中提取 4 位上映年份。"""
+    m_yr = str(meta.get("year") or "").strip()
+    if m_yr.isdigit() and len(m_yr) == 4:
+        return m_yr
+    title = str(t.get("title") or "")
+    matches = _MOVIE_YEAR_RE.findall(title)
+    return str(matches[-1]) if matches else ""
+
+
+def _movie_title_matches(
+    t: dict[str, Any],
+    meta: dict[str, Any],
+    expected_titles: list[str],
+) -> bool:
+    """严格比对候选电影标题与目标作品片名/别名（仅在精确边界命中时放行，严防弱子串误撞）。"""
+    exp_tokens: set[str] = set()
+    for raw_title in expected_titles:
+        tok = normalize_title_token(raw_title)
+        if len(tok) >= 2:
+            exp_tokens.add(tok)
+            for art in ("the", "an", "a"):
+                if tok.startswith(art) and len(tok) > len(art) + 2:
+                    exp_tokens.add(tok[len(art):])
+    if not exp_tokens:
+        return False
+
+    raw_title = str(t.get("title") or "").strip()
+    prefix_title = _MOVIE_TECH_SPLIT_RE.split(raw_title, maxsplit=1)[0].strip() if raw_title else ""
+    cand_sources = [
+        str(meta.get("cn_name") or "").strip(),
+        str(meta.get("en_name") or "").strip(),
+        str(meta.get("title") or "").strip(),
+        prefix_title,
+    ]
+    # 兼容双语拼接片名（如「隐入尘烟 Return to Dust」拆分中文段与英文段）
+    bilingual_parts: list[str] = []
+    if prefix_title:
+        bilingual_parts.extend(re.findall(r"[\u4e00-\u9fff0-9·：:！!？?]+|[A-Za-z0-9][A-Za-z0-9\s'&:,\-!]+", prefix_title))
+
+    for src in cand_sources + bilingual_parts:
+        tok = normalize_title_token(src)
+        if not tok:
+            continue
+        if tok in exp_tokens:
+            return True
+        for art in ("the", "an", "a"):
+            if tok.startswith(art) and len(tok) > len(art) + 2 and tok[len(art):] in exp_tokens:
+                return True
+    return False
+
+
 def _select_best_movie_candidate(
     raw_results: list[dict[str, Any]],
     *,
@@ -688,11 +797,17 @@ def _select_best_movie_candidate(
     require_chinese: bool,
     allowed_site_ids: set[int] | None,
     site_priority_map: dict[int, int] | None,
+    expected_year: str = "",
+    expected_titles: list[str] | None = None,
+    keyword_fallback: bool = False,
 ) -> tuple[dict[str, Any] | None, int, list[str]]:
-    """按补缺同款规则为电影筛选最佳候选资源：硬条件门禁 -> 站点优先级 -> 做种同档 -> 省容量升序。"""
+    """按补缺同款规则为电影筛选最佳候选资源：硬条件与身份核验门禁 -> 站点优先级 -> 做种同档 -> 省容量升序。"""
     qualified: list[dict[str, Any]] = []
     reject_reasons: list[str] = []
     max_seeders_seen = 0
+    exp_yr = str(expected_year or "").strip()
+    if not (exp_yr.isdigit() and len(exp_yr) == 4):
+        exp_yr = ""
 
     for c in raw_results:
         t = c.get("torrent_info") or {}
@@ -715,9 +830,21 @@ def _select_best_movie_candidate(
             continue
 
         cand_tid = str(m.get("tmdb_id") or "").strip()
-        if tmdb_id_num > 0 and cand_tid and cand_tid != str(tmdb_id_num):
-            reject_reasons.append("TMDB ID 不符")
-            continue
+        if cand_tid:
+            if tmdb_id_num > 0 and cand_tid != str(tmdb_id_num):
+                reject_reasons.append("TMDB ID 不符")
+                continue
+        elif keyword_fallback or tmdb_id_num > 0:
+            # 关键词回退或 MP 未识别出 TMDB ID 时，必须同时通过「精确年份 + 片名/别名」双重核验，严防误下同名异片
+            cand_yr = _extract_candidate_movie_year(t, meta)
+            if not exp_yr or not cand_yr or cand_yr != exp_yr:
+                reject_reasons.append(
+                    f"电影年份不符({cand_yr or '未知'}≠{exp_yr or '未知'})"
+                )
+                continue
+            if not expected_titles or not _movie_title_matches(t, meta, expected_titles):
+                reject_reasons.append("片名未匹配目标作品别名")
+                continue
 
         if not _passes_explicit_filters(t, meta, min_resolution=min_resolution, require_chinese=require_chinese):
             reject_reasons.append("未满足画质/中字过滤")
@@ -925,10 +1052,63 @@ async def _audit_single_subscription_item(
                 raw = await mp.search_resources(
                     tmdb_id=tid_num, title=name, media_type="movie", **search_kwargs
                 )
+                mp_media: dict[str, Any] = {}
+                keyword_fallback = False
+                eff_year = str(year or "").strip()
+                expected_titles: list[str] = [name] if name else []
+
+                async def _ensure_mp_movie_media() -> dict[str, Any]:
+                    nonlocal mp_media, eff_year
+                    if mp_media:
+                        return mp_media
+                    if callable(getattr(mp, "get_media_info", None)):
+                        try:
+                            res_mi = await mp.get_media_info(tid_num, type_name="电影")
+                        except TypeError:
+                            try:
+                                res_mi = await mp.get_media_info(tid_num)
+                            except Exception:
+                                res_mi = {}
+                        except Exception:
+                            res_mi = {}
+                        if isinstance(res_mi, dict) and (res_mi.get("title") or res_mi.get("tmdb_id")):
+                            mp_media = res_mi
+                            if not (eff_year.isdigit() and len(eff_year) == 4):
+                                myr = str(mp_media.get("year") or "").strip()
+                                if myr.isdigit() and len(myr) == 4:
+                                    eff_year = myr
+                            for alias_key in ("title", "en_title", "original_title"):
+                                av = str(mp_media.get(alias_key) or "").strip()
+                                if av and av not in expected_titles:
+                                    expected_titles.append(av)
+                            for av in mp_media.get("names") or []:
+                                s_av = str(av or "").strip()
+                                if s_av and s_av not in expected_titles:
+                                    expected_titles.append(s_av)
+                    return mp_media
+
                 if not raw and name:
-                    raw = await mp.search_resources(
-                        title=name, media_type="movie", **search_kwargs
+                    keyword_fallback = True
+                    await _ensure_mp_movie_media()
+                    kw_queries = list(
+                        dict.fromkeys(
+                            q
+                            for q in (
+                                name,
+                                str(mp_media.get("original_title") or "").strip(),
+                                str(mp_media.get("en_title") or "").strip(),
+                            )
+                            if q
+                        )
                     )
+                    raw_accum: list[dict[str, Any]] = []
+                    for q_kw in kw_queries[:2]:
+                        sub_raw = await mp.search_resources(
+                            title=q_kw, media_type="movie", **search_kwargs
+                        )
+                        if isinstance(sub_raw, list) and sub_raw:
+                            raw_accum.extend(sub_raw)
+                    raw = raw_accum
                 base_item["candidate_count"] = len(raw)
 
                 best, max_s, rej = _select_best_movie_candidate(
@@ -941,6 +1121,9 @@ async def _audit_single_subscription_item(
                     require_chinese=require_chinese,
                     allowed_site_ids=allowed_site_ids,
                     site_priority_map=site_priority_map,
+                    expected_year=eff_year,
+                    expected_titles=expected_titles,
+                    keyword_fallback=keyword_fallback,
                 )
                 base_item["max_seeders_seen"] = max_s
 
@@ -957,6 +1140,21 @@ async def _audit_single_subscription_item(
                 cand = best["cand"]
                 t_info = cand.get("torrent_info") or {}
                 m_info = cand.get("media_info") or {}
+                if not isinstance(m_info, dict) or not (
+                    str(m_info.get("tmdb_id") or "").strip()
+                    and str(m_info.get("title") or "").strip()
+                ):
+                    await _ensure_mp_movie_media()
+                    if mp_media:
+                        m_info = dict(mp_media)
+                if not isinstance(m_info, dict) or not (
+                    str(m_info.get("title") or "").strip()
+                    or str(m_info.get("tmdb_id") or "").strip()
+                ):
+                    base_item["audit_status"] = "no_resource"
+                    base_item["reason"] = "命中候选种子，但未能获取有效的 MoviePilot 媒体识别信息 (media_info 为空)"
+                    return base_item
+
                 base_item["audit_status"] = "downloadable"
                 base_item["selected_torrents"] = [{
                     "title": str(t_info.get("title") or name),
@@ -1432,8 +1630,11 @@ async def _run_unified_query_worker(
                 "already_queued",
                 "skipped",
             ):
-                # downloadable 含站点下载直链（部分 PT 站带短时效签名），超 TTL 强制重新搜种刷新
-                if cached_hit.get("audit_status") != "downloadable" or _is_downloadable_cache_fresh(cached_hit):
+                # downloadable 含站点下载直链（部分 PT 站带短时效签名），超 TTL 或缺少有效 media_info 时强制重新搜种刷新
+                if cached_hit.get("audit_status") == "downloadable":
+                    if _is_downloadable_cache_fresh(cached_hit) and _has_valid_download_payloads(cached_hit):
+                        return cached_hit, False
+                elif not str(cached_hit.get("reason") or "").startswith("旧缓存缺少"):
                     return cached_hit, False
 
             res_item = await _audit_single_subscription_item(
@@ -1816,6 +2017,7 @@ async def execute_batch_subscription_gap_fill(
         ]
     else:
         # 从统一查询缓存中按 sub_id 查找（结合快照中的 tmdb_id/season 辅助查找）
+        poisoned_blocked = False
         for sid in target_set:
             s_meta = snap_map.get(sid) or {}
             hit = _lookup_item_in_resource_cache(
@@ -1825,6 +2027,9 @@ async def execute_batch_subscription_gap_fill(
                 tmdb_id=s_meta.get("tmdb_id"),
                 season=s_meta.get("season"),
             )
+            if hit and str(hit.get("reason") or "").startswith("旧缓存缺少"):
+                poisoned_blocked = True
+                continue
             if (
                 hit
                 and hit.get("audit_status") == "downloadable"
@@ -1833,6 +2038,13 @@ async def execute_batch_subscription_gap_fill(
                 targets.append(hit)
 
     if not targets:
+        if audit_id and audit_id != "unified":
+            poisoned_blocked = False
+        if poisoned_blocked:
+            return {
+                "ok": False,
+                "message": "所选条目旧版缓存命中了同名异片或缺少有效媒体识别信息（已自动拦截以防误下及 MP 500），请先点击「查询最新订阅数据」重新核验",
+            }
         return {"ok": False, "message": "所选条目中没有已搜到合格种子的可下载方案，请先执行「查询最新订阅数据」"}
 
     total_targets = len(targets)
@@ -1966,7 +2178,7 @@ async def execute_batch_subscription_gap_fill(
                         for cat_key in ("non_anime", "anime"):
                             try:
                                 fallback_category_plans[cat_key] = await resolve_category_gap_fill_sites(
-                                    db, cat_key, mp=mp
+                                    db, mp, cat_key
                                 )
                             except Exception:
                                 fallback_category_plans[cat_key] = {"ready": False}
@@ -1978,6 +2190,10 @@ async def execute_batch_subscription_gap_fill(
                     retry_sub.setdefault("id", item["id"])
                     retry_sub.setdefault("name", item_name)
                     retry_sub.setdefault("year", item.get("year") or "")
+                    if s_snap.get("cd2_paths") and "cd2_paths" not in retry_sub:
+                        retry_sub["cd2_paths"] = list(s_snap["cd2_paths"])
+                    if s_snap.get("tmdb_genre_ids") and "tmdb_genre_ids" not in retry_sub:
+                        retry_sub["tmdb_genre_ids"] = list(s_snap["tmdb_genre_ids"])
                     retry_sub["type"] = "电影" if item_is_movie else "电视剧"
                     retry_sub["media_type"] = "movie" if item_is_movie else "tv"
                     retry_sub["tmdbid"] = int(item_tid)
