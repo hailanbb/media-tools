@@ -1,5 +1,20 @@
 # MediaFlow 版本管理
 
+## v2.5.83（2026-11-27，已同步 GitHub）
+
+- **多目录全季智能合并、纯空壳旧目录自动回收与「待复核清理」双批量按钮拆分**：
+  - **彻底根治非 S01 / 多季单条合并报错“旧目录仍有内容，未完成空目录收尾”（`app/api/tasks.py`、`frontend/index.html`）**：
+    - 单条多目录合并接口 `merge-preview` / `merge-execute` 支持 `all_seasons`、`season_numbers` 与 `smart_collision`（前端弹窗显式启用 `all_seasons: true, smart_collision: true`，并保留显式传单季 `season_number` 的 M10 兼容性），彻底消除前端默认 `season_number=1` 导致 S04/S05 等多季剧旧目录被误判漏季卡死的缺陷。
+    - 杜绝无动作“空计划”误放行：若合并计划 0 移动、0 清理、0 保留且非 `align_only`，预览阶段直接置 `can_execute=False` 并精准列明阻断项。
+  - **空壳目录、Season 0 特辑、嵌套空子目录与系统垃圾全自动安全收尾（`app/core/directory_merge.py`）**：
+    - 新增递归只读空壳盘点 `inspect_empty_subtree`，自动识别仅含空子目录或操作系统隐藏垃圾（`.DS_Store` / `Thumbs.db` / `desktop.ini`）的纯空壳目录（标记 `is_empty_shell_cleanup=True`），自底向上安全回收，并自动将已销毁空壳名下残留的假缺集 `SeasonRecord` 统一收敛为 `source_absent`。
+    - `all_seasons=True` 同步纳入 `Season 0` / `Season 00` / `Specials`（为空直接回收，含特辑文件则安全迁入目标 `Season 0` 或同名防覆盖 `合并保留` 子目录）。
+    - 新增 `delete_dir_robust_detailed`：对 115 / CloudDrive2 刚删子目录后父目录缓存短时延迟执行短退避重读（最多 3 次），彻底消除一致性延迟误报；若确有真实残留，报错精准列出具体残留文件名/子目录名。
+  - **「待复核清理」执行推荐处理拆分为独立双按钮（`app/api/archive.py`、`frontend/index.html`）**：
+    - `POST /api/archive/recommended-plan` 新增 `mode` 参数（`merge_directory` / `redundant_clean` / `all`），按模式严格隔离扫描与范围统计，避免多目录处理与副本/源端清理互相串扰并减少无效云盘 I/O。
+    - 前端待复核工具栏拆分为 **「批量处理多目录问题」**（含待确认组角标与纯空壳回收标识）与 **「批量冗余清理」** 两个独立入口，弹窗标题、汇总看板与确认动作随模式动态适配。
+  - **新增专项回归测试**：`tests/test_v2583_merge_empty_shell_and_batch_split.py`（覆盖 TMDB 127635 空壳复现、空计划拦截、Season 0/垃圾文件收尾、115/CD2 退避重试与双模式严格隔离）。
+
 ## v2.5.82（2026-11-25，已同步 GitHub）
 
 - **跨模块选种与媒体身份校验统一收口至「缺集待补」单一事实底座（消除剧集/电影双轨漂移与重复逻辑）**：

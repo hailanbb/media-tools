@@ -982,7 +982,10 @@ async def confirm_task_directory_group(
 class DirectoryGroupMergePreviewRequest(BaseModel):
     target_path: str = ""
     source_target_path: str = ""
-    season_number: int = 1
+    season_number: int | None = None
+    season_numbers: list[int] | None = None
+    all_seasons: bool | None = None
+    smart_collision: bool = True
     selected_prefix: str = ""
 
 
@@ -990,8 +993,22 @@ class DirectoryGroupMergeExecuteRequest(BaseModel):
     plan_id: str = ""
     target_path: str = ""
     source_target_path: str = ""
-    season_number: int = 1
+    season_number: int | None = None
+    season_numbers: list[int] | None = None
+    all_seasons: bool | None = None
+    smart_collision: bool = True
     selected_prefix: str = ""
+
+
+def _resolve_merge_season_scope(body: DirectoryGroupMergePreviewRequest | DirectoryGroupMergeExecuteRequest) -> tuple[int, list[int] | None, bool]:
+    if body.season_numbers:
+        return int(body.season_numbers[0]), list(body.season_numbers), False
+    if body.all_seasons is not None:
+        return int(body.season_number or 1), None, bool(body.all_seasons)
+    # 兼容旧 M10 单季调用：仅显式传 season_number 且未传 all_seasons 时按单季处理；否则默认全季
+    if body.season_number is not None:
+        return int(body.season_number), None, False
+    return 1, None, True
 
 
 @router.post("/{task_id}/directory-groups/{group_id}/merge-preview")
@@ -1001,7 +1018,7 @@ async def preview_task_directory_group_merge(
     body: DirectoryGroupMergePreviewRequest,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """生成同 TMDB 多目录源端合并与前缀统一的只读预览计划 (M01–M10)。"""
+    """生成同 TMDB 多目录源端合并与前缀统一的只读预览计划 (M01–M14, v2.5.83 支持全季与空壳自动识别)。"""
     task = await db.get(Task, task_id)
     group = await db.get(DirectoryGroup, group_id)
     if not task or not group or group.task_id != task_id:
@@ -1012,6 +1029,7 @@ async def preview_task_directory_group_merge(
 
     from app.core.directory_merge import build_directory_merge_plan
     from app.clients.clouddrive2 import CloudDrive2Client
+    eff_sn, eff_sns, eff_all = _resolve_merge_season_scope(body)
     cd2 = CloudDrive2Client()
     try:
         plan = await build_directory_merge_plan(
@@ -1020,7 +1038,10 @@ async def preview_task_directory_group_merge(
             group_id,
             target_path=body.target_path,
             source_target_path=body.source_target_path,
-            season_number=body.season_number,
+            season_number=eff_sn,
+            season_numbers=eff_sns,
+            all_seasons=eff_all,
+            smart_collision=body.smart_collision,
             selected_prefix=body.selected_prefix,
             cd2_client=cd2,
         )
@@ -1039,7 +1060,7 @@ async def execute_task_directory_group_merge(
     body: DirectoryGroupMergeExecuteRequest,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """一次确认执行源端目录合并、前缀重命名、旧目录清理与云盘刷新 (M01–M14)。"""
+    """一次确认执行源端目录合并、前缀重命名、旧目录清理与云盘刷新 (M01–M14, v2.5.83)。"""
     task = await db.get(Task, task_id)
     group = await db.get(DirectoryGroup, group_id)
     if not task or not group or group.task_id != task_id:
@@ -1049,6 +1070,9 @@ async def execute_task_directory_group_merge(
         raise HTTPException(status_code=409, detail="请在初检结束后合并目录组")
 
     from app.core.directory_merge import build_directory_merge_plan, execute_directory_merge
+    from app.clients.clouddrive2 import CloudDrive2Client
+    eff_sn, eff_sns, eff_all = _resolve_merge_season_scope(body)
+    cd2 = CloudDrive2Client()
     try:
         grp_ev = json.loads(group.evidence_json or "{}") if getattr(group, "evidence_json", None) else {}
         plan = grp_ev.get("latest_merge_plan")
@@ -1059,8 +1083,12 @@ async def execute_task_directory_group_merge(
                 group_id,
                 target_path=body.target_path,
                 source_target_path=body.source_target_path,
-                season_number=body.season_number,
+                season_number=eff_sn,
+                season_numbers=eff_sns,
+                all_seasons=eff_all,
+                smart_collision=body.smart_collision,
                 selected_prefix=body.selected_prefix,
+                cd2_client=cd2,
             )
 
         res = await execute_directory_merge(
@@ -1068,10 +1096,13 @@ async def execute_task_directory_group_merge(
             task_id,
             group_id,
             plan_id=plan.get("plan_id", ""),
+            cd2_client=cd2,
         )
         return res
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        await cd2.close()
 
 
 class DirectoryGroupCleanSeasonRequest(BaseModel):

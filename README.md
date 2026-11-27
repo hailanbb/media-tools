@@ -4,7 +4,7 @@
 
 **专为 115网盘 · CloudDrive2 · MoviePilot · Emby / Jellyfin 打造的下一代智能化媒体治理与生命周期工作流引擎**
 
-[![Release](https://img.shields.io/badge/Release-v2.5.82-6366f1?style=for-the-badge&logo=github)](VERSIONING.md)
+[![Release](https://img.shields.io/badge/Release-v2.5.83-6366f1?style=for-the-badge&logo=github)](VERSIONING.md)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776ab?style=for-the-badge&logo=python)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20Native%20%7C%20Docker-0078d4?style=for-the-badge&logo=windows)](#-快速启动与部署)
 [![MoviePilot](https://img.shields.io/badge/MoviePilot-v2.x%20Ready-ff5722?style=for-the-badge&logo=fastapi)](https://github.com/jxxghp/MoviePilot)
@@ -20,7 +20,7 @@
   <a href="#-配置指南-env">配置指南</a> •
   <a href="#-零数据丢失安全防线">安全防线</a> •
   <a href="#-技术方案与规范索引">文档索引</a> •
-  <a href="#-版本演进与重要里程碑">版本演进 (v2.5.82)</a>
+  <a href="#-版本演进与重要里程碑">版本演进 (v2.5.83)</a>
 </p>
 
 </div>
@@ -228,7 +228,7 @@ MediaFlow 所有配置项均以 `MF_` 前缀开头，大小写不敏感：
 | **会话交接与最新进展** | [MediaFlow 会话交接摘要 (v2.5.61)](MediaFlow会话交接摘要-v2.5.61-2026-11-21.md)<br/>[MediaFlow 会话交接摘要 (v2.5.60)](MediaFlow会话交接摘要-v2.5.60-2026-11-20.md)<br/>[MediaFlow 会话交接摘要 (v2.5.59)](MediaFlow会话交接摘要-v2.5.59-2026-11-20.md) | **v2.5.61** |
 | **整体重构方案** | [五模块处理流程重构与智能清理方案](MediaFlow五模块处理流程重构与智能清理方案-v2.5.44.md)<br/>[五模块一致性核查报告](MediaFlow五模块一致性核查-v2.5.56-2026-11-20.md) | **v2.5.44 ~ v2.5.56** |
 | **专项扩展方案** | [媒体整理智能修复需求与交互方案](MediaFlow媒体整理智能修复需求与交互方案-v2.5.40.md)<br/>[电影订阅智能清理需求与交互方案](MediaFlow电影订阅智能清理需求与交互方案-v2.5.72.md)<br/>[剧集订阅智能清理需求与交互方案](MediaFlow剧集订阅智能清理需求与交互方案-v2.5.72.md) | **v2.5.40 ~ v2.5.72** |
-| **历史版本与迁移** | [完整版本演进历史与全量修改记录](VERSIONING.md)<br/>[媒体脚本迁移记录 (油猴版至统一仓库)](MIGRATION.md) | **v1.0 ~ v2.5.82** |
+| **历史版本与迁移** | [完整版本演进历史与全量修改记录](VERSIONING.md)<br/>[媒体脚本迁移记录 (油猴版至统一仓库)](MIGRATION.md) | **v1.0 ~ v2.5.83** |
 
 ---
 
@@ -238,7 +238,8 @@ MediaFlow 所有配置项均以 `MF_` 前缀开头，大小写不敏感：
 
 | 版本号 | 发布日期 | 关键特性与核心演进 | 状态 |
 | :---: | :---: | :--- | :---: |
-| **`v2.5.82`** | **2026-11-25** | • **跨模块选种与媒体身份防线统一收口至 `download_service` 单一底座**：抽离 MoviePilot 下载载荷前置契约（`has_valid_media_info` / `is_valid_download_payload`）及电影/剧集共用站点门槛、精确片名边界、年份校验与 `MediaInfo` 自动回填纯函数；统一剧集与电影关键词回退搜索流水线，同步补齐订阅治理 TV 分支在关键词回退下的同名异片与早期翻拍拦截，并全量对齐多端版本文档 | **最新稳定版** |
+| **`v2.5.83`** | **2026-11-27** | • **多目录全季智能合并、纯空壳旧目录自动回收与「待复核清理」双批量按钮拆分**：修复单条弹窗默认按 S01 扫描导致多季/非 S01 剧旧目录卡死缺陷，新增递归纯空壳/Season 0 特辑/系统垃圾自动安全收尾与 115/CD2 删目录短退避重试及精准残留报错；「待复核清理」拆分为 **「批量处理多目录问题」** 与 **「批量冗余清理」** 两大独立模式与入口 | **最新稳定版** |
+| **`v2.5.82`** | **2026-11-25** | • **跨模块选种与媒体身份防线统一收口至 `download_service` 单一底座**：抽离 MoviePilot 下载载荷前置契约（`has_valid_media_info` / `is_valid_download_payload`）及电影/剧集共用站点门槛、精确片名边界、年份校验与 `MediaInfo` 自动回填纯函数；统一剧集与电影关键词回退搜索流水线，同步补齐订阅治理 TV 分支在关键词回退下的同名异片与早期翻拍拦截，并全量对齐多端版本文档 | 历史里程碑 |
 | **`v2.5.81`** | **2026-11-25** | • **电影「往年老片死种」批量补缺推送 HTTP 500 与同名异片根治**：关键词回退强制拉取 MP 详情执行「精确 4 位年份 + 严格片名边界」双核验并回填完整 `MediaInfo`；`MoviePilotClient.submit_download` 前置拦空 `media_info` 并透出真实 `detail` 报错；修复实时重搜重试站点规则参数错位（`db, mp, cat_key`）并自愈历史脏缓存 | 历史里程碑 |
 | **`v2.5.80`** | **2026-11-25** | • **豆瓣通道体验升级**：支持手动输入影视剧名三通道并发实测，「强制重探状态」并发提速至 ~1.5s，升级 MP 多词探活避免单关键词缓存误判，输出大白话诊断清单与总结结论 | 历史里程碑 |
 | **`v2.5.79`** | **2026-11-24** | • **豆瓣多源核验一揽子治理**：引入续季跨年 `±1` 年容差与 `≥2` 年翻拍刚性拦截、候选分层预筛减噪至最低 1 次详情请求、CF 瞬态 1 次自动重试与 404 短路、Worker 并发 `/probe` 与本机 3 步诊断 | 历史里程碑 |
@@ -282,7 +283,7 @@ media-tools/
 ├── 剧集整理docker页面设计/    # UI 原型设计与前端视觉规范稿
 ├── 媒体整理需求/             # 历史基线需求与 MoviePilot 接口接入技术白皮书
 ├── README.md               # 仓库主说明文档
-└── VERSIONING.md           # 完整版本全量变更日志 (v1.0 ~ v2.5.82)
+└── VERSIONING.md           # 完整版本全量变更日志 (v1.0 ~ v2.5.83)
 ```
 
 ---

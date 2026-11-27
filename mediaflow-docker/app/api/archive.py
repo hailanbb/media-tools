@@ -3823,6 +3823,7 @@ class RecommendedPlanRequest(BaseModel):
     task_id: str
     season_record_ids: list[str] | None = None
     group_ids: list[str] | None = None
+    mode: str = "all"  # "all" | "merge_directory" | "redundant_clean"
 
 
 class RecommendedExecuteRequest(BaseModel):
@@ -3851,6 +3852,12 @@ async def build_recommended_batch_plan(
     task = await db.get(Task, body.task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
+
+    mode = str(body.mode or "all").strip().lower()
+    if mode not in ("all", "merge_directory", "redundant_clean"):
+        raise HTTPException(status_code=400, detail=f"不支持的批量处理模式: {mode}")
+    include_merge = mode in ("all", "merge_directory")
+    include_clean = mode in ("all", "redundant_clean")
 
     rows = list((await db.scalars(
         select(SeasonRecord).where(
@@ -3885,8 +3892,8 @@ async def build_recommended_batch_plan(
     plans_to_persist: list[tuple[DirectoryGroup, dict[str, Any]]] = []
     try:
         # 1. 同 ID 多目录规范化归并组级计划 (G06-G08) — 并发只读盘点，避免持锁阻塞 SQLite
-        target_groups = pending_groups
-        if body.group_ids:
+        target_groups = pending_groups if include_merge else []
+        if include_merge and body.group_ids:
             g_sel = set(body.group_ids)
             target_groups = [g for g in pending_groups if g.id in g_sel]
 
@@ -3932,7 +3939,7 @@ async def build_recommended_batch_plan(
                     "reason_type": "read_error",
                     "next_action": "恢复目录读取后重新预览",
                 })
-            elif m_plan.get("can_execute") and (m_plan.get("files_to_move") or m_plan.get("collision_dedup_items") or m_plan.get("assets_to_preserve") or m_plan.get("directories_to_clean") or m_plan.get("align_only")):
+            elif m_plan.get("can_execute") and (m_plan.get("files_to_move") or m_plan.get("collision_dedup_items") or m_plan.get("assets_to_preserve") or m_plan.get("directories_to_clean") or m_plan.get("junk_files_to_clean") or m_plan.get("align_only")):
                 plans_to_persist.append((grp, m_plan))
                 merge_items.append({
                     "group_id": grp.id,
@@ -3948,6 +3955,8 @@ async def build_recommended_batch_plan(
                     "file_count": len(m_plan.get("files_to_move") or []),
                     "asset_count": len(m_plan.get("assets_to_preserve") or []),
                     "empty_dir_count": len(m_plan.get("directories_to_clean") or []),
+                    "junk_file_count": len(m_plan.get("junk_files_to_clean") or []),
+                    "is_empty_shell_cleanup": bool(m_plan.get("is_empty_shell_cleanup")),
                     "align_only": bool(m_plan.get("align_only")),
                     "changes_season_files": bool(m_plan.get("files_to_move") or m_plan.get("collision_dedup_items")),
                     "dedup_count": len(m_plan.get("collision_dedup_items") or []),
@@ -3991,7 +4000,7 @@ async def build_recommended_batch_plan(
                     return group
             return None
 
-        for w in review_works:
+        for w in (review_works if include_clean else []):
             rec_id = w.get("id")
             if not rec_id:
                 continue
@@ -4002,7 +4011,8 @@ async def build_recommended_batch_plan(
                     skipped_items.append({"kind": "clean_redundant_source", "season_record_id": rec_id,
                         "title": f"{w.get('show_name')} S{int(w.get('season_number') or 1):02d}",
                         "reason": "等待同作品目录归并完成后再核验清源条件", "reason_type": "dependency",
-                        "next_action": "先解决目录组阻塞", "group_id": group.id})
+                        "next_action": "请先点击「批量处理多目录问题」完成目录归并" if mode == "redundant_clean" else "先解决目录组阻塞",
+                        "group_id": group.id})
                     continue
                 redundant_source_items.append({
                     "season_record_id": rec_id,
@@ -4103,16 +4113,61 @@ async def build_recommended_batch_plan(
     )
     total_reclaimable_bytes = sum(c["reclaimable_bytes"] for c in clean_items)
 
+    empty_shell_count = sum(1 for m in merge_items if m.get("is_empty_shell_cleanup"))
+
+    # 按模式精确计算本批次范围记录，防止多目录模式与冗余清理模式结果互相串扰
+    if mode == "merge_directory":
+        merge_group_paths: set[str] = set()
+        for grp in target_groups:
+            for e in json.loads(grp.paths_json or "[]"):
+                if e.get("norm_path"):
+                    merge_group_paths.add(normalize_dir_path(e["norm_path"]))
+        scoped_works = [
+            w for w in work_records
+            if normalize_dir_path(w.get("show_path") or "") in merge_group_paths
+            or any(
+                normalize_dir_path(getattr(row_by_id.get(pid), "show_path", "") or "") in merge_group_paths
+                for pid in (w.get("participating_record_ids") or [])
+            )
+        ]
+        scope_record_ids = sorted({
+            rid
+            for w in scoped_works
+            for rid in [w["id"], *(w.get("participating_record_ids") or [])]
+        })
+        before_categories = {w["id"]: w.get("main_category") for w in scoped_works}
+    elif mode == "redundant_clean":
+        clean_scoped_ids = (
+            {c["season_record_id"] for c in clean_items}
+            | {r["season_record_id"] for r in redundant_source_items}
+            | {s["season_record_id"] for s in skipped_items if s.get("season_record_id")}
+        )
+        scoped_works = [
+            w for w in review_works
+            if w.get("id") in clean_scoped_ids
+            or bool(set(w.get("participating_record_ids") or []) & clean_scoped_ids)
+        ]
+        scope_record_ids = sorted(
+            clean_scoped_ids
+            | {rid for w in scoped_works for rid in [w["id"], *(w.get("participating_record_ids") or [])]}
+        )
+        before_categories = {w["id"]: w.get("main_category") for w in scoped_works}
+    else:
+        scope_record_ids = sorted({rid for w in review_works for rid in [w["id"], *(w.get("participating_record_ids") or [])]})
+        before_categories = {w["id"]: w.get("main_category") for w in review_works}
+
     plan_id = f"plan_rec_{uuid4().hex[:12]}"
     plan_payload = {
         "ok": True,
         "plan_id": plan_id,
+        "mode": mode,
         "rules_version": "v2.5.54",
         "task_id": body.task_id,
         "created_at": datetime.now().isoformat(),
         "counts": {
             "work_season_count": len(work_season_ids),
             "dir_group_count": len(merge_items),
+            "empty_shell_count": empty_shell_count,
             "file_count": total_files_affected,
             "reclaimable_bytes": total_reclaimable_bytes,
             "reclaimable_display": _fmt_bytes(total_reclaimable_bytes),
@@ -4125,8 +4180,8 @@ async def build_recommended_batch_plan(
         "redundant_source_items": redundant_source_items,
         "skipped_items": skipped_items,
         "step_receipts": {},
-        "scope_record_ids": sorted({rid for w in review_works for rid in [w["id"], *(w.get("participating_record_ids") or [])]}),
-        "before_categories": {w["id"]: w.get("main_category") for w in review_works},
+        "scope_record_ids": scope_record_ids,
+        "before_categories": before_categories,
     }
     _RECOMMENDED_BATCH_PLANS[plan_id] = plan_payload
     batch_journal.save(plan_id, plan_payload)
@@ -4136,6 +4191,7 @@ async def build_recommended_batch_plan(
     return {
         "ok": True,
         "plan_id": plan_id,
+        "mode": mode,
         "rules_version": "v2.5.54",
         "task_id": body.task_id,
         "created_at": plan_payload["created_at"],
@@ -4145,10 +4201,13 @@ async def build_recommended_batch_plan(
                 "group_id": m["group_id"],
                 "title": m["title"],
                 "canonical_dir_name": m["canonical_dir_name"],
+                "affected_seasons": m.get("affected_seasons") or [],
                 "file_count": m["file_count"],
                 "dedup_count": m["dedup_count"],
                 "asset_count": m.get("asset_count", 0),
                 "empty_dir_count": m.get("empty_dir_count", 0),
+                "junk_file_count": m.get("junk_file_count", 0),
+                "is_empty_shell_cleanup": bool(m.get("is_empty_shell_cleanup")),
                 "align_only": m.get("align_only", False),
             }
             for m in merge_items
@@ -4573,8 +4632,25 @@ async def _run_recommended_batch_plan_locked(
     if failed_steps:
         plan["requires_repreview"] = True
     batch_journal.save(body.plan_id, plan)
+    plan_mode = str(plan.get("mode") or "all")
+    if plan_mode == "merge_directory":
+        final_msg = (
+            f"批量处理多目录完成：目录归并 {len(executed_merges)} 组"
+            f"；待复核剩余 {len(outcomes['remaining_review'])} 季、待核实异常 {len(outcomes['remaining_anomalies'])} 季、失败 {len(failed_steps)} 项"
+        )
+    elif plan_mode == "redundant_clean":
+        final_msg = (
+            f"批量冗余清理完成：副本清理 {len(executed_cleans)} 季、源端清源 {len(executed_redundant)} 季"
+            f"；待复核剩余 {len(outcomes['remaining_review'])} 季、待核实异常 {len(outcomes['remaining_anomalies'])} 季、失败 {len(failed_steps)} 项"
+        )
+    else:
+        final_msg = (
+            f"本轮执行结束：目录归并 {len(executed_merges)} 组、副本清理 {len(executed_cleans)} 季、源端清源 {len(executed_redundant)} 季"
+            + f"；待复核清理剩余 {len(outcomes['remaining_review'])} 季、待核实异常 {len(outcomes['remaining_anomalies'])} 季、失败 {len(failed_steps)} 项"
+        )
     return {
         "ok": len(failed_steps) == 0,
+        "mode": plan_mode,
         "fully_resolved": fully_resolved,
         "no_progress": no_progress,
         "can_refresh_remaining": bool(not fully_resolved and (progress_made or plan.get("stop_requested"))),
@@ -4588,10 +4664,7 @@ async def _run_recommended_batch_plan_locked(
         "failed_steps": failed_steps,
         "outcomes": outcomes,
         "summary": summary,
-        "message": (
-            f"本轮执行结束：目录归并 {len(executed_merges)} 组、副本清理 {len(executed_cleans)} 季、源端清源 {len(executed_redundant)} 季"
-            + f"；待复核清理剩余 {len(outcomes['remaining_review'])} 季、待核实异常 {len(outcomes['remaining_anomalies'])} 季、失败 {len(failed_steps)} 项"
-        ),
+        "message": final_msg,
     }
 
 

@@ -4490,22 +4490,29 @@
           </div>`;
       } else if (currentCategory === 'review') {
         if (selectAllLabel) selectAllLabel.textContent = "全选待复核项";
+        const pendingDirGroupCount = Array.isArray(task?.directoryGroups)
+          ? task.directoryGroups.filter(g => g.status === 'pending_confirm').length
+          : 0;
         batchContainer.innerHTML = `
-          <button type="button" onclick="openRecommendedBatchModal()" class="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-md shadow-indigo-600/20 transition flex items-center space-x-1.5">
-            <i class="fa-solid fa-wand-magic-sparkles text-xs"></i>
-            <span>执行推荐处理</span>
+          <button type="button" id="batchMergeDirectoryBtn" onclick="openRecommendedBatchModal('merge_directory')" class="px-3.5 py-2 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold shadow-md shadow-amber-600/20 transition flex items-center space-x-1.5" title="批量智能合并同 TMDB 多目录并自动回收空壳目录">
+            <i class="fa-solid fa-code-merge text-xs"></i>
+            <span>批量处理多目录问题${pendingDirGroupCount > 0 ? ` (${pendingDirGroupCount})` : ''}</span>
           </button>
-          <button type="button" onclick="viewLastRecommendedExecution()" class="px-3 py-2 rounded-lg border text-xs">查看最近执行结果</button>
-          <button id="batchActionButton" onclick="executeBatchReview()" disabled class="px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold shadow-md shadow-amber-600/20 transition flex items-center space-x-1.5">
+          <button type="button" id="batchRedundantCleanBtn" onclick="openRecommendedBatchModal('redundant_clean')" class="px-3.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-md shadow-indigo-600/20 transition flex items-center space-x-1.5" title="批量预览并清理同季重复版本与已归档源端冗余">
+            <i class="fa-solid fa-wand-magic-sparkles text-xs"></i>
+            <span>批量冗余清理</span>
+          </button>
+          <button type="button" onclick="viewLastRecommendedExecution()" class="px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 text-xs">查看最近执行结果</button>
+          <button id="batchActionButton" onclick="executeBatchReview()" disabled class="px-3.5 py-2 rounded-lg bg-slate-700 hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold shadow-sm transition flex items-center space-x-1.5">
             <i class="fa-solid fa-broom text-xs"></i>
-            <span id="batchActionBtnText">批量清理所选冗余 (0)</span>
+            <span id="batchActionBtnText">清理所选冗余 (0)</span>
           </button>`;
         banner.className = "p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/60 flex items-start space-x-3 text-xs";
         banner.innerHTML = `
           <i class="fa-solid fa-broom text-amber-500 text-sm mt-0.5"></i>
           <div class="flex-1 space-y-1">
             <div class="font-bold text-amber-900 dark:text-amber-300">待复核清理（清理优先）：上方按作品处理同 ID 目录规范化归并，下方处理单季副本清理与归档已齐清源</div>
-            <div class="text-slate-600 dark:text-slate-300">两组待办不重复计数；点击「执行推荐处理」可一次预览全部可执行项（加长版、Vlog、加更等独立内容版本默认保全）。</div>
+            <div class="text-slate-600 dark:text-slate-300">点击「批量处理多目录问题」可批量全季归并异名目录并自动回收纯空壳；点击「批量冗余清理」可批量预览并清理重复版本与已归档源端冗余（加长版、Vlog、加更与先导特辑默认保全）。</div>
           </div>`;
       } else if (currentCategory === 'anomaly' || currentCategory === 'already_archived') {
         if (selectAllLabel) selectAllLabel.textContent = "全选当前异常";
@@ -5017,13 +5024,13 @@
       if (count > 0) {
         batchBtn.removeAttribute('disabled');
         if (currentCategory === 'archive') batchBtnText.textContent = `批量一键归档所选 (${count} 季)`;
-        else if (currentCategory === 'review') batchBtnText.textContent = `批量一键清理所选冗余 (${count} 季)`;
+        else if (currentCategory === 'review') batchBtnText.textContent = `清理所选冗余 (${count} 季)`;
         else if (currentCategory === 'already_archived') batchBtnText.textContent = `批量清理源端冗余 (${count} 季)`;
         else if (currentCategory === 'download') batchBtnText.textContent = `${currentGapView === 'no_resource' ? '批量重新搜索并推送' : '批量一键推送 MP 补缺'} (已选 ${count} 季)`;
       } else {
         batchBtn.setAttribute('disabled', 'true');
         if (currentCategory === 'archive') batchBtnText.textContent = '批量一键归档所选 (0)';
-        else if (currentCategory === 'review') batchBtnText.textContent = '批量一键清理所选冗余 (0 季)';
+        else if (currentCategory === 'review') batchBtnText.textContent = '清理所选冗余 (0 季)';
         else if (currentCategory === 'already_archived') batchBtnText.textContent = '批量清理源端冗余 (0)';
         else if (currentCategory === 'download') batchBtnText.textContent = '请勾选剧季后批量推送 (已选 0 季)';
       }
@@ -6163,10 +6170,39 @@
       }
     }
 
-    // ── 统一批量「执行推荐处理」预览与执行 (v2.5.45) ─────────────
+    // ── 统一批量处理（「批量处理多目录问题」/「批量冗余清理」）预览与执行 (v2.5.83) ─────────────
     let _currentRecommendedPlan = null;
+    let _currentRecommendedMode = 'all';
     let _recBatchAbortCtrl = null;
     let _recExecPollToken = 0;
+
+    function _getRecBatchModeMeta(mode) {
+      if (mode === 'merge_directory') {
+        return {
+          mode: 'merge_directory',
+          title: '批量处理多目录问题 · 智能预览',
+          confirmLabel: '确认批量处理多目录',
+          loadingText: '正在扫描同作品多目录、检测空壳与生成全季归并计划...',
+          emptyText: '当前没有需要批量处理的同作品多目录问题。',
+        };
+      }
+      if (mode === 'redundant_clean') {
+        return {
+          mode: 'redundant_clean',
+          title: '批量冗余清理 · 批次预览',
+          confirmLabel: '确认批量冗余清理',
+          loadingText: '正在生成重复版本与已归档源端冗余清理计划及文件指纹...',
+          emptyText: '当前没有可自动执行的重复版本或已归档源端冗余项。',
+        };
+      }
+      return {
+        mode: 'all',
+        title: '执行推荐处理 · 批次计划预览',
+        confirmLabel: '确认执行推荐处理',
+        loadingText: '正在生成推荐处理批次计划与文件指纹...',
+        emptyText: '当前没有可自动执行的待复核清理项。',
+      };
+    }
 
     function _resetRecBatchExecBtn(label = '确认执行推荐处理', disabled = true, onClickFn = executeRecommendedBatchPlan) {
       const execBtn = document.getElementById('recBatchExecBtn');
@@ -6178,8 +6214,14 @@
       return execBtn;
     }
 
-    async function openRecommendedBatchModal() {
+    async function openRecommendedBatchModal(mode = 'all') {
       if (!currentTaskId) return;
+      const effMode = (typeof mode === 'string' && ['merge_directory', 'redundant_clean', 'all'].includes(mode))
+        ? mode
+        : (_currentRecommendedMode || 'all');
+      _currentRecommendedMode = effMode;
+      const meta = _getRecBatchModeMeta(effMode);
+
       _currentRecommendedPlan = null;
       _recExecPollToken += 1;
       if (_recBatchAbortCtrl) {
@@ -6191,24 +6233,26 @@
         try { ctrl.abort('timeout'); } catch (_) {}
       }, 120000);
 
+      const titleEl = document.getElementById('recBatchModalTitle');
       const summaryEl = document.getElementById('recBatchSummaryBar');
       const bodyEl = document.getElementById('recBatchBody');
-      const execBtn = _resetRecBatchExecBtn('确认执行推荐处理', true, executeRecommendedBatchPlan);
+      const execBtn = _resetRecBatchExecBtn(meta.confirmLabel, true, executeRecommendedBatchPlan);
       const footEl = document.getElementById('recBatchFootNote');
+      if (titleEl) titleEl.textContent = meta.title;
       if (summaryEl) summaryEl.innerHTML = '';
       if (bodyEl) {
-        bodyEl.innerHTML = `<div class="p-8 text-center text-slate-400"><i class="fa-solid fa-spinner fa-spin text-2xl mb-2 text-amber-500"></i><p>正在生成推荐处理批次计划与文件指纹...</p></div>`;
+        bodyEl.innerHTML = `<div class="p-8 text-center text-slate-400"><i class="fa-solid fa-spinner fa-spin text-2xl mb-2 text-amber-500"></i><p>${escapeHtml(meta.loadingText)}</p></div>`;
       }
       openModal('recommendedBatchModal');
 
       try {
         const res = await api('/api/archive/recommended-plan', {
           method: 'POST',
-          body: JSON.stringify({ task_id: currentTaskId }),
+          body: JSON.stringify({ task_id: currentTaskId, mode: effMode }),
           signal: ctrl.signal,
         });
         if (!res || !res.ok) {
-          throw new Error(res?.message || '生成推荐处理计划失败');
+          throw new Error(res?.message || '生成批量处理计划失败');
         }
         _currentRecommendedPlan = res;
         const c = res.counts || {};
@@ -6216,25 +6260,69 @@
         const dupItems = Array.isArray(res.clean_items) ? res.clean_items : [];
         const srcItems = Array.isArray(res.redundant_source_items) ? res.redundant_source_items : [];
         const skipped = Array.isArray(res.skipped_items) ? res.skipped_items : [];
+        const skippedGroupedCount = groupRecommendedSkipped(skipped).length;
+
         if (summaryEl) {
-          summaryEl.innerHTML = `
-            <div class="p-2.5 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800">
-              <div class="text-[10px] text-amber-600 dark:text-amber-400">同作品目录归并</div>
-              <div class="text-base font-black text-amber-700 dark:text-amber-300">${c.merge_count || groups.length || 0} 组</div>
-            </div>
-            <div class="p-2.5 rounded-xl bg-indigo-50 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-800">
-              <div class="text-[10px] text-indigo-600 dark:text-indigo-400">重复版本清理</div>
-              <div class="text-base font-black text-indigo-700 dark:text-indigo-300">${c.clean_count || dupItems.length || 0} 季</div>
-            </div>
-            <div class="p-2.5 rounded-xl bg-purple-50 dark:bg-purple-950/30 border border-purple-200 dark:border-purple-800">
-              <div class="text-[10px] text-purple-600 dark:text-purple-400">已归档源端清理</div>
-              <div class="text-base font-black text-purple-700 dark:text-purple-300">${c.redundant_source_count || srcItems.length || 0} 季</div>
-            </div>
-            <div class="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700">
-              <div class="text-[10px] text-slate-500">预览暂未纳入</div>
-              <div class="text-base font-black text-slate-700 dark:text-slate-200">${groupRecommendedSkipped(skipped).length} 项</div>
-            </div>
-          `;
+          if (effMode === 'merge_directory') {
+            const emptyShellCnt = Number(c.empty_shell_count ?? groups.filter(g => g.is_empty_shell_cleanup).length);
+            const moveFileCnt = groups.reduce((acc, g) => acc + (g.file_count || 0) + (g.dedup_count || 0) + (g.asset_count || 0), 0);
+            summaryEl.innerHTML = `
+              <div class="p-2.5 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800">
+                <div class="text-[10px] text-amber-600 dark:text-amber-400">同作品目录归并</div>
+                <div class="text-base font-black text-amber-700 dark:text-amber-300">${c.merge_count || groups.length || 0} 组</div>
+              </div>
+              <div class="p-2.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800">
+                <div class="text-[10px] text-emerald-600 dark:text-emerald-400">其中纯空壳回收</div>
+                <div class="text-base font-black text-emerald-700 dark:text-emerald-300">${emptyShellCnt} 组</div>
+              </div>
+              <div class="p-2.5 rounded-xl bg-indigo-50 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-800">
+                <div class="text-[10px] text-indigo-600 dark:text-indigo-400">拟迁移/保全文件</div>
+                <div class="text-base font-black text-indigo-700 dark:text-indigo-300">${moveFileCnt} 个</div>
+              </div>
+              <div class="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700">
+                <div class="text-[10px] text-slate-500">预览暂未纳入</div>
+                <div class="text-base font-black text-slate-700 dark:text-slate-200">${skippedGroupedCount} 项</div>
+              </div>
+            `;
+          } else if (effMode === 'redundant_clean') {
+            summaryEl.innerHTML = `
+              <div class="p-2.5 rounded-xl bg-indigo-50 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-800">
+                <div class="text-[10px] text-indigo-600 dark:text-indigo-400">重复版本清理</div>
+                <div class="text-base font-black text-indigo-700 dark:text-indigo-300">${c.clean_count || dupItems.length || 0} 季</div>
+              </div>
+              <div class="p-2.5 rounded-xl bg-purple-50 dark:bg-purple-950/30 border border-purple-200 dark:border-purple-800">
+                <div class="text-[10px] text-purple-600 dark:text-purple-400">已归档源端清理</div>
+                <div class="text-base font-black text-purple-700 dark:text-purple-300">${c.redundant_source_count || srcItems.length || 0} 季</div>
+              </div>
+              <div class="p-2.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800">
+                <div class="text-[10px] text-emerald-600 dark:text-emerald-400">预计释放空间</div>
+                <div class="text-base font-black text-emerald-700 dark:text-emerald-300">${escapeHtml(c.reclaimable_display || '0 B')}</div>
+              </div>
+              <div class="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700">
+                <div class="text-[10px] text-slate-500">预览暂未纳入</div>
+                <div class="text-base font-black text-slate-700 dark:text-slate-200">${skippedGroupedCount} 项</div>
+              </div>
+            `;
+          } else {
+            summaryEl.innerHTML = `
+              <div class="p-2.5 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800">
+                <div class="text-[10px] text-amber-600 dark:text-amber-400">同作品目录归并</div>
+                <div class="text-base font-black text-amber-700 dark:text-amber-300">${c.merge_count || groups.length || 0} 组</div>
+              </div>
+              <div class="p-2.5 rounded-xl bg-indigo-50 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-800">
+                <div class="text-[10px] text-indigo-600 dark:text-indigo-400">重复版本清理</div>
+                <div class="text-base font-black text-indigo-700 dark:text-indigo-300">${c.clean_count || dupItems.length || 0} 季</div>
+              </div>
+              <div class="p-2.5 rounded-xl bg-purple-50 dark:bg-purple-950/30 border border-purple-200 dark:border-purple-800">
+                <div class="text-[10px] text-purple-600 dark:text-purple-400">已归档源端清理</div>
+                <div class="text-base font-black text-purple-700 dark:text-purple-300">${c.redundant_source_count || srcItems.length || 0} 季</div>
+              </div>
+              <div class="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700">
+                <div class="text-[10px] text-slate-500">预览暂未纳入</div>
+                <div class="text-base font-black text-slate-700 dark:text-slate-200">${skippedGroupedCount} 项</div>
+              </div>
+            `;
+          }
         }
 
         const totalExec = groups.length + dupItems.length + srcItems.length;
@@ -6243,18 +6331,25 @@
         if (groups.length > 0) {
           parts.push(`
             <div class="p-3 rounded-xl bg-amber-50/50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800/60 space-y-1.5">
-              <div class="font-bold text-amber-800 dark:text-amber-300">① 同作品目录规范化归并（${groups.length} 组）</div>
-              ${groups.map(g => `<div class="text-[11px] flex justify-between gap-2 border-t border-amber-100 dark:border-amber-900/40 pt-1">
-                <span class="font-semibold">${escapeHtml(g.canonical_dir_name || g.title || g.group_id)}</span>
-                <span class="font-mono text-slate-500">${g.align_only ? '核验并对齐目录记录' : `移动 ${g.file_count || 0} · 去重 ${g.dedup_count || 0} · 附件保全 ${g.asset_count || 0} · 空目录核验 ${g.empty_dir_count || 0}`}</span>
-              </div>`).join('')}
+              <div class="font-bold text-amber-800 dark:text-amber-300">${effMode === 'merge_directory' ? '' : '① '}同作品目录规范化归并（${groups.length} 组）</div>
+              ${groups.map(g => {
+                const detailTxt = g.align_only
+                  ? '核验并对齐目录记录'
+                  : (g.is_empty_shell_cleanup
+                    ? `纯空壳安全回收（${g.empty_dir_count || 0} 个空目录${g.junk_file_count ? ` · ${g.junk_file_count} 个系统垃圾` : ''}）`
+                    : `移动 ${g.file_count || 0} · 去重 ${g.dedup_count || 0} · 附件保全 ${g.asset_count || 0} · 空目录核验 ${g.empty_dir_count || 0}`);
+                return `<div class="text-[11px] flex justify-between items-center gap-2 border-t border-amber-100 dark:border-amber-900/40 pt-1">
+                  <span class="font-semibold flex items-center gap-1.5">${escapeHtml(g.canonical_dir_name || g.title || g.group_id)}${g.is_empty_shell_cleanup ? '<span class="px-1.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-900/60 text-emerald-700 dark:text-emerald-300 text-[10px] font-bold">空壳回收</span>' : ''}</span>
+                  <span class="font-mono text-slate-500">${escapeHtml(detailTxt)}</span>
+                </div>`;
+              }).join('')}
             </div>
           `);
         }
         if (dupItems.length > 0) {
           parts.push(`
             <div class="p-3 rounded-xl bg-indigo-50/50 dark:bg-indigo-950/20 border border-indigo-200 dark:border-indigo-800/60 space-y-1.5">
-              <div class="font-bold text-indigo-800 dark:text-indigo-300">② 同季同内容重复版本清理（${dupItems.length} 季）</div>
+              <div class="font-bold text-indigo-800 dark:text-indigo-300">${effMode === 'redundant_clean' ? '① ' : '② '}同季同内容重复版本清理（${dupItems.length} 季）</div>
               ${dupItems.map(d => `<div class="text-[11px] flex justify-between gap-2 border-t border-indigo-100 dark:border-indigo-900/40 pt-1">
                 <span class="font-semibold">${escapeHtml(d.show_name)} S${String(d.season_number || 1).padStart(2, '0')}</span>
                 <span class="text-slate-600 dark:text-slate-300">拟删 ${d.delete_count || 0} 个 · 保留 ${d.keep_count || 0} 个 → 预计转入「${escapeHtml(d.predicted_next_label || '')}」</span>
@@ -6265,7 +6360,7 @@
         if (srcItems.length > 0) {
           parts.push(`
             <div class="p-3 rounded-xl bg-purple-50/50 dark:bg-purple-950/20 border border-purple-200 dark:border-purple-800/60 space-y-1.5">
-              <div class="font-bold text-purple-800 dark:text-purple-300">③ 已归档源端清理（${srcItems.length} 季）</div>
+              <div class="font-bold text-purple-800 dark:text-purple-300">${effMode === 'redundant_clean' ? '② ' : '③ '}已归档源端清理（${srcItems.length} 季）</div>
               ${srcItems.map(s => `<div class="text-[11px] flex justify-between gap-2 border-t border-purple-100 dark:border-purple-900/40 pt-1">
                 <span class="font-semibold">${escapeHtml(s.show_name)} S${String(s.season_number || 1).padStart(2, '0')}</span>
                 <span class="text-purple-600 dark:text-purple-300">先保护独有资产，再移入回收站</span>
@@ -6275,10 +6370,14 @@
         }
         if (skipped.length > 0) parts.push(renderRecommendedSkipped(skipped));
         if (parts.length === 0) {
-          parts.push(`<div class="p-6 text-center text-slate-400">当前没有可自动执行的待复核清理项。</div>`);
+          parts.push(`<div class="p-6 text-center text-slate-400">${escapeHtml(meta.emptyText)}</div>`);
         }
         if (bodyEl) bodyEl.innerHTML = parts.join('');
-        if (footEl) footEl.textContent = `计划编号 ${res.plan_id || '-'} · 预计释放 ${c.reclaimable_display || '0 B'} · 自动校验文件指纹`;
+        if (footEl) {
+          footEl.textContent = effMode === 'merge_directory'
+            ? `计划编号 ${res.plan_id || '-'} · 全季覆盖与空壳安全核验 · 绝不覆盖同名有效媒体`
+            : `计划编号 ${res.plan_id || '-'} · 预计释放 ${c.reclaimable_display || '0 B'} · 自动校验文件指纹`;
+        }
         if (execBtn) {
           execBtn.disabled = totalExec === 0;
           if (totalExec === 0) execBtn.innerHTML = '暂无可执行动作';
@@ -6286,9 +6385,9 @@
       } catch (e) {
         if (ctrl.signal.aborted && ctrl.signal.reason === 'modal_closed') return;
         const msg = (ctrl.signal.aborted && ctrl.signal.reason === 'timeout')
-          ? '生成推荐处理计划超时 (90s)，可能因远程网盘目录较多或网络繁忙，请稍后重试。'
+          ? '生成批量处理计划超时 (120s)，可能因远程网盘目录较多或网络繁忙，请稍后重试。'
           : (e?.message || '未知错误');
-        if (bodyEl) bodyEl.innerHTML = `<div class="p-4 rounded-xl bg-rose-50 text-rose-700">加载推荐处理计划失败：${escapeHtml(msg)}</div>`;
+        if (bodyEl) bodyEl.innerHTML = `<div class="p-4 rounded-xl bg-rose-50 text-rose-700">加载批量处理计划失败：${escapeHtml(msg)}</div>`;
       } finally {
         clearTimeout(timerId);
         if (_recBatchAbortCtrl === ctrl) _recBatchAbortCtrl = null;
@@ -6411,7 +6510,8 @@
           if (summaryEl) summaryEl.innerHTML = '';
           if (bodyEl) bodyEl.innerHTML = renderRecommendedRepreview(changed, res.message || snap?.message);
           if (footEl) footEl.textContent = '更新预览后可查看新计划，再决定是否执行。';
-          _resetRecBatchExecBtn('更新预览', false, openRecommendedBatchModal);
+          const retryMode1 = (typeof _currentRecommendedMode !== 'undefined' && _currentRecommendedMode) || (_currentRecommendedPlan && _currentRecommendedPlan.mode) || 'all';
+          _resetRecBatchExecBtn('更新预览', false, () => openRecommendedBatchModal(retryMode1));
           return;
         }
 
@@ -6466,7 +6566,8 @@
         if (execBtn && execBtn.isConnected) {
           execBtn.disabled = resolved || noProgress;
           execBtn.innerHTML = resolved ? '本批次已全部解决' : (noProgress ? '本轮无进展 · 请查看原因' : '更新剩余项预览');
-          execBtn.onclick = (!resolved && !noProgress) ? openRecommendedBatchModal : null;
+          const retryMode2 = (typeof _currentRecommendedMode !== 'undefined' && _currentRecommendedMode) || (_currentRecommendedPlan && _currentRecommendedPlan.mode) || 'all';
+          execBtn.onclick = (!resolved && !noProgress) ? (() => openRecommendedBatchModal(retryMode2)) : null;
         }
         const task = taskList.find(t => t.id === currentTaskId);
         if (task) task._seasonsLoaded = false;
@@ -6476,7 +6577,8 @@
         if (bodyEl) {
           bodyEl.innerHTML = `<div class="p-4 rounded-xl bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300 text-xs">执行推荐处理失败：${escapeHtml(e.message || '未知错误')}</div>`;
         }
-        _resetRecBatchExecBtn('更新预览后继续', false, openRecommendedBatchModal);
+        const retryMode3 = (typeof _currentRecommendedMode !== 'undefined' && _currentRecommendedMode) || (_currentRecommendedPlan && _currentRecommendedPlan.mode) || 'all';
+        _resetRecBatchExecBtn('更新预览后继续', false, () => openRecommendedBatchModal(retryMode3));
       }
     }
 
@@ -6716,6 +6818,8 @@
           body: JSON.stringify({
             target_path: targetPath,
             season_number: _activeDirGroupSeasonNumber || 1,
+            all_seasons: true,
+            smart_collision: true,
             selected_prefix: overridePrefix
           })
         });
@@ -6802,10 +6906,17 @@
           <div class="flex flex-wrap items-center justify-between gap-2 border-b border-indigo-200/60 dark:border-indigo-800/60 pb-2">
             <div class="font-bold text-xs text-indigo-900 dark:text-indigo-200 flex items-center gap-1.5">
               <i class="fa-solid fa-code-merge text-indigo-600 dark:text-indigo-400"></i>
-              <span>源端目录合并与前缀统一预览 (M01–M14)</span>
+              <span>源端目录合并与前缀统一预览 (全季覆盖)</span>
+              ${Array.isArray(plan.affected_seasons) && plan.affected_seasons.length > 0 ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-100 dark:bg-indigo-900/60 text-indigo-700 dark:text-indigo-200 font-mono">覆盖 ${plan.affected_seasons.map(s => 'S' + String(s).padStart(2, '0')).join(' / ')}</span>` : ''}
             </div>
+            ${plan.is_empty_shell_cleanup ? `<span class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-900/60 text-emerald-800 dark:text-emerald-200 font-semibold"><i class="fa-solid fa-leaf"></i> 纯空壳目录 · 可直接安全回收</span>` : ''}
             ${plan.is_airing ? `<span class="text-[10px] px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-900/60 text-amber-800 dark:text-amber-200 font-semibold"><i class="fa-solid fa-shield-halved"></i> 连载中 · 合并后继续留源</span>` : ''}
           </div>
+          ${plan.is_empty_shell_cleanup ? `
+            <div class="p-2.5 rounded-lg bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-200 text-xs">
+              <i class="fa-solid fa-circle-check mr-1"></i> 已核验旧目录仅为空壳（无任何有效视频、字幕或附件），点击「确认并合并目录」将直接安全回收旧空壳目录并释放主目录正常分流。
+            </div>
+          ` : ''}
 
           <div class="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
             <div class="p-2 rounded-lg bg-white dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 space-y-0.5">
@@ -6875,6 +6986,8 @@
             target_path: _activeMergePlan.archive_target_show_path,
             source_target_path: _activeMergePlan.source_target_show_path,
             season_number: _activeDirGroupSeasonNumber || 1,
+            all_seasons: true,
+            smart_collision: true,
             selected_prefix: _activeMergePlan.chosen_prefix
           })
         });
