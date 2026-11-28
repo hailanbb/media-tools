@@ -1,5 +1,18 @@
 # MediaFlow 版本管理
 
+## v2.5.84（2026-11-28，已同步 GitHub）
+
+- **「齐全可归档」分类准入统一、受阻精准模块导航与「人工复核无误 · 强制归档」安全闭环**：
+  - **修复「齐全可归档」条目单季归档报 `review_needed` 受阻（`app/api/archive.py`）**：
+    - 根治五模块分类器（`season_classifier.py` 中 `supplemental_coverage_preserved` / 多版本保留）已将完结且主集数齐全、含附随扩展集的剧季（如《奇迹少女 (2015) [tmdbid=65334]》S06 官方 26 集已播毕、本地 1~27 集完整无重复）归入「齐全可归档（`archive`）」，而 `/api/archive/preview` 与 `/api/archive/execute` 仅放行原始状态 `archive_ready / period_ready` 导致自相矛盾的问题；现统一认可权威分类 `work_cat == "archive"`，并在预检摘要中显式提示附随扩展集一并迁入。
+  - **修复受阻弹窗盲目提示「前往异常剧集确认目标」却找不到该剧的问题（`app/api/archive.py`、`frontend/index.html`）**：
+    - 新增 `_resolve_blocked_next_step` 并随预检项返回真实 `current_category`：位于「待复核清理」的条目精准导向「待复核清理」，位于「缺集待补」导向「缺集待补」，已在当前模块（如「齐全可归档」）的条目直接提供「查看本季详情与依据」，彻底杜绝跨模块空跳。
+  - **新增「人工复核无误 · 强制归档」预检与执行通道（`app/api/archive.py`、`frontend/index.html`）**：
+    - 后端 `/api/archive/preview` 与 `/api/archive/execute` 支持 `force_archive: bool = False`（及 `plan_id` 快照自动继承）：经用户人工核对无误后，可放行软性状态门禁（`review_needed / unknown / period_review / archive_check / identity_review / download_needed` 等）、分段编号核对、未确认多目录组及同集异名多剪辑版增量共存，并在 `OperationLog` 与 `status_detail` 完整记录强制归档审计标记。
+    - **物理安全硬红线绝不妥协**：即使启用 `force_archive=True`，对目标库同名视频冲突（防覆盖）、目标多候选季/特别篇目录歧义、受控源/目标根路径越界、平铺剧根未隔离子目录、无有效视频空目录及预检后文件漂移仍执行 100% 零写入硬拦截。
+    - 前端在「归档预检弹窗（受阻卡片与底部操作栏）」、「本季详情弹窗」、「手动复核弹窗」与「待复核清理卡片」四处提供「已复核无误 · 强制归档」入口（连载留源卡片与详情严格保持只读纯净），强制执行前必经只读搬移清单二次确认。
+  - **新增专项回归测试**：`tests/test_v2584_archive_alignment_and_force.py`（覆盖《奇迹少女》S06 真实场景复现、三模块受阻精准导航、强制归档双端落盘审计与四大物理安全硬红线拦截）。
+
 ## v2.5.83（2026-11-27，已同步 GitHub）
 
 - **多目录全季智能合并、纯空壳旧目录自动回收与「待复核清理」双批量按钮拆分**：

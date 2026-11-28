@@ -19,6 +19,7 @@ import time
 sys.stdout.reconfigure(encoding='utf-8')
 
 SUITES = [
+    {"name": "v2.5.84 归档分类准入对齐、精准导航与人工强制归档回归", "cmd": [sys.executable, "tests/test_v2584_archive_alignment_and_force.py"], "type": "python"},
     {"name": "v2.5.83 多目录全季合并、空壳自愈与双批量按钮分流回归", "cmd": [sys.executable, "tests/test_v2583_merge_empty_shell_and_batch_split.py"], "type": "python"},
     {"name": "v2.5.53 当前任务识别与附件保全回归", "cmd": [sys.executable, "tests/test_v2553_task_audit.py"], "type": "python"},
     {"name": "v2.5.53 详情与阻塞项展示回归", "cmd": ["node", "tests/test_v2553_frontend.js"], "type": "node"},

@@ -54,6 +54,7 @@ KNOWN_PUBLIC_ASSET_EXTS = {
 class _ArchiveRequest(BaseModel):
     season_record_ids: list[str]
     force_clean: bool = False
+    force_archive: bool = False
     plan_id: str | None = None
     batch_id: str | None = None
     expected_fingerprints: dict[str, dict[str, Any]] | None = None
@@ -62,6 +63,7 @@ class _ArchiveRequest(BaseModel):
 class ArchivePreviewRequest(BaseModel):
     season_record_ids: list[str]
     task_id: str | None = None
+    force_archive: bool = False
 
 
 class ArchiveReconcileRequest(BaseModel):
@@ -546,6 +548,35 @@ async def _refresh_task_summary(task_id: str, db: AsyncSession) -> dict[str, Any
     return await refresh_task_summary(task_id, db)
 
 
+def _resolve_blocked_next_step(work_cat: str, *, is_dir_group: bool = False) -> str:
+    """根据作品季当前真实所在的五模块分类返回准确的下一步指引，杜绝错误导向不存在该剧的模块。"""
+    if is_dir_group or work_cat == "review":
+        return "goto_review"
+    if work_cat == "anomaly":
+        return "goto_anomaly"
+    if work_cat == "download":
+        return "goto_download"
+    if work_cat == "airing":
+        return "stay_in_airing"
+    return "stay_in_archive"
+
+
+def _extract_adjacent_bonus_episodes(rec: SeasonRecord) -> list[int]:
+    """提取超出官方收录集数但随本季保留的扩展/附随集号（如 TMDB 26 集但本地含 E27）。"""
+    tot = int(rec.total_episodes or 0)
+    if tot <= 0:
+        return []
+    try:
+        eps = [
+            int(e)
+            for e in json.loads(rec.recognized_episodes_json or "[]")
+            if str(e).isdigit() and int(e) > tot
+        ]
+    except Exception:
+        return []
+    return sorted(set(eps))
+
+
 @router.post("/preview")
 async def preview_archive(
     body: ArchivePreviewRequest,
@@ -595,6 +626,7 @@ async def preview_archive(
     norm_source_root = posixpath.normpath(settings.source_root.rstrip("/")) if settings.source_root else ""
     norm_archive_root = posixpath.normpath(settings.archive_root.rstrip("/")) if settings.archive_root else ""
 
+    is_force = bool(body.force_archive)
     cd2 = CloudDrive2Client()
     plan_id = f"plan_{uuid4().hex[:16]}"
     items: list[dict] = []
@@ -602,8 +634,11 @@ async def preview_archive(
     blocked_ids: list[str] = []
 
     try:
+        from app.core.season_classifier import TERMINAL_STATUSES, get_record_work_main_category
+
         for rec in expanded_records:
             work_key = build_work_key(rec)
+            work_cat = await get_record_work_main_category(db, rec)
             source_season_path = rec.season_path or ""
             norm_src_season = posixpath.normpath(source_season_path) if source_season_path else ""
             norm_src_show = posixpath.normpath(rec.show_path or posixpath.dirname(norm_src_season)) if norm_src_season else ""
@@ -628,12 +663,17 @@ async def preview_archive(
                 for s in comp_siblings
             ]
 
+            force_bypass_notes: list[str] = []
             item_plan: dict = {
                 "season_record_id": rec.id,
                 "task_id": rec.task_id,
                 "work_key": work_key,
                 "show_name": rec.show_name,
                 "season_number": rec.season_number,
+                "current_category": work_cat or "",
+                "can_force_archive": False,
+                "force_archive": is_force,
+                "force_bypass_notes": force_bypass_notes,
                 "executable": False,
                 "state": "blocked",
                 "mode": "blocked",
@@ -654,47 +694,24 @@ async def preview_archive(
                 "block_reason": "",
                 "candidate_paths": [],
                 "conflict_files": [],
-                "next_step": "goto_anomaly",
+                "next_step": _resolve_blocked_next_step(work_cat),
                 "summary_lines": [],
                 "snapshot": {},
             }
 
-            # 1. 冲突与状态门禁
-            conflict_info = json.loads(rec.conflict_json or "{}") if getattr(rec, "conflict_json", None) else {}
-            if isinstance(conflict_info, dict) and conflict_info.get("blocking"):
-                item_plan["block_reason"] = (
-                    f"存在身份/归属冲突 ({conflict_info.get('reason') or conflict_info.get('type')})，安全拦截归档"
-                )
+            # 0. 终态门禁（不可强制）
+            if rec.status in TERMINAL_STATUSES:
+                item_plan["block_reason"] = f"当前状态为 {rec.status}，无需再次归档"
+                item_plan["next_step"] = "done"
                 item_plan["summary_lines"] = [f"✗ {item_plan['block_reason']}"]
                 blocked_ids.append(rec.id)
                 items.append(item_plan)
                 continue
 
-            from app.core.season_classifier import get_record_work_main_category
-            work_cat = await get_record_work_main_category(db, rec)
-            if work_cat == "airing" or rec.status == "airing":
-                item_plan["block_reason"] = "当前作品季处于「连载留源」状态，连载期暂不开放归档"
-                item_plan["summary_lines"] = [f"✗ {item_plan['block_reason']}"]
-                blocked_ids.append(rec.id)
-                items.append(item_plan)
-                continue
-
-            if rec.status not in ("archive_ready", "period_ready"):
-                item_plan["block_reason"] = f"当前状态为 {rec.status}，不满足归档条件"
-                item_plan["summary_lines"] = [f"✗ {item_plan['block_reason']}"]
-                blocked_ids.append(rec.id)
-                items.append(item_plan)
-                continue
-
+            # 1. 目标路径与物理边界硬红线（任何模式下均不可绕过）
             if not archive_target:
                 item_plan["block_reason"] = "无法自动计算归档目标路径"
-                item_plan["summary_lines"] = [f"✗ {item_plan['block_reason']}"]
-                blocked_ids.append(rec.id)
-                items.append(item_plan)
-                continue
-
-            # 2. 路径边界核验
-            if norm_source_root and not norm_src_season.startswith(norm_source_root + "/"):
+            elif norm_source_root and not norm_src_season.startswith(norm_source_root + "/"):
                 item_plan["block_reason"] = "源路径不在受控源根目录下"
             elif norm_archive_root and not norm_archive_target.startswith(norm_archive_root + "/"):
                 item_plan["block_reason"] = "归档目标不在受控归档根目录下"
@@ -711,22 +728,64 @@ async def preview_archive(
                 items.append(item_plan)
                 continue
 
-            # 3. 多目录组门禁
+            # 2. 软性冲突与分类状态门禁（常规归档对齐 work_cat == 'archive'；人工复核强制归档可放行）
+            conflict_info = json.loads(rec.conflict_json or "{}") if getattr(rec, "conflict_json", None) else {}
+            if isinstance(conflict_info, dict) and conflict_info.get("blocking"):
+                if not is_force:
+                    item_plan["block_reason"] = (
+                        f"存在身份/归属冲突 ({conflict_info.get('reason') or conflict_info.get('type')})，安全拦截归档"
+                    )
+                    item_plan["can_force_archive"] = True
+                    item_plan["summary_lines"] = [f"✗ {item_plan['block_reason']}"]
+                    blocked_ids.append(rec.id)
+                    items.append(item_plan)
+                    continue
+                force_bypass_notes.append("身份/归属冲突告警")
+
+            if work_cat == "airing" or rec.status == "airing":
+                if not is_force:
+                    item_plan["block_reason"] = "当前作品季处于「连载留源」状态，连载期暂不开放归档"
+                    item_plan["next_step"] = "stay_in_airing"
+                    item_plan["can_force_archive"] = True
+                    item_plan["summary_lines"] = [f"✗ {item_plan['block_reason']}"]
+                    blocked_ids.append(rec.id)
+                    items.append(item_plan)
+                    continue
+                force_bypass_notes.append("连载留源保护")
+
+            is_normal_archive_eligible = (
+                rec.status in ("archive_ready", "period_ready")
+                or work_cat == "archive"
+            )
+            if not is_normal_archive_eligible:
+                if not is_force:
+                    item_plan["block_reason"] = f"当前状态为 {rec.status}，不满足常规自动归档条件（如经人工复核无误，可启用强制归档）"
+                    item_plan["can_force_archive"] = True
+                    item_plan["summary_lines"] = [f"✗ {item_plan['block_reason']}"]
+                    blocked_ids.append(rec.id)
+                    items.append(item_plan)
+                    continue
+                force_bypass_notes.append(f"状态限制({rec.status})")
+
+            # 3. 多目录组门禁（目录组位于「待复核清理」review 模块；强制归档可按当前目标路径放行）
             blocked_group = await find_blocking_group_for_record(
                 db, rec, cd2_client=cd2, operation="archive_preview"
             )
             if blocked_group is not None:
-                msg_reason = blocked_group.invalidated_reason or "请先查看目录内容并确认目标归档目录或标记有意共存"
-                item_plan["block_reason"] = (
-                    f"存在未确认的{blocked_group.title or '同 ID 多目录组'}（TMDB {blocked_group.tmdb_id}）— {msg_reason}"
-                )
-                item_plan["next_step"] = "goto_anomaly_dir_group"
-                item_plan["summary_lines"] = [f"✗ {item_plan['block_reason']}"]
-                blocked_ids.append(rec.id)
-                items.append(item_plan)
-                continue
+                if not is_force:
+                    msg_reason = blocked_group.invalidated_reason or "请先查看目录内容并确认目标归档目录或标记有意共存"
+                    item_plan["block_reason"] = (
+                        f"存在未确认的{blocked_group.title or '同 ID 多目录组'}（TMDB {blocked_group.tmdb_id}）— {msg_reason}"
+                    )
+                    item_plan["next_step"] = _resolve_blocked_next_step(work_cat, is_dir_group=True)
+                    item_plan["can_force_archive"] = True
+                    item_plan["summary_lines"] = [f"✗ {item_plan['block_reason']}"]
+                    blocked_ids.append(rec.id)
+                    items.append(item_plan)
+                    continue
+                force_bypass_notes.append("未确认同 ID 多目录组")
 
-            # 4. 读取源季目录
+            # 4. 读取源季目录（硬红线）
             try:
                 contents = await cd2.list_files(source_season_path, force_refresh=True)
             except Exception as list_src_err:
@@ -738,14 +797,26 @@ async def preview_archive(
                 items.append(item_plan)
                 continue
 
-            preserve_versions = rec.status == "period_ready"
-            if not preserve_versions and any(segment_number(f.get("name", "")) is not None for f in contents):
-                item_plan["block_reason"] = "源季含分段编号文件，请先核对上下段和整期版"
-                item_plan["next_step"] = "goto_anomaly"
+            src_non_dir_files = [f for f in contents if not f.get("isDirectory") and f.get("name")]
+            src_video_files = [f for f in src_non_dir_files if is_video_file(f.get("name", ""))]
+            if not src_non_dir_files or (is_force and not src_video_files):
+                item_plan["block_reason"] = "源季目录未检测到可迁入的视频文件，安全停止"
                 item_plan["summary_lines"] = [f"✗ {item_plan['block_reason']}"]
                 blocked_ids.append(rec.id)
                 items.append(item_plan)
                 continue
+
+            preserve_versions = rec.status == "period_ready"
+            if not preserve_versions and any(segment_number(f.get("name", "")) is not None for f in contents):
+                if not is_force:
+                    item_plan["block_reason"] = "源季含分段编号文件，请先核对上下段和整期版"
+                    item_plan["next_step"] = _resolve_blocked_next_step(work_cat)
+                    item_plan["can_force_archive"] = True
+                    item_plan["summary_lines"] = [f"✗ {item_plan['block_reason']}"]
+                    blocked_ids.append(rec.id)
+                    items.append(item_plan)
+                    continue
+                force_bypass_notes.append("分段编号文件核对")
 
             # 5. 只读检查目标剧集目录（若尚不存在则视为空列表，不创建目录）
             try:
@@ -759,18 +830,30 @@ async def preview_archive(
             target_s0_path = spec_info["target_s0_path"]
             candidate_s0_dirs = spec_info["candidate_s0_dirs"]
 
-            # 跨季与平铺未隔离检查 (A07)
+            # 跨季与平铺未隔离检查 (A07)：平铺子目录属硬红线，独立季内跨季命名告警允许人工复核强制放行
             cross_items = _find_cross_season_or_unisolated_items(regular_contents, rec.season_number, is_flat_show)
             if cross_items:
-                item_plan["block_reason"] = f"源目录包含跨季或未隔离内容 ({', '.join(cross_items[:3])})，安全暂停"
-                item_plan["conflict_files"] = cross_items
-                item_plan["next_step"] = "goto_anomaly"
-                item_plan["summary_lines"] = [f"✗ {item_plan['block_reason']}"]
-                blocked_ids.append(rec.id)
-                items.append(item_plan)
-                continue
+                unisolated_subdirs = [x for x in cross_items if x.startswith("子目录:")]
+                if unisolated_subdirs:
+                    item_plan["block_reason"] = f"平铺源目录包含未隔离子目录 ({', '.join(unisolated_subdirs[:3])})，安全拦截"
+                    item_plan["conflict_files"] = cross_items
+                    item_plan["next_step"] = _resolve_blocked_next_step(work_cat)
+                    item_plan["summary_lines"] = [f"✗ {item_plan['block_reason']}"]
+                    blocked_ids.append(rec.id)
+                    items.append(item_plan)
+                    continue
+                if not is_force:
+                    item_plan["block_reason"] = f"源目录包含跨季或未隔离内容 ({', '.join(cross_items[:3])})，安全暂停"
+                    item_plan["conflict_files"] = cross_items
+                    item_plan["next_step"] = _resolve_blocked_next_step(work_cat)
+                    item_plan["can_force_archive"] = True
+                    item_plan["summary_lines"] = [f"✗ {item_plan['block_reason']}"]
+                    blocked_ids.append(rec.id)
+                    items.append(item_plan)
+                    continue
+                force_bypass_notes.append(f"跨季命名标记({', '.join(cross_items[:2])})")
 
-            # 特别篇目标候选与冲突检查 (A05)
+            # 特别篇目标候选与同名冲突检查 (A05，物理硬红线不可强制覆盖)
             if special_files_to_move:
                 if len(candidate_s0_dirs) > 1:
                     s0_paths = [d.get("path") or f"{norm_target_parent}/{d.get('name')}" for d in candidate_s0_dirs]
@@ -803,7 +886,7 @@ async def preview_archive(
                         items.append(item_plan)
                         continue
 
-            # 目标同季候选目录检查 (A05)
+            # 目标同季候选目录检查 (A05，多候选歧义属物理硬红线)
             candidate_seasons = [
                 f for f in target_parent_files if f.get("isDirectory") and (
                     _parse_season_number(f.get("name", "")) == rec.season_number or
@@ -814,7 +897,7 @@ async def preview_archive(
                 candidate_paths = [f.get("path") or f"{norm_target_parent}/{f.get('name')}" for f in candidate_seasons]
                 item_plan["block_reason"] = f"发现 {len(candidate_seasons)} 个可能的 S{rec.season_number:02d} 目标目录 ({', '.join(candidate_paths)})"
                 item_plan["candidate_paths"] = candidate_paths
-                item_plan["next_step"] = "goto_anomaly"
+                item_plan["next_step"] = _resolve_blocked_next_step(work_cat)
                 item_plan["summary_lines"] = [f"✗ {item_plan['block_reason']}"]
                 blocked_ids.append(rec.id)
                 items.append(item_plan)
@@ -822,13 +905,16 @@ async def preview_archive(
 
             existing_season = candidate_seasons[0] if candidate_seasons else None
             if existing_season and preserve_versions:
-                item_plan["block_reason"] = "目标季已存在，保留版本归档已停止，请重新核对"
-                item_plan["state"] = "needs_recheck"
-                item_plan["next_step"] = "recheck"
-                item_plan["summary_lines"] = [f"✗ {item_plan['block_reason']}"]
-                blocked_ids.append(rec.id)
-                items.append(item_plan)
-                continue
+                if not is_force:
+                    item_plan["block_reason"] = "目标季已存在，保留版本归档已停止，请重新核对"
+                    item_plan["state"] = "needs_recheck"
+                    item_plan["next_step"] = "recheck"
+                    item_plan["can_force_archive"] = True
+                    item_plan["summary_lines"] = [f"✗ {item_plan['block_reason']}"]
+                    blocked_ids.append(rec.id)
+                    items.append(item_plan)
+                    continue
+                force_bypass_notes.append("保留版本合并至已有目标季")
 
             dest_season_files: list[dict] = []
             if existing_season:
@@ -858,15 +944,19 @@ async def preview_archive(
                     items.append(item_plan)
                     continue
                 if ep_conflicts:
+                    if not is_force:
+                        c0 = ep_conflicts[0]
+                        item_plan["block_reason"] = (
+                            f"同集异名冲突：第 {c0['episodes']} 集在目标季已有不同版本 ({c0['target_file']})，已安全拦截"
+                        )
+                        item_plan["conflict_files"] = [c0["source_file"], c0["target_file"]]
+                        item_plan["can_force_archive"] = True
+                        item_plan["summary_lines"] = [f"✗ {item_plan['block_reason']}"]
+                        blocked_ids.append(rec.id)
+                        items.append(item_plan)
+                        continue
                     c0 = ep_conflicts[0]
-                    item_plan["block_reason"] = (
-                        f"同集异名冲突：第 {c0['episodes']} 集在目标季已有不同版本 ({c0['target_file']})，已安全拦截"
-                    )
-                    item_plan["conflict_files"] = [c0["source_file"], c0["target_file"]]
-                    item_plan["summary_lines"] = [f"✗ {item_plan['block_reason']}"]
-                    blocked_ids.append(rec.id)
-                    items.append(item_plan)
-                    continue
+                    force_bypass_notes.append(f"同集异名多版本共存(第 {c0['episodes']} 集)")
 
                 dest_file_names = {f.get("name", "").lower() for f in dest_season_files if not f.get("isDirectory")}
                 item_plan["target_existing_files"] = [
@@ -937,7 +1027,7 @@ async def preview_archive(
                     and d.get("name", "").lower() != season_dir_name.lower()
                 ]
                 root_files = [f for f in show_items if not f.get("isDirectory") and f.get("name")]
-                if preserve_versions:
+                if preserve_versions and not is_force:
                     item_plan["will_cleanup_show_root"] = False
                     item_plan["show_root_note"] = "保留版本分支跳过源剧根回收，剧根资产留源"
                 elif other_subdirs:
@@ -971,6 +1061,8 @@ async def preview_archive(
                         )
 
             # 生成确认窗摘要说明
+            if is_force:
+                item_plan["mode_label"] = f"强制归档 · {item_plan['mode_label']}"
             reg_vid_count = sum(1 for x in item_plan["regular_files_to_move"] if x.get("is_video"))
             reg_total_count = len(item_plan["regular_files_to_move"])
             summary_lines = []
@@ -981,6 +1073,16 @@ async def preview_archive(
             else:
                 summary_lines.append(
                     f"✓ 【{item_plan['mode_label']}】{reg_vid_count} 个正片视频（共 {reg_total_count} 个文件）将整季移至 {item_plan['target_path']}"
+                )
+            if is_force:
+                bypass_desc = "、".join(force_bypass_notes) if force_bypass_notes else "人工复核确认"
+                summary_lines.append(
+                    f"⚡ 人工复核强制归档：已放行「{bypass_desc}」，严格保持同名零覆盖与双端核验"
+                )
+            bonus_eps = _extract_adjacent_bonus_episodes(rec)
+            if bonus_eps:
+                summary_lines.append(
+                    f"• 附随扩展集一并归档：本地含集号 {bonus_eps[:5]}（资料收录 {rec.total_episodes} 集），将随本季完整移入目标库"
                 )
             if item_plan["special_files_to_move"]:
                 sp_vid_count = sum(1 for x in item_plan["special_files_to_move"] if x.get("is_video"))
@@ -1016,15 +1118,17 @@ async def preview_archive(
     _ARCHIVE_PREVIEW_PLANS[plan_id] = {
         "plan_id": plan_id,
         "task_id": body.task_id or (expanded_records[0].task_id if expanded_records else ""),
+        "force_archive": is_force,
         "created_at": datetime.utcnow().isoformat(),
         "items_by_id": {it["season_record_id"]: it for it in items},
     }
 
     return {
         "ok": len(executable_ids) > 0,
-        "message": f"预检完成：{len(executable_ids)} 季可执行，{len(blocked_ids)} 季受阻",
+        "message": f"{'强制归档' if is_force else ''}预检完成：{len(executable_ids)} 季可执行，{len(blocked_ids)} 季受阻",
         "plan_id": plan_id,
         "task_id": body.task_id or (expanded_records[0].task_id if expanded_records else ""),
+        "force_archive": is_force,
         "total_selected": len(items),
         "executable_count": len(executable_ids),
         "blocked_count": len(blocked_ids),
@@ -1054,6 +1158,7 @@ async def execute_archive(
     batch_id = body.batch_id or f"batch_{uuid4().hex[:12]}"
     plan_id = body.plan_id or ""
     saved_plan = _ARCHIVE_PREVIEW_PLANS.get(plan_id) if plan_id else None
+    is_force = bool(body.force_archive or (saved_plan and saved_plan.get("force_archive")))
 
     stmt = select(SeasonRecord).where(SeasonRecord.id.in_(body.season_record_ids))
     result = await db.execute(stmt)
@@ -1117,6 +1222,7 @@ async def execute_archive(
             "message": message,
             "next_step": next_step,
             "already_done": already_done,
+            "force_archive": is_force,
         }
 
     # 按 (norm_src_show, norm_target_parent) 分组，落实同剧串行、跨剧受控并发
@@ -1141,32 +1247,19 @@ async def execute_archive(
             success_count += 1
             continue
 
-        conflict_info = json.loads(rec.conflict_json or "{}") if getattr(rec, "conflict_json", None) else {}
-        if isinstance(conflict_info, dict) and conflict_info.get("blocking"):
-            err_msg = (
-                f"{rec.show_name} S{rec.season_number:02d}: 存在身份/归属冲突 ({conflict_info.get('reason') or conflict_info.get('type')})，安全拦截归档"
-            )
-            errors.append(err_msg)
-            season_results.append(_make_receipt(rec, "blocked", err_msg, next_step="goto_anomaly"))
-            continue
-
-        from app.core.season_classifier import get_record_work_main_category
+        from app.core.season_classifier import TERMINAL_STATUSES, get_record_work_main_category
         work_cat = await get_record_work_main_category(db, rec)
-        if work_cat == "airing" or rec.status == "airing":
-            err_msg = f"{rec.show_name} S{rec.season_number:02d}: 当前作品季处于「连载留源」状态，安全拦截归档"
-            errors.append(err_msg)
-            season_results.append(_make_receipt(rec, "blocked", err_msg, next_step="stay_in_airing"))
-            continue
+        blocked_step = _resolve_blocked_next_step(work_cat)
 
-        if rec.status not in ("archive_ready", "period_ready"):
+        if rec.status in TERMINAL_STATUSES:
             err_msg = f"{rec.show_name} S{rec.season_number:02d}: 当前状态为 {rec.status}，跳过"
             errors.append(err_msg)
-            season_results.append(_make_receipt(rec, "blocked", err_msg, next_step="goto_anomaly"))
+            season_results.append(_make_receipt(rec, "blocked", err_msg, next_step="done"))
             continue
 
-        source_season_path = rec.season_path
-        norm_src_season = posixpath.normpath(source_season_path)
-        norm_src_show = posixpath.normpath(rec.show_path or posixpath.dirname(norm_src_season))
+        source_season_path = rec.season_path or ""
+        norm_src_season = posixpath.normpath(source_season_path) if source_season_path else ""
+        norm_src_show = posixpath.normpath(rec.show_path or posixpath.dirname(norm_src_season)) if norm_src_season else ""
 
         archive_target = rec.archive_target_path
         if not archive_target:
@@ -1179,13 +1272,13 @@ async def execute_archive(
         if not archive_target:
             err_msg = f"{rec.show_name} S{rec.season_number:02d}: 无法自动计算归档路径"
             errors.append(err_msg)
-            season_results.append(_make_receipt(rec, "blocked", err_msg, next_step="goto_anomaly"))
+            season_results.append(_make_receipt(rec, "blocked", err_msg, next_step=blocked_step))
             continue
 
         norm_archive_target = posixpath.normpath(archive_target)
         norm_target_parent = posixpath.dirname(norm_archive_target)
 
-        # 路径安全红线核验
+        # 路径安全硬红线核验（任何模式下均不可绕过）
         path_err = ""
         if norm_source_root and not norm_src_season.startswith(norm_source_root + "/"):
             path_err = f"{rec.show_name} S{rec.season_number:02d}: 源路径不在受控源根目录下"
@@ -1200,7 +1293,32 @@ async def execute_archive(
 
         if path_err:
             errors.append(path_err)
-            season_results.append(_make_receipt(rec, "blocked", path_err, next_step="goto_anomaly"))
+            season_results.append(_make_receipt(rec, "blocked", path_err, next_step=blocked_step))
+            continue
+
+        conflict_info = json.loads(rec.conflict_json or "{}") if getattr(rec, "conflict_json", None) else {}
+        if isinstance(conflict_info, dict) and conflict_info.get("blocking") and not is_force:
+            err_msg = (
+                f"{rec.show_name} S{rec.season_number:02d}: 存在身份/归属冲突 ({conflict_info.get('reason') or conflict_info.get('type')})，安全拦截归档"
+            )
+            errors.append(err_msg)
+            season_results.append(_make_receipt(rec, "blocked", err_msg, next_step=blocked_step))
+            continue
+
+        if (work_cat == "airing" or rec.status == "airing") and not is_force:
+            err_msg = f"{rec.show_name} S{rec.season_number:02d}: 当前作品季处于「连载留源」状态，安全拦截归档"
+            errors.append(err_msg)
+            season_results.append(_make_receipt(rec, "blocked", err_msg, next_step="stay_in_airing"))
+            continue
+
+        is_normal_archive_eligible = (
+            rec.status in ("archive_ready", "period_ready")
+            or work_cat == "archive"
+        )
+        if not is_normal_archive_eligible and not is_force:
+            err_msg = f"{rec.show_name} S{rec.season_number:02d}: 当前状态为 {rec.status}，跳过"
+            errors.append(err_msg)
+            season_results.append(_make_receipt(rec, "blocked", err_msg, next_step=blocked_step))
             continue
 
         key = (norm_src_show, norm_target_parent)
@@ -1208,26 +1326,27 @@ async def execute_archive(
 
     try:
         for (norm_src_show, norm_target_parent), show_seasons in show_groups.items():
-            # 多目录/异名目录组级安全门禁（含实时漂移/目标失效检测）
-            blocked_group = None
-            for rec_probe in show_seasons:
-                blocked_group = await find_blocking_group_for_record(
-                    db, rec_probe, cd2_client=cd2, operation="execute_archive"
-                )
-                if blocked_group is not None:
-                    break
-            if blocked_group is not None:
-                msg_reason = blocked_group.invalidated_reason or "请先查看目录内容并确认目标归档目录或标记有意共存"
-                err_msg = (
-                    f"{show_seasons[0].show_name}: 存在未确认的{blocked_group.title or '同 ID 多目录组'}（TMDB {blocked_group.tmdb_id}），已暂停自动归档 — {msg_reason}"
-                )
-                errors.append(err_msg)
-                for r_blk in show_seasons:
-                    season_results.append(
-                        _make_receipt(r_blk, "blocked", err_msg, next_step="goto_anomaly_dir_group")
+            # 多目录/异名目录组级安全门禁（含实时漂移/目标失效检测；人工复核强制归档可按当前目标路径放行）
+            if not is_force:
+                blocked_group = None
+                for rec_probe in show_seasons:
+                    blocked_group = await find_blocking_group_for_record(
+                        db, rec_probe, cd2_client=cd2, operation="execute_archive"
                     )
-                await db.commit()
-                continue
+                    if blocked_group is not None:
+                        break
+                if blocked_group is not None:
+                    msg_reason = blocked_group.invalidated_reason or "请先查看目录内容并确认目标归档目录或标记有意共存"
+                    err_msg = (
+                        f"{show_seasons[0].show_name}: 存在未确认的{blocked_group.title or '同 ID 多目录组'}（TMDB {blocked_group.tmdb_id}），已暂停自动归档 — {msg_reason}"
+                    )
+                    errors.append(err_msg)
+                    for r_blk in show_seasons:
+                        season_results.append(
+                            _make_receipt(r_blk, "blocked", err_msg, next_step="goto_review")
+                        )
+                    await db.commit()
+                    continue
 
             # 认领规范化的源剧根路径和实际目标剧根路径锁
             locks = await _acquire_show_locks([norm_src_show, norm_target_parent])
@@ -1271,8 +1390,16 @@ async def execute_archive(
                         season_results.append(_make_receipt(rec, "blocked", err_msg, next_step="retry_preview"))
                         continue
 
+                    src_non_dir_files = [f for f in contents if not f.get("isDirectory") and f.get("name")]
+                    src_video_files = [f for f in src_non_dir_files if is_video_file(f.get("name", ""))]
+                    if not src_non_dir_files or (is_force and not src_video_files):
+                        err_msg = f"{rec.show_name} S{rec.season_number:02d}: 源季目录未检测到可迁入的视频文件，安全停止"
+                        errors.append(err_msg)
+                        season_results.append(_make_receipt(rec, "blocked", err_msg, next_step="retry_preview"))
+                        continue
+
                     preserve_versions = rec.status == "period_ready"
-                    if preserve_versions:
+                    if preserve_versions and not is_force:
                         from app.clients.moviepilot import MoviePilotClient
                         from app.core.inspector import run_inspection
                         mp = MoviePilotClient()
@@ -1289,7 +1416,7 @@ async def execute_archive(
                         finally:
                             await mp.close()
 
-                    if not preserve_versions and any(segment_number(f.get("name", "")) is not None for f in contents):
+                    if not preserve_versions and not is_force and any(segment_number(f.get("name", "")) is not None for f in contents):
                         err_msg = f"{rec.show_name}: 请先核对上下段和整期版"
                         errors.append(err_msg)
                         season_results.append(_make_receipt(rec, "blocked", err_msg, next_step="goto_anomaly"))
@@ -1317,19 +1444,21 @@ async def execute_archive(
                         target_s0_path = spec_info["target_s0_path"]
                         candidate_s0_dirs = spec_info["candidate_s0_dirs"]
 
-                        # 2. 跨季与平铺未隔离检查 (A07)
+                        # 2. 跨季与平铺未隔离检查 (A07)：平铺子目录属硬红线，独立季目录跨季命名标记在强制归档时可放行
                         cross_items = _find_cross_season_or_unisolated_items(
                             regular_contents, rec.season_number, is_flat_show
                         )
                         if cross_items:
-                            err_msg = f"{rec.show_name} S{rec.season_number:02d}: 源目录存在跨季或未隔离内容 ({', '.join(cross_items[:3])})，安全拦截"
-                            log.warning(err_msg)
-                            errors.append(err_msg)
-                            rec.status = "review_needed"
-                            rec.status_detail = err_msg
-                            affected_tasks.add(rec.task_id)
-                            season_results.append(_make_receipt(rec, "blocked", err_msg, next_step="goto_anomaly"))
-                            continue
+                            unisolated_subdirs = [x for x in cross_items if x.startswith("子目录:")]
+                            if unisolated_subdirs or not is_force:
+                                err_msg = f"{rec.show_name} S{rec.season_number:02d}: 源目录存在跨季或未隔离内容 ({', '.join(cross_items[:3])})，安全拦截"
+                                log.warning(err_msg)
+                                errors.append(err_msg)
+                                rec.status = "review_needed"
+                                rec.status_detail = err_msg
+                                affected_tasks.add(rec.task_id)
+                                season_results.append(_make_receipt(rec, "blocked", err_msg, next_step="goto_anomaly"))
+                                continue
 
                         # 3. 【P0: 目标季匹配多个候选时停止，展示候选路径，此时 E00 尚未移动 (A05)】
                         candidate_seasons = [
@@ -1350,7 +1479,7 @@ async def execute_archive(
                             continue
 
                         existing_season = candidate_seasons[0] if candidate_seasons else None
-                        if existing_season and preserve_versions:
+                        if existing_season and preserve_versions and not is_force:
                             err_msg = f"{rec.show_name}：目标季已存在，保留版本归档已停止"
                             errors.append(err_msg)
                             season_results.append(_make_receipt(rec, "blocked", err_msg, mode="preserve_versions", next_step="recheck"))
@@ -1399,7 +1528,7 @@ async def execute_archive(
                                 season_results.append(_make_receipt(rec, "blocked", err_msg, mode="incremental_merge", target_path=existing_season_path, next_step="goto_anomaly"))
                                 continue
 
-                            if same_ep_conflicts:
+                            if same_ep_conflicts and not is_force:
                                 c0 = same_ep_conflicts[0]
                                 err_msg = f"{rec.show_name} S{rec.season_number:02d}: 同集异名冲突，目标已存在第 {c0['episodes']} 集的不同文件 ({c0['target_file']})，已安全拦截"
                                 log.warning(err_msg)
@@ -1494,6 +1623,7 @@ async def execute_archive(
                                     detail_json=json.dumps({
                                         "batch_id": batch_id,
                                         "plan_id": plan_id,
+                                        "force_archive": is_force,
                                         "show": rec.show_name,
                                         "season": rec.season_number,
                                         "mode": "incremental_merge",
@@ -1659,6 +1789,8 @@ async def execute_archive(
                                         outcome_code = "archived_pending_cleanup"
                                         detail_msg = f"媒体已增量合并至 {existing_season_path}，但源季空壳目录回收待处理 ({del_season_err})"
 
+                                if is_force:
+                                    detail_msg = f"{detail_msg}（人工复核强制归档）"
                                 success_count += 1
                                 rec.status = "archived"
                                 rec.status_detail = detail_msg
@@ -1671,6 +1803,7 @@ async def execute_archive(
                                 op_log.detail_json = json.dumps({
                                     "batch_id": batch_id,
                                     "plan_id": plan_id,
+                                    "force_archive": is_force,
                                     "show": rec.show_name,
                                     "season": rec.season_number,
                                     "mode": "incremental_merge",
@@ -1725,6 +1858,7 @@ async def execute_archive(
                             detail_json=json.dumps({
                                 "batch_id": batch_id,
                                 "plan_id": plan_id,
+                                "force_archive": is_force,
                                 "show": rec.show_name,
                                 "season": rec.season_number,
                                 "mode": mode_str,
@@ -1864,16 +1998,21 @@ async def execute_archive(
 
                         success_count += 1
                         rec.status = "archived"
-                        rec.status_detail = f"已成功归档至 {actual_target_season}"
+                        rec.status_detail = (
+                            f"已成功归档至 {actual_target_season}（人工复核强制归档）"
+                            if is_force
+                            else f"已成功归档至 {actual_target_season}"
+                        )
                         rec.archive_target_path = actual_target_season
                         affected_tasks.add(rec.task_id)
-                        if not preserve_versions:
+                        if not preserve_versions or is_force:
                             has_successful_regular_archive = True
 
                         op_log.status = "completed"
                         op_log.detail_json = json.dumps({
                             "batch_id": batch_id,
                             "plan_id": plan_id,
+                            "force_archive": is_force,
                             "show": rec.show_name,
                             "season": rec.season_number,
                             "mode": mode_str,
