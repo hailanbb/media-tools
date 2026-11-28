@@ -1,5 +1,14 @@
 # MediaFlow 版本管理
 
+## v2.5.86（2026-11-28，已同步 GitHub）
+
+- **「缺集待补」主动放弃删源：无其他需保留季时一并清理剧集目录并强制刷新 CloudDrive2**：
+  - **修复单季／批量放弃删源后残留空置剧集外壳目录的问题（`app/api/source_discard.py`、`frontend/index.html`）**：
+    - 根治 `source_discard.py` 此前硬编码 `will_delete_show_dir=False` 导致删除唯一季（如《南方公园 (1997) [tmdbid=2190]》S27）后，源目录仍残留仅含 `poster.jpg / backdrop.jpg / season27-poster.jpg / tvshow.nfo` 刮削文件的剧集外层目录的缺陷。
+    - 新增双端安全判定 `_evaluate_show_dir_deletion`（复用 `auxiliary_inventory.is_ignorable_junk_or_scrape_temp`）：当数据库中该 `show_path` 已无其他有效剧季记录，且物理网盘 `show_path` 内除待删季外**零子目录、零视频／STRM 文件**（仅含刮削海报／NFO／字幕或隐藏临时垃圾）时，预览自动置 `will_delete_show_dir=True`、明示拟删整剧路径与伴生文件，并在执行前校验剧集根目录快照防漂移。
+    - 执行删除本季后（含批量删源删完同剧最后一季的场景），自动一并删除该剧集目录，支持 115 / CloudDrive2 删后短退避核验（`0.4s → 0.8s → 1.5s`），并对剧集父目录及任务初检目录同步执行 `force_refresh=True` 强制刷新。
+  - **新增专项回归测试**：`tests/test_v2586_discard_show_dir.py`（覆盖《南方公园》S27 单季连删剧根与双目录刷新、存在他季／视频严格保留剧根、预览后剧根新增季度防漂移拦截、多季批量全放弃后尾季自动回收剧根）；同步升级《MediaFlow缺集待补模块需求与交互方案》至 `v2.5.86`。
+
 ## v2.5.85（2026-11-28，已同步 GitHub）
 
 - **全链路彻底废除生成「合并保留」目录，并支持历史遗留「合并保留」安全检测与一键原地清理**：

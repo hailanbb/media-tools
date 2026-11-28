@@ -240,5 +240,5 @@ MP last_update 为空时不代填“无进展 60 天”。可用下载/整理历
 ## 11. 核查范围与依据
 
 - 本地代码与页面依据：[订阅诊断引擎](app/core/subscription_cleaner.py)、[CD2 实盘索引](app/services/subscription_cd2_index.py)、[订阅统一采集与补缺服务](app/services/subscription_governance_service.py)、[订阅操作服务](app/services/subscription_service.py)、[MP API](app/api/moviepilot.py)、[MP 客户端](app/clients/moviepilot.py)、[TMDB 客户端](app/clients/tmdb.py)、[前端页面](frontend/index.html)、[专项测试](tests/test_v2563_subscription_governance.py)、[基础测试](tests/test_moviepilot.py)。
-- 共用流程与既有需求：[剧集订阅智能清理方案](MediaFlow剧集订阅智能清理需求与交互方案-v2.5.69.md)、[媒体整理智能修复方案](MediaFlow媒体整理智能修复需求与交互方案-v2.5.40.md)、[订阅清理历史改进](MediaFlow综艺分段识别与订阅清理改进方案-2026-11-10.md)。
+- 共用流程与既有需求：[剧集订阅智能清理方案](MediaFlow剧集订阅智能清理需求与交互方案-v2.5.69.md)、[媒体整理智能修复方案](MediaFlow媒体整理智能修复需求与交互方案-v2.5.83.md)、[订阅清理历史改进](MediaFlow综艺分段识别与订阅清理改进方案-2026-11-10.md)。
 - 外部契约：[MP v2.15.6 媒体库接口](https://github.com/jxxghp/MoviePilot/blob/v2.15.6/app/api/endpoints/mediaserver.py)、[订阅模型与状态](https://github.com/jxxghp/MoviePilot/blob/v2.15.6/app/db/models/subscribe.py)、[订阅写入接口](https://github.com/jxxghp/MoviePilot/blob/v2.15.6/app/api/endpoints/subscribe.py)、[TMDB 电影发行日期](https://developer.themoviedb.org/reference/movie-release-dates)。

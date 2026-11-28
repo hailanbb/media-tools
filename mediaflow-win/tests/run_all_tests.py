@@ -19,6 +19,7 @@ import time
 sys.stdout.reconfigure(encoding='utf-8')
 
 SUITES = [
+    {"name": "v2.5.86 缺集放弃删源无他季连删剧根与双目录刷新回归", "cmd": [sys.executable, "tests/test_v2586_discard_show_dir.py"], "type": "python"},
     {"name": "v2.5.85 废除合并保留目录与历史遗留原地清理回归", "cmd": [sys.executable, "tests/test_v2585_eliminate_hebing_baoliu.py"], "type": "python"},
     {"name": "v2.5.84 归档分类准入对齐、精准导航与人工强制归档回归", "cmd": [sys.executable, "tests/test_v2584_archive_alignment_and_force.py"], "type": "python"},
     {"name": "v2.5.83 多目录全季合并、空壳自愈与双批量按钮分流回归", "cmd": [sys.executable, "tests/test_v2583_merge_empty_shell_and_batch_split.py"], "type": "python"},

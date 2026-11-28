@@ -8,7 +8,7 @@
 
 设计依据为[五模块处理流程重构与智能清理方案 v2.5.44](MediaFlow五模块处理流程重构与智能清理方案-v2.5.44.md)，其中已包含按初检目录名称与完整路径确定动漫默认规则的修订。
 
-关联方案：[待复核清理](MediaFlow待复核清理模块需求与交互方案-v2.5.61.md)、[异常剧集](MediaFlow异常剧集模块需求与交互方案-v2.5.61.md)、[缺集待补](MediaFlow缺集待补模块需求与交互方案-v2.5.61.md)、[齐全可归档](MediaFlow齐全可归档模块需求与交互方案-v2.5.61.md)、[连载留源](MediaFlow连载留源模块需求与交互方案-v2.5.61.md)。
+关联方案：[待复核清理](MediaFlow待复核清理模块需求与交互方案-v2.5.61.md)、[异常剧集](MediaFlow异常剧集模块需求与交互方案-v2.5.61.md)、[缺集待补](MediaFlow缺集待补模块需求与交互方案-v2.5.86.md)、[齐全可归档](MediaFlow齐全可归档模块需求与交互方案-v2.5.84.md)、[连载留源](MediaFlow连载留源模块需求与交互方案-v2.5.61.md)。
 **用户打开这个模块，应该能看懂三件事：本季为什么还要留源，已经播出的内容收到了多少，下次重新初检后会怎样。** 正常连载无需点击确认。用户可以直接离开；源目录继续接收更新，已有 MoviePilot 订阅和在途下载照常运行。
 
 ## v2.5.61 手动复核与外部删除对账（2026-11-21）
@@ -310,5 +310,5 @@
 
 - 播毕、分段综艺与互斥分流：[初检引擎](app/core/inspector.py)、[期段判定](app/core/segments.py)、[作品季分类器](app/core/season_classifier.py)。
 - 任务读取与重新核算：[任务接口](app/api/tasks.py)、[任务摘要](app/services/gap_fill_tracker.py)、[前端页面](frontend/index.html)。
-- 分流以本文及最新全局方案为准，旧分流顺序已被本次方案替代：[全局方案](MediaFlow五模块处理流程重构与智能清理方案-v2.5.44.md)、[异常剧集](MediaFlow异常剧集模块需求与交互方案-v2.5.61.md)、[缺集待补](MediaFlow缺集待补模块需求与交互方案-v2.5.61.md)、[待复核清理](MediaFlow待复核清理模块需求与交互方案-v2.5.61.md)、[齐全可归档](MediaFlow齐全可归档模块需求与交互方案-v2.5.61.md)。
+- 分流以本文及最新全局方案为准，旧分流顺序已被本次方案替代：[全局方案](MediaFlow五模块处理流程重构与智能清理方案-v2.5.44.md)、[异常剧集](MediaFlow异常剧集模块需求与交互方案-v2.5.61.md)、[缺集待补](MediaFlow缺集待补模块需求与交互方案-v2.5.86.md)、[待复核清理](MediaFlow待复核清理模块需求与交互方案-v2.5.61.md)、[齐全可归档](MediaFlow齐全可归档模块需求与交互方案-v2.5.84.md)。
 - 历史需求及现有测试：[总仓初检需求](https://github.com/hailanbb/media-tools/blob/main/媒体整理需求/02-剧集初检详细需求.md)、[初检判定](tests/test_inspection.py)、[底层诊断不变量](tests/test_domain_invariants.py)、[五模块归并](tests/test_season_classifier.py)、[前端状态映射](tests/test_frontend_logic.js)。

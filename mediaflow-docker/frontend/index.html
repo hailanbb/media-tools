@@ -5526,8 +5526,8 @@
     }
 
     function renderBatchDiscardPreview(data) {
-      return `<p class="font-bold">${escapeHtml(data.message)}</p><p class="text-rose-600">这是主动放弃补缺，不是归档后安全清源。仅删除以下季目录，不删除整剧根、其他季或归档库。</p>`
-        + (data.items || []).map(it => `<details class="border rounded p-2"><summary>${escapeHtml(it.title)} · 视频 ${it.file_stats.video_count}、字幕 ${it.file_stats.sub_count}、附件 ${it.file_stats.other_count} · ${escapeHtml(it.file_stats.total_size_display)}</summary><div class="break-all font-mono mt-2">${escapeHtml(it.season_path)}</div><div class="max-h-48 overflow-auto mt-2">${(it.files || []).map(f => `<div class="break-all">${escapeHtml(f.path)} · ${f.size} B</div>`).join('')}</div></details>`).join('')
+      return `<p class="font-bold">${escapeHtml(data.message)}</p><p class="text-rose-600">这是主动放弃补缺，不是归档后安全清源。将删除以下季目录（若该剧已无其他季或视频需保留，将一并删除剧集目录并刷新 CD2）；不影响其他季或归档库。</p>`
+        + (data.items || []).map(it => `<details class="border rounded p-2"><summary>${escapeHtml(it.title)}${it.will_delete_show_dir ? ' · [连删剧集目录]' : ''} · 视频 ${it.file_stats.video_count}、字幕 ${it.file_stats.sub_count}、附件 ${it.file_stats.other_count} · ${escapeHtml(it.file_stats.total_size_display)}</summary><div class="break-all font-mono mt-2">${escapeHtml(it.will_delete_show_dir ? (it.target_delete_path || it.show_path || it.season_path) : it.season_path)}</div><div class="max-h-48 overflow-auto mt-2">${(it.files || []).map(f => `<div class="break-all">${escapeHtml(f.path)} · ${f.size} B</div>`).join('')}</div></details>`).join('')
         + (data.blocked?.length ? `<details class="border rounded p-2"><summary>未纳入 ${data.blocked.length} 季（不会执行）</summary>${data.blocked.map(it => `<p>${escapeHtml(it.title)}：${escapeHtml(it.error)}</p>`).join('')}</details>` : '');
     }
 
