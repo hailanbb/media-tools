@@ -207,7 +207,7 @@ async def sync_missing_root_assets_and_clean_shell(
         if not is_standard_scrape_asset(fname) and not is_disposable_legacy_aux_file(fname):
             raise ValueError(f"源剧根存在未知附件：{fname}")
 
-        if is_standard_scrape_asset(fname) and fname.casefold() not in archive_names_cf:
+        if is_standard_scrape_asset(fname) and int(f_it.get("size") or 0) > 0 and fname.casefold() not in archive_names_cf:
             mv = await client.move_file(f_it["path"], norm_archive, skip_existing=True)
             if not isinstance(mv, dict) or mv.get("success") is not True:
                 raise ValueError(f"补齐公共刮削资产至归档剧根未确认成功：{fname}")

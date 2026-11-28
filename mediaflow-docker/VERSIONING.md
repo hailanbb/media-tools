@@ -1,5 +1,16 @@
 # MediaFlow 版本管理
 
+## v2.5.87（2026-11-28，已同步 GitHub）
+
+- **「待复核清理」同 ID 异名归档目录清源自愈对齐与非隐藏刮削临时文件（`poster.cpt54r`）/ 0 字节残图自动回收**：
+  - **根治同 ID 异名归档目录确认后清源报 `not found` 受阻（`app/core/directory_governance.py`、`app/core/directory_merge.py`、`app/api/archive.py`）**：
+    - 复盘现网《换座位后，坐在我后面的男生好像喜欢我 (2026) `[tmdbid=323005]`》S01：归档库已存在完整 8 集的别名目录 `换座位后，后面的男生好像喜欢我 (2026) [tmdbid=323005]`，但此前 `build_directory_group_target_options` 将未创建的 `matches_tmdb_page=True` 源端同名目录排在 `exists_in_archive=True` 既有归档目录之前，导致批量/默认确认将 `already_archived` 记录的 `archive_target_path` 覆盖为不存在的归档路径，清源时触发 `gRPC [5] not found`。
+    - 三层闭环修复：① 候选排序优先推荐 `exists_in_archive=True` 的既有归档目录，避免在 `nas.finish` 人为撕裂出第二个目录；② `confirm_directory_group` 与 `execute_directory_merge` 对 `already_archived` 记录在目标尚未创建时保留 `dual_archive_info.primary_path` 真实归档季路径；③ `_clean_source_redundant_impl` 遇到预期同名归档路径不存在时，在同一受控归档分类下按显式 `[tmdbid=ID]` 与季号严格核查——若存在**唯一**真实归档季目录则自动自愈对齐并继续完整集数覆盖核验（0 个或多个候选仍严格拒止）。
+  - **根治源剧根刮削器非隐藏原子写临时文件（如 `poster.cpt54r`）与 0 字节损坏刮削图阻塞外层收尾（`app/core/auxiliary_inventory.py`、`app/core/source_cleanup_assets.py`、`app/api/archive.py`）**：
+    - 复盘现网《绑架游戏 (2024) `[tmdbid=250446]`》S01：本季删除后源剧根残留刮削器原子写中断产生的 `poster.cpt54r` 及 `0B` 损坏 `backdrop.jpg`，此前被 `_inspect_and_cleanup_source_show_dir` 误判为“未知附件”留源卡单。
+    - 升级 `is_ignorable_junk_or_scrape_temp` 精准识别标准刮削词干 + 含数字随机串/`.tmp`/`.bak` 的原子写残留文件（如 `poster.cpt54r`、`fanart.a8k2p9`、`tvshow.nfo.tmp`，严格排除媒体、字幕、压缩包及非刮削词干如 `unknown.bin`），并在 `_inspect_and_cleanup_source_show_dir` 与 `_clean_source_redundant_impl` 放行原地清理；同时 `sync_missing_root_assets_and_clean_shell` 拦截 `0` 字节损坏刮削图迁入归档库，直接随源端销毁。
+  - **新增专项回归测试**：`tests/test_v2587_alias_archive_and_scrape_temp.py`（覆盖 TMDB 323005 候选优先级与清源唯一别名目录自愈及多目录歧义拒止、TMDB 250446 `poster.cpt54r` 与 `0B` 刮削图自动收尾及未知二进制防误杀）；同步升级《MediaFlow待复核清理模块需求与交互方案》至 `v2.5.87`（重命名为 `MediaFlow待复核清理模块需求与交互方案-v2.5.87.md`）。
+
 ## v2.5.86（2026-11-28，已同步 GitHub）
 
 - **「缺集待补」主动放弃删源：无其他需保留季时一并清理剧集目录并强制刷新 CloudDrive2**：

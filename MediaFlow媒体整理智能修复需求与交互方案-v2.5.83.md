@@ -401,7 +401,7 @@ flowchart TD
 
 ## 13. 资料与适用边界
 
-- 本地关联现行方案：[剧集订阅清理](MediaFlow剧集订阅智能清理需求与交互方案-v2.5.72.md)、[电影订阅清理](MediaFlow电影订阅智能清理需求与交互方案-v2.5.72.md)、[异常剧集](MediaFlow异常剧集模块需求与交互方案-v2.5.61.md)、[待复核清理](MediaFlow待复核清理模块需求与交互方案-v2.5.61.md)、[缺集待补](MediaFlow缺集待补模块需求与交互方案-v2.5.86.md)、[连载留源](MediaFlow连载留源模块需求与交互方案-v2.5.61.md)、[齐全可归档](MediaFlow齐全可归档模块需求与交互方案-v2.5.84.md)、[综艺分段识别](MediaFlow综艺分段识别与订阅清理改进方案-2026-11-10.md)。
+- 本地关联现行方案：[剧集订阅清理](MediaFlow剧集订阅智能清理需求与交互方案-v2.5.72.md)、[电影订阅清理](MediaFlow电影订阅智能清理需求与交互方案-v2.5.72.md)、[异常剧集](MediaFlow异常剧集模块需求与交互方案-v2.5.61.md)、[待复核清理](MediaFlow待复核清理模块需求与交互方案-v2.5.87.md)、[缺集待补](MediaFlow缺集待补模块需求与交互方案-v2.5.86.md)、[连载留源](MediaFlow连载留源模块需求与交互方案-v2.5.61.md)、[齐全可归档](MediaFlow齐全可归档模块需求与交互方案-v2.5.84.md)、[综艺分段识别](MediaFlow综艺分段识别与订阅清理改进方案-2026-11-10.md)。
 - 上游 MoviePilot `v2.15.6` 源码依据：
   - [整理 API (`transfer.py`)](https://github.com/jxxghp/MoviePilot/blob/v2.15.6/app/api/endpoints/transfer.py)
   - [整理 Schema (`schemas/transfer.py`)](https://github.com/jxxghp/MoviePilot/blob/v2.15.6/app/schemas/transfer.py)

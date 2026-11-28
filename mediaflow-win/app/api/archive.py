@@ -214,12 +214,20 @@ async def _inspect_and_cleanup_source_show_dir(
             "migrated_assets": [],
         }
 
+    from app.core.auxiliary_inventory import is_ignorable_junk_or_scrape_temp
+
     non_dir_files = [f for f in source_items if not f.get("isDirectory")]
-    known_assets = [f for f in non_dir_files if _is_known_show_public_asset(f.get("name", ""))]
-    unknown_attachments = [f for f in non_dir_files if not _is_known_show_public_asset(f.get("name", ""))]
+    disposable_or_known = [
+        f for f in non_dir_files
+        if _is_known_show_public_asset(f.get("name", "")) or is_ignorable_junk_or_scrape_temp(f.get("name", ""))
+    ]
+    unknown_attachments = [
+        f for f in non_dir_files
+        if not (_is_known_show_public_asset(f.get("name", "")) or is_ignorable_junk_or_scrape_temp(f.get("name", "")))
+    ]
 
     migrated_assets: list[str] = []
-    if (subdirs or known_assets) and target_parent and not unknown_attachments:
+    if (subdirs or disposable_or_known) and target_parent and not unknown_attachments:
         try:
             norm_archive = posixpath.normpath(settings.archive_root.rstrip("/")) if settings.archive_root else ""
             if (not norm_source_root or not norm_archive
@@ -3119,9 +3127,65 @@ async def _clean_source_redundant_impl(
                     src_files = []
                 else:
                     src_files = await cd2.list_files(source_season_path, force_refresh=True)
-                target_files = await cd2.list_files(archive_target, force_refresh=True)
+                try:
+                    target_files = await cd2.list_files(archive_target, force_refresh=True)
+                except Exception as target_read_err:
+                    # 自愈回退（v2.5.87）：若 archive_target 被历史异名目录确认写成未新建的同名预期路径，
+                    # 在同一受控归档分类下按显式 [tmdbid=ID] 与季号严格核查是否存在唯一真实归档季目录。
+                    src_parent_for_alias = posixpath.dirname(expected_target)
+                    tag_alias = re.search(r"\[tmdbid[=:](\d+)\]", posixpath.basename(src_parent_for_alias), re.I)
+                    resolved_alias_target = ""
+                    if (
+                        norm_target == expected_target
+                        and tag_alias
+                        and str(rec.tmdb_id or "").strip() == tag_alias.group(1)
+                    ):
+                        archive_cat_dir = posixpath.dirname(src_parent_for_alias)
+                        try:
+                            cat_entries = await cd2.list_files(archive_cat_dir, force_refresh=True)
+                        except Exception:
+                            cat_entries = None
+                        if isinstance(cat_entries, list):
+                            tid_val = tag_alias.group(1)
+                            alias_matches = [
+                                posixpath.normpath(i["path"])
+                                for i in cat_entries
+                                if isinstance(i, dict)
+                                and i.get("isDirectory")
+                                and i.get("path")
+                                and re.search(rf"\[tmdbid[=:]{tid_val}\]", str(i.get("name") or ""), re.I)
+                            ]
+                            if len(alias_matches) == 1:
+                                alias_show_dir = alias_matches[0]
+                                try:
+                                    alias_seasons = await cd2.list_files(alias_show_dir, force_refresh=True)
+                                except Exception:
+                                    alias_seasons = None
+                                if isinstance(alias_seasons, list):
+                                    season_matches = [
+                                        posixpath.normpath(s["path"])
+                                        for s in alias_seasons
+                                        if isinstance(s, dict)
+                                        and s.get("isDirectory")
+                                        and s.get("path")
+                                        and _parse_season_number(str(s.get("name") or "")) == rec.season_number
+                                    ]
+                                    if len(season_matches) == 1:
+                                        resolved_alias_target = season_matches[0]
+                    if not resolved_alias_target:
+                        raise target_read_err
+                    log.info(
+                        "%s S%02d: 预期归档目录不存在，已按同分类唯一 [tmdbid=%s] 自愈对齐至真实归档季目录: %s",
+                        rec.show_name, rec.season_number, rec.tmdb_id, resolved_alias_target,
+                    )
+                    archive_target = resolved_alias_target
+                    norm_target = resolved_alias_target
+                    rec.archive_target_path = resolved_alias_target
+                    target_files = await cd2.list_files(archive_target, force_refresh=True)
                 checked_listing(src_files, source_season_path)
                 checked_listing(target_files, archive_target)
+
+                from app.core.auxiliary_inventory import is_ignorable_junk_or_scrape_temp
 
                 src_video_eps: set[int] = set()
                 src_subs: list[dict] = []
@@ -3164,7 +3228,10 @@ async def _clean_source_redundant_impl(
                             unrecognized_videos.append(sf)
                     elif is_subtitle_file(sf_name):
                         src_subs.append(sf)
-                    elif posixpath.splitext(sf_name)[1].lower() not in {".nfo", ".jpg", ".jpeg", ".png", ".webp"}:
+                    elif (
+                        not is_ignorable_junk_or_scrape_temp(sf_name)
+                        and posixpath.splitext(sf_name)[1].lower() not in {".nfo", ".jpg", ".jpeg", ".png", ".webp", ".tbn"}
+                    ):
                         raise ValueError("源端另有待核对文件：" + sf_name)
 
                 target_video_eps: set[int] = set()

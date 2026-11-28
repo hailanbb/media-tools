@@ -608,15 +608,17 @@ async def build_directory_merge_plan(
             sep = "\\" if ("\\" in parent_cat_dir and "/" not in parent_cat_dir) else "/"
             final_src_target = normalize_dir_path(f"{parent_cat_dir}{sep}{canon_dir_name}")
             source_target_will_create = True
-            if settings.archive_root and group.category_key.startswith("cat:"):
-                category_path = group.category_key.removeprefix("cat:").strip("/")
-                if category_path == "_root_":
-                    category_path = ""
-                archive_target_show = normalize_dir_path(posixpath.join(settings.archive_root, category_path, canon_dir_name))
-            elif archive_target_show:
-                archive_target_show = normalize_dir_path(
-                    f"{_path_dirname(archive_target_show)}/{canon_dir_name}"
-                )
+            has_existing_archive = any(c.get("exists_in_archive") for c in candidates)
+            if not has_existing_archive:
+                if settings.archive_root and group.category_key.startswith("cat:"):
+                    category_path = group.category_key.removeprefix("cat:").strip("/")
+                    if category_path == "_root_":
+                        category_path = ""
+                    archive_target_show = normalize_dir_path(posixpath.join(settings.archive_root, category_path, canon_dir_name))
+                elif archive_target_show:
+                    archive_target_show = normalize_dir_path(
+                        f"{_path_dirname(archive_target_show)}/{canon_dir_name}"
+                    )
 
     if not final_src_target:
         if chosen_target_option and chosen_target_option.get("source_show_paths"):
@@ -1680,12 +1682,31 @@ async def execute_directory_merge(
             union_eps = sorted(curr_eps | merged_eps_by_season.get(sn, set()))
             target_rec.recognized_episodes_json = json.dumps(union_eps)
             target_rec.local_episode_count = len(union_eps)
-            target_rec.archive_target_path = f"{archive_target_show}/Season {sn}"
 
             try:
                 t_ev = json.loads(target_rec.evidence_json or "{}")
             except Exception:
                 t_ev = {}
+            dual_primary = ""
+            if isinstance(t_ev, dict) and isinstance(t_ev.get("dual_archive_info"), dict):
+                dual_primary = normalize_dir_path(t_ev["dual_archive_info"].get("primary_path") or "")
+            existing_arc_set = {
+                normalize_dir_path(e.get("norm_path") or "")
+                for e in (json.loads(group.paths_json or "[]") if getattr(group, "paths_json", None) else [])
+                if isinstance(e, dict) and e.get("side") == "archive" and e.get("norm_path")
+            }
+            norm_arc_target_show = normalize_dir_path(archive_target_show)
+            if (
+                target_rec.status == "already_archived"
+                and existing_arc_set
+                and norm_arc_target_show not in existing_arc_set
+                and dual_primary
+                and any(dual_primary == ap or dual_primary.startswith(ap + "/") for ap in existing_arc_set)
+            ):
+                target_rec.archive_target_path = dual_primary
+            else:
+                target_rec.archive_target_path = f"{archive_target_show}/Season {sn}"
+
             old_dg = t_ev.get("directory_group") or {}
             t_ev["directory_group"] = {
                 **old_dg,

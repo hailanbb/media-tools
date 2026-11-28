@@ -9,13 +9,22 @@ _AUX_EXTENSIONS = {".nfo", ".jpg", ".jpeg", ".png", ".webp", ".avif", ".bmp", ".
 
 _IGNORABLE_JUNK_NAMES = frozenset({".ds_store", "thumbs.db", "desktop.ini"})
 
-# 匹配 Emby/Jellyfin/rsync/115 刮削原子写中断产生的隐藏临时文件（如 .tvshow.nfo.6TlXQz）及 AppleDouble (._*)
+# 匹配 Emby/Jellyfin/MP/115 刮削原子写中断产生的临时文件（如 .tvshow.nfo.6TlXQz、poster.cpt54r）及 AppleDouble (._*)
+_SCRAPE_STEM_PATTERN = (
+    r"(?:tvshow|season\d*|movie|poster|fanart|backdrop|banner|logo|clearlogo|clearart|"
+    r"landscape|thumb|folder|disc|season(?:\d+|-specials)-(?:poster|fanart|backdrop|banner|landscape|thumb))"
+)
+_PROTECTED_MEDIA_OR_SUB_EXTS = frozenset({
+    ".mkv", ".mp4", ".avi", ".ts", ".m2ts", ".mov", ".wmv", ".flv", ".webm", ".iso", ".strm",
+    ".srt", ".ass", ".ssa", ".vtt", ".sub", ".idx", ".sup",
+    ".zip", ".rar", ".7z", ".tar", ".gz",
+})
 _SCRAPE_TEMP_FILE_RE = re.compile(
-    r"(?i)^(?:"
-    r"\._.+|"
-    r"\.(?:tvshow|season\d*|movie|poster|fanart|backdrop|banner|logo|clearlogo|clearart|landscape|thumb|folder|disc|season(?:\d+|-specials)-(?:poster|fanart|backdrop|banner|landscape|thumb))"
-    r"\.[a-z0-9]{2,6}\.[a-z0-9_-]{4,24}"
-    r")$"
+    rf"(?i)^(?:"
+    rf"\._.+|"
+    rf"\.{_SCRAPE_STEM_PATTERN}(?:\.[a-z0-9]{{2,6}})?\.[a-z0-9_-]{{4,24}}|"
+    rf"{_SCRAPE_STEM_PATTERN}(?:\.(?:nfo|jpg|jpeg|png|webp|tbn))?\.(?:tmp|temp|bak|(?=[a-z0-9_-]*\d)[a-z0-9_-]{{5,24}})"
+    rf")$"
 )
 
 # 标准剧根及季级公共刮削元数据文件（可由媒体服务器随时重新生成，同名无需重复堆叠至子目录）
@@ -29,12 +38,15 @@ _STANDARD_SCRAPE_ASSET_RE = re.compile(
 
 
 def is_ignorable_junk_or_scrape_temp(name: str | None) -> bool:
-    """判断是否为操作系统隐藏垃圾或刮削器原子写临时残留文件（如 .DS_Store / Thumbs.db / .tvshow.nfo.6TlXQz）。"""
+    """判断是否为操作系统隐藏垃圾或刮削器原子写临时残留文件（如 .DS_Store / Thumbs.db / .tvshow.nfo.6TlXQz / poster.cpt54r）。"""
     s = str(name or "").strip()
     if not s:
         return False
     if s.casefold() in _IGNORABLE_JUNK_NAMES:
         return True
+    ext = posixpath.splitext(s)[1].lower()
+    if ext in _PROTECTED_MEDIA_OR_SUB_EXTS:
+        return False
     return bool(_SCRAPE_TEMP_FILE_RE.match(s))
 
 

@@ -293,11 +293,11 @@ def build_directory_group_target_options(
                 )
 
     def _pick_priority(c: dict[str, Any]) -> tuple[int, int, int, str]:
-        # 优先：与 TMDB 页面一致 + 归档库现有；其次：与 TMDB 页面一致；再次：归档库现有；最后按路径排序
+        # 优先：归档库现有且与 TMDB 页面一致；其次：归档库现有（避免撕裂现有归档库或指向未创建的目录）；再次：与 TMDB 页面一致；最后按路径排序
         return (
             0 if (c["matches_tmdb_page"] and c["exists_in_archive"]) else 1,
-            0 if c["matches_tmdb_page"] else 1,
             0 if c["exists_in_archive"] else 1,
+            0 if c["matches_tmdb_page"] else 1,
             c["target_path"],
         )
 
@@ -1165,6 +1165,11 @@ async def confirm_directory_group(
         for e in entries
         if isinstance(e, dict) and e.get("side") == "source"
     }
+    archive_paths = {
+        normalize_dir_path(e.get("norm_path") or "")
+        for e in entries
+        if isinstance(e, dict) and e.get("side") == "archive" and e.get("norm_path")
+    }
     recs = list(
         (
             await db.scalars(
@@ -1177,16 +1182,28 @@ async def confirm_directory_group(
         same_tid = bool(group.tmdb_id and str(rec.tmdb_id or "").strip() == str(group.tmdb_id).strip())
         if not in_src_paths and not same_tid:
             continue
-        if clean_mode == "use_archive_target" and norm_target:
-            if normalize_dir_path(rec.season_path) == normalize_dir_path(rec.show_path):
-                rec.archive_target_path = norm_target
-            else:
-                season_dir = posixpath.basename(normalize_dir_path(rec.season_path))
-                rec.archive_target_path = f"{norm_target}/{season_dir}"
         try:
             ev = json.loads(rec.evidence_json or "{}")
         except Exception:
             ev = {}
+        if clean_mode == "use_archive_target" and norm_target:
+            dual_primary = ""
+            if isinstance(ev, dict) and isinstance(ev.get("dual_archive_info"), dict):
+                dual_primary = normalize_dir_path(ev["dual_archive_info"].get("primary_path") or "")
+            # 若本季处于已归档待清源状态，且用户确认的是尚未创建的未来归档名，保留真实已核实的归档季路径以免清源报 not found
+            if (
+                rec.status == "already_archived"
+                and archive_paths
+                and norm_target not in archive_paths
+                and dual_primary
+                and any(dual_primary == ap or dual_primary.startswith(ap + "/") for ap in archive_paths)
+            ):
+                rec.archive_target_path = dual_primary
+            elif normalize_dir_path(rec.season_path) == normalize_dir_path(rec.show_path):
+                rec.archive_target_path = norm_target
+            else:
+                season_dir = posixpath.basename(normalize_dir_path(rec.season_path))
+                rec.archive_target_path = f"{norm_target}/{season_dir}"
         if isinstance(ev, dict):
             old_dg = ev.get("directory_group") if isinstance(ev.get("directory_group"), dict) else {}
             ev["directory_group"] = {
