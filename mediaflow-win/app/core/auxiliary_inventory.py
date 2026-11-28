@@ -1,10 +1,65 @@
-"""Validate preservation folders by contents, never by directory name alone."""
-import posixpath
+"""Validate legacy auxiliary folders by contents, never by directory name alone."""
 
-_AUX_EXTENSIONS = {".nfo", ".jpg", ".jpeg", ".png", ".webp", ".txt"}
+from __future__ import annotations
+
+import posixpath
+import re
+
+_AUX_EXTENSIONS = {".nfo", ".jpg", ".jpeg", ".png", ".webp", ".avif", ".bmp", ".gif", ".tbn", ".txt"}
+
+_IGNORABLE_JUNK_NAMES = frozenset({".ds_store", "thumbs.db", "desktop.ini"})
+
+# 匹配 Emby/Jellyfin/rsync/115 刮削原子写中断产生的隐藏临时文件（如 .tvshow.nfo.6TlXQz）及 AppleDouble (._*)
+_SCRAPE_TEMP_FILE_RE = re.compile(
+    r"(?i)^(?:"
+    r"\._.+|"
+    r"\.(?:tvshow|season\d*|movie|poster|fanart|backdrop|banner|logo|clearlogo|clearart|landscape|thumb|folder|disc|season(?:\d+|-specials)-(?:poster|fanart|backdrop|banner|landscape|thumb))"
+    r"\.[a-z0-9]{2,6}\.[a-z0-9_-]{4,24}"
+    r")$"
+)
+
+# 标准剧根及季级公共刮削元数据文件（可由媒体服务器随时重新生成，同名无需重复堆叠至子目录）
+_STANDARD_SCRAPE_ASSET_RE = re.compile(
+    r"(?i)^(?:"
+    r"tvshow\.nfo|season(?:\d+)?\.nfo|movie\.nfo|"
+    r"(?:poster|backdrop|fanart|banner|clearlogo|logo|clearart|landscape|thumb|folder|disc)\.(?:jpg|jpeg|png|webp|avif|bmp|gif|tbn)|"
+    r"season(?:\d+|-specials)-(?:poster|backdrop|fanart|banner|landscape|thumb)\.(?:jpg|jpeg|png|webp|avif|bmp|gif|tbn)"
+    r")$"
+)
+
+
+def is_ignorable_junk_or_scrape_temp(name: str | None) -> bool:
+    """判断是否为操作系统隐藏垃圾或刮削器原子写临时残留文件（如 .DS_Store / Thumbs.db / .tvshow.nfo.6TlXQz）。"""
+    s = str(name or "").strip()
+    if not s:
+        return False
+    if s.casefold() in _IGNORABLE_JUNK_NAMES:
+        return True
+    return bool(_SCRAPE_TEMP_FILE_RE.match(s))
+
+
+def is_standard_scrape_asset(name: str | None) -> bool:
+    """判断是否为标准剧根或季级公共刮削元数据文件（tvshow.nfo / season.nfo / poster / backdrop / fanart 等）。"""
+    s = str(name or "").strip()
+    if not s:
+        return False
+    return bool(_STANDARD_SCRAPE_ASSET_RE.match(s))
+
+
+def is_disposable_legacy_aux_file(name: str | None) -> bool:
+    """判断历史遗留「合并保留」目录内的文件是否属于可安全销毁的纯刮削/临时垃圾文件（严禁包含视频、字幕、STRM 或未知二进制）。"""
+    s = str(name or "").strip()
+    if not s:
+        return False
+    if is_ignorable_junk_or_scrape_temp(s):
+        return True
+    ext = posixpath.splitext(s)[1].lower()
+    return ext in _AUX_EXTENSIONS
+
 
 async def mark_verified_auxiliary_folders(files, client):
     result = [dict(f) for f in files]
+
     async def verify(path, depth, budget):
         if depth > 3 or budget[0] <= 0:
             return False
@@ -19,9 +74,10 @@ async def mark_verified_auxiliary_folders(files, client):
             if child.get("isDirectory"):
                 if not await verify(child_path, depth + 1, budget):
                     return False
-            elif posixpath.splitext(child.get("name", ""))[1].lower() not in _AUX_EXTENSIONS:
+            elif not is_disposable_legacy_aux_file(child.get("name", "")):
                 return False
         return True
+
     for item in result:
         item.pop("verified_auxiliary_only", None)
         if item.get("isDirectory") and item.get("name") == "合并保留" and item.get("path"):

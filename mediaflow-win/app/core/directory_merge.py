@@ -9,7 +9,7 @@
 - M06: 非标准及季号冲突：错季文件、无有效 S 标记或歧义标记列入待确认/冲突；特别篇保持非正片。
 - M07: 最终路径冲突拦截：重名或批量改名冲突前置拦截，不覆盖、不静默跳过后删源。
 - M08: 同集多版本：文件名不同的不同版本完整保留合并，重复版本标识保留。
-- M09: 公共资产及未知附件：tvshow.nfo、poster.jpg 等同名资产不覆盖，保全至“合并保留/{旧剧名}/”子目录；未知附件保全。
+- M09: 公共刮削资产与历史遗留目录治理（v2.5.85）：目标缺失的标准刮削资产直接迁入补齐，目标已存在的冗余同名刮削资产及遗留「合并保留」纯刮削目录经指纹核验后直接清理回收，严禁生成任何「合并保留」子目录；未知非刮削文件显式阻断待人工核实。
 - M10: 多季与组范围：旧目录仍有其他季度（如 S02）则保留旧剧根，仅清理旧季目录。
 - M11: 实物后验与并发保护：写入前后验目标文件存在、源文件离开；仅在确认为空时清理旧目录。
 - M12: 幂等与失败恢复：已完成文件不重复移动，清理失败只重试收尾，刷新失败只重试刷新。
@@ -50,13 +50,30 @@ from app.services.gap_fill_tracker import refresh_task_summary
 
 log = logging.getLogger("mediaflow.directory_merge")
 
-_IGNORABLE_JUNK_FILES = frozenset({".ds_store", "thumbs.db", "desktop.ini"})
+from app.core.auxiliary_inventory import (
+    is_disposable_legacy_aux_file,
+    is_ignorable_junk_or_scrape_temp,
+    is_standard_scrape_asset,
+)
+
 _SPECIAL_SEASON_DIR_RE = re.compile(r"(?i)^(?:Season\s*0+|S0+|Specials)$")
 
 
 def _is_ignorable_junk_file(name: str | None) -> bool:
-    """判断是否为操作系统自动生成的无业务价值隐藏垃圾文件。"""
-    return str(name or "").strip().casefold() in _IGNORABLE_JUNK_FILES
+    """判断是否为操作系统隐藏垃圾或刮削器原子写临时残留文件（如 .DS_Store / .tvshow.nfo.6TlXQz）。"""
+    return is_ignorable_junk_or_scrape_temp(name)
+
+
+def _make_flat_noncolliding_name(filename: str, tag: str, existing_cf: set[str]) -> str:
+    """在同一扁平目录内生成不重名的区分文件名，绝不创建「合并保留」子目录。"""
+    stem, ext = posixpath.splitext(filename)
+    clean_tag = re.sub(r'[\\/:*?"<>|\[\]]+', "_", str(tag or "alt")).strip(" ._")[:28] or "alt"
+    cand = f"{stem} [源-{clean_tag}]{ext}"
+    idx = 2
+    while cand.casefold() in existing_cf:
+        cand = f"{stem} [源-{clean_tag}-{idx}]{ext}"
+        idx += 1
+    return cand
 
 
 def split_season_episode_boundary(filename: str, season_number: int = 1) -> tuple[str, str] | None:
@@ -325,13 +342,14 @@ async def list_files_robust(
         try:
             with os.scandir(norm_dir) as it:
                 for entry in it:
+                    is_dir = entry.is_dir()
                     stat = entry.stat()
                     results.append({
                         "name": entry.name,
-                        "path": normalize_dir_path(entry.path),
-                        "isDirectory": entry.is_dir(),
-                        "size": stat.st_size if not entry.is_dir() else 0,
-                        "modified": str(stat.st_mtime_ns),
+                        "path": normalize_dir_path(entry.path.replace("\\", "/")),
+                        "isDirectory": is_dir,
+                        "size": stat.st_size if not is_dir else 0,
+                        "modified": "" if is_dir else str(stat.st_mtime_ns),
                         "id": f"{stat.st_dev}:{stat.st_ino}",
                     })
             return sorted(results, key=lambda x: x["name"])
@@ -690,27 +708,36 @@ async def build_directory_merge_plan(
     deferred_active_downloads: list[dict[str, Any]] = []
     assets_to_preserve: list[dict[str, Any]] = []
     junk_files_to_clean: list[dict[str, Any]] = []
+    redundant_scrape_to_clean: list[dict[str, Any]] = []
     remaining_seasons: list[str] = []
     directories_to_clean: list[str] = []
     per_season_prefixes: dict[int, dict[str, Any]] = {}
 
     async def inspect_empty_subtree(
-        dir_path: str, *, depth: int = 0, max_depth: int = 3
-    ) -> tuple[bool, list[dict[str, Any]], list[str]]:
-        """只读递归盘点子目录；仅当内部 0 有效文件（全空或仅系统垃圾）时返回可安全回收清单。"""
+        dir_path: str, *, depth: int = 0, max_depth: int = 3, allow_legacy_aux: bool = False
+    ) -> tuple[bool, list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+        """只读递归盘点子目录：
+        - 普通子目录：仅当内部 0 有效文件（全空或仅系统/刮削临时垃圾）时返回可安全回收清单；
+        - 历史遗留「合并保留」目录 (allow_legacy_aux=True)：若内部 100% 为刮削图/NFO/txt 或临时垃圾（0 视频/字幕/未知文件），一并纳入原地清理。
+        """
         items = await read_inventory(dir_path)
         sub_junk: list[dict[str, Any]] = []
+        sub_scrape: list[dict[str, Any]] = []
         sub_dirs: list[str] = []
         for it in items:
             it_name = str(it.get("name") or "")
             it_path = it.get("path") or f"{dir_path.rstrip('/')}/{it_name}"
             if it.get("isDirectory"):
                 if depth >= max_depth:
-                    return False, [], []
-                ok_child, c_junk, c_dirs = await inspect_empty_subtree(it_path, depth=depth + 1, max_depth=max_depth)
+                    return False, [], [], []
+                child_aux = allow_legacy_aux or (it_name == "合并保留")
+                ok_child, c_junk, c_scrape, c_dirs = await inspect_empty_subtree(
+                    it_path, depth=depth + 1, max_depth=max_depth, allow_legacy_aux=child_aux
+                )
                 if not ok_child:
-                    return False, [], []
+                    return False, [], [], []
                 sub_junk.extend(c_junk)
+                sub_scrape.extend(c_scrape)
                 sub_dirs.extend(c_dirs)
             else:
                 if _is_ignorable_junk_file(it_name):
@@ -719,17 +746,33 @@ async def build_directory_merge_plan(
                         "file_name": it_name,
                         "source_snapshot": build_file_fingerprints([it]).get(it_path),
                     })
+                elif allow_legacy_aux and is_disposable_legacy_aux_file(it_name):
+                    sub_scrape.append({
+                        "source_path": it_path,
+                        "file_name": it_name,
+                        "source_snapshot": build_file_fingerprints([it]).get(it_path),
+                        "reason": "清理历史遗留「合并保留」冗余刮削文件",
+                    })
                 else:
-                    return False, [], []
+                    return False, [], [], []
         sub_dirs.append(dir_path)
-        return True, sub_junk, sub_dirs
+        return True, sub_junk, sub_scrape, sub_dirs
 
-    # 预先读取目标根文件以处理剧根公共资产 (M09)
+    # 预先读取目标根文件以处理剧根公共刮削资产 (M09 · v2.5.85 废除生成合并保留)
     target_root_files = [] if source_target_will_create else await read_inventory(final_src_target)
     target_root_names_lower = {tf["name"].lower() for tf in target_root_files if not tf.get("isDirectory")}
-    target_s0_names_cf: set[str] | None = None
+    # 若目标规范目录自身已残留旧版生成的「合并保留」纯刮削目录，顺带核验并纳入清理
+    for tf in target_root_files:
+        if tf.get("isDirectory") and tf.get("name") == "合并保留":
+            t_hb_path = tf.get("path") or f"{final_src_target}/合并保留"
+            ok_hb, hb_junk, hb_scrape, hb_dirs = await inspect_empty_subtree(t_hb_path, allow_legacy_aux=True)
+            if ok_hb:
+                junk_files_to_clean.extend(hb_junk)
+                redundant_scrape_to_clean.extend(hb_scrape)
+                directories_to_clean.extend(hb_dirs)
+    target_s0_map_cf: dict[str, dict[str, Any]] | None = None
 
-    # 检查旧剧根公共资产、空壳子目录、Season 0 特辑与未纳入本次合并的其他季
+    # 检查旧剧根公共刮削资产、空壳子目录、Season 0 特辑与未纳入本次合并的其他季
     for old_src_show in merge_from_show_paths:
         root_entries = await read_inventory(old_src_show)
         old_remaining_for_show: list[str] = []
@@ -744,27 +787,29 @@ async def build_directory_merge_plan(
                 is_special_dir = bool(_SPECIAL_SEASON_DIR_RE.match(dir_name))
 
                 if is_special_dir and all_seasons:
-                    ok_empty, sp_junk, sp_dirs = await inspect_empty_subtree(dir_path)
+                    ok_empty, sp_junk, sp_scrape, sp_dirs = await inspect_empty_subtree(dir_path)
                     if ok_empty:
                         junk_files_to_clean.extend(sp_junk)
+                        redundant_scrape_to_clean.extend(sp_scrape)
                         directories_to_clean.extend(sp_dirs)
                         continue
                     sp_entries = await read_inventory(dir_path)
-                    if target_s0_names_cf is None:
+                    if target_s0_map_cf is None:
                         t_s0_exists = any(
                             e.get("isDirectory") and _SPECIAL_SEASON_DIR_RE.match(e.get("name", ""))
                             for e in target_root_files
                         )
                         t_s0_files = await read_inventory(f"{final_src_target}/Season 0") if t_s0_exists else []
-                        target_s0_names_cf = {str(x.get("name") or "").casefold() for x in t_s0_files if not x.get("isDirectory")}
+                        target_s0_map_cf = {str(x.get("name") or "").casefold(): x for x in t_s0_files if not x.get("isDirectory")}
                     sp_blocked = False
                     for sp_f in sp_entries:
                         sp_name = str(sp_f.get("name") or "")
                         sp_path = sp_f.get("path") or f"{dir_path}/{sp_name}"
                         if sp_f.get("isDirectory"):
-                            ok_sub, sj, sd = await inspect_empty_subtree(sp_path)
+                            ok_sub, sj, ss, sd = await inspect_empty_subtree(sp_path, allow_legacy_aux=(sp_name == "合并保留"))
                             if ok_sub:
                                 junk_files_to_clean.extend(sj)
+                                redundant_scrape_to_clean.extend(ss)
                                 directories_to_clean.extend(sd)
                                 continue
                             isolated_conflicts.append({
@@ -783,18 +828,53 @@ async def build_directory_merge_plan(
                                 "source_snapshot": build_file_fingerprints([sp_f]).get(sp_path),
                             })
                             continue
-                        if sp_name.casefold() not in target_s0_names_cf:
-                            dest_dir = f"{final_src_target}/Season 0"
-                            target_s0_names_cf.add(sp_name.casefold())
+                        if is_standard_scrape_asset(sp_name):
+                            if sp_name.casefold() not in target_s0_map_cf:
+                                dest_dir = f"{final_src_target}/Season 0"
+                                target_s0_map_cf[sp_name.casefold()] = sp_f
+                                assets_to_preserve.append({
+                                    "source_path": sp_path,
+                                    "file_name": sp_name,
+                                    "target_dir": dest_dir,
+                                    "target_path": f"{dest_dir}/{sp_name}",
+                                    "source_snapshot": build_file_fingerprints([sp_f]).get(sp_path),
+                                    "description": "补齐 Season 0 刮削元数据",
+                                })
+                            else:
+                                redundant_scrape_to_clean.append({
+                                    "source_path": sp_path,
+                                    "file_name": sp_name,
+                                    "source_snapshot": build_file_fingerprints([sp_f]).get(sp_path),
+                                    "reason": "目标 Season 0 已存在同名刮削元数据，清理源端冗余副本",
+                                })
+                            continue
+                        dest_dir = f"{final_src_target}/Season 0"
+                        if sp_name.casefold() not in target_s0_map_cf:
+                            final_sp_name = sp_name
                             dest_desc = "先导特辑/特别篇迁入目标 Season 0"
                         else:
-                            dest_dir = f"{final_src_target}/Season 0/合并保留/{old_dir_tag}"
-                            dest_desc = f"特辑同名防覆盖保全至 Season 0/合并保留/{old_dir_tag}"
+                            existing_sp = target_s0_map_cf[sp_name.casefold()]
+                            if int(sp_f.get("size") or 0) > 0 and int(sp_f.get("size") or 0) == int(existing_sp.get("size") or 0):
+                                collision_dedup_items.append({
+                                    "season_number": 0,
+                                    "source_path": sp_path,
+                                    "source_filename": sp_name,
+                                    "source_snapshot": build_file_fingerprints([sp_f]).get(sp_path),
+                                    "target_snapshot": build_file_fingerprints([existing_sp]).get(existing_sp.get("path")),
+                                    "replaced_by": existing_sp["name"],
+                                    "replaced_by_path": existing_sp.get("path", ""),
+                                    "reason": f"目标 Season 0 已存在同大小同名特辑 [{existing_sp['name']}]，清理冗余副本",
+                                })
+                                continue
+                            final_sp_name = _make_flat_noncolliding_name(sp_name, old_dir_tag, set(target_s0_map_cf.keys()))
+                            dest_desc = f"特辑同名异文件，扁平保留于目标 Season 0 ({final_sp_name})"
+                        target_s0_map_cf[final_sp_name.casefold()] = sp_f
                         assets_to_preserve.append({
                             "source_path": sp_path,
-                            "file_name": sp_name,
+                            "file_name": final_sp_name,
+                            "orig_file_name": sp_name,
                             "target_dir": dest_dir,
-                            "target_path": f"{dest_dir}/{sp_name}",
+                            "target_path": f"{dest_dir}/{final_sp_name}",
                             "source_snapshot": build_file_fingerprints([sp_f]).get(sp_path),
                             "description": dest_desc,
                         })
@@ -807,16 +887,19 @@ async def build_directory_merge_plan(
                     remaining_seasons.append(rem_label)
                     old_remaining_for_show.append(rem_label)
                 elif not m_s:
-                    ok_empty, ex_junk, ex_dirs = await inspect_empty_subtree(dir_path)
+                    ok_empty, ex_junk, ex_scrape, ex_dirs = await inspect_empty_subtree(
+                        dir_path, allow_legacy_aux=(dir_name == "合并保留")
+                    )
                     if ok_empty:
                         junk_files_to_clean.extend(ex_junk)
+                        redundant_scrape_to_clean.extend(ex_scrape)
                         directories_to_clean.extend(ex_dirs)
                         continue
                     rem_label = f"{old_dir_tag}/{dir_name}"
                     remaining_seasons.append(rem_label)
                     old_remaining_for_show.append(rem_label)
                     can_execute = False
-                    block_reasons.append(f"季外子目录尚未纳入保全计划: {rem_label}")
+                    block_reasons.append(f"季外子目录包含非刮削待核实内容: {rem_label}")
             else:
                 fname = re_item["name"]
                 fpath = re_item["path"]
@@ -827,26 +910,36 @@ async def build_directory_merge_plan(
                         "source_snapshot": build_file_fingerprints([re_item]).get(fpath),
                     })
                     continue
-                is_public_asset = bool(
-                    re.match(r"(?i)^(tvshow\.nfo|poster\..+|fanart\..+|banner\..+|clearlogo\..+|logo\..+)$", fname)
-                )
-                if is_public_asset and fname.lower() not in target_root_names_lower:
-                    dest_path = f"{final_src_target}/{fname}"
-                    dest_dir = final_src_target
-                    dest_desc = "迁入目标剧根"
-                    target_root_names_lower.add(fname.lower())
+                if is_standard_scrape_asset(fname):
+                    if fname.lower() not in target_root_names_lower:
+                        target_root_names_lower.add(fname.lower())
+                        assets_to_preserve.append({
+                            "source_path": fpath,
+                            "file_name": fname,
+                            "target_dir": final_src_target,
+                            "target_path": f"{final_src_target}/{fname}",
+                            "source_snapshot": build_file_fingerprints([re_item]).get(fpath),
+                            "description": "迁入目标剧根补齐刮削元数据",
+                        })
+                    else:
+                        redundant_scrape_to_clean.append({
+                            "source_path": fpath,
+                            "file_name": fname,
+                            "source_snapshot": build_file_fingerprints([re_item]).get(fpath),
+                            "reason": f"目标剧根已存在同名刮削元数据 [{fname}]，清理旧目录冗余副本",
+                        })
                 else:
-                    dest_dir = f"{final_src_target}/合并保留/{old_dir_tag}"
-                    dest_path = f"{dest_dir}/{fname}"
-                    dest_desc = f"保全至合并保留子目录 ({old_dir_tag})"
-                assets_to_preserve.append({
-                    "source_path": fpath,
-                    "file_name": fname,
-                    "target_dir": dest_dir,
-                    "target_path": dest_path,
-                    "source_snapshot": build_file_fingerprints([re_item]).get(fpath),
-                    "description": dest_desc,
-                })
+                    # 非标准刮削、非媒体未知文件：不制造「合并保留」污染目录，直接标记冲突由人工确认
+                    isolated_conflicts.append({
+                        "season_number": 0,
+                        "source_path": fpath,
+                        "filename": fname,
+                        "reason": f"旧剧根存在未知非刮削文件 [{fname}]，保留原目录待人工核实",
+                    })
+                    show_has_isolated_or_deferred = True
+                    if not all_seasons:
+                        can_execute = False
+                        block_reasons.append(f"旧剧根存在未知非刮削文件: {fname}")
 
         # 逐季规划移动与改名 (G07, G08, G09)
         for cur_sn in target_seasons:
@@ -886,14 +979,18 @@ async def build_directory_merge_plan(
 
             for f in old_season_files:
                 if f.get("isDirectory"):
-                    sub_dir_path = f.get("path") or f"{old_season_dir}/{f.get('name', '')}"
-                    ok_sub, sj, sd = await inspect_empty_subtree(sub_dir_path)
+                    sub_name = str(f.get("name") or "")
+                    sub_dir_path = f.get("path") or f"{old_season_dir}/{sub_name}"
+                    ok_sub, sj, ss, sd = await inspect_empty_subtree(
+                        sub_dir_path, allow_legacy_aux=(sub_name == "合并保留")
+                    )
                     if ok_sub:
                         junk_files_to_clean.extend(sj)
+                        redundant_scrape_to_clean.extend(ss)
                         directories_to_clean.extend(sd)
                         continue
                     isolated_conflicts.append({"season_number": cur_sn, "source_path": f.get("path"),
-                        "filename": f.get("name"), "reason": "季内子目录尚未完整盘点，保留原目录"})
+                        "filename": f.get("name"), "reason": "季内子目录含非刮削待核对文件，保留原目录"})
                     season_has_blocked = True
                     show_has_isolated_or_deferred = True
                     continue
@@ -954,14 +1051,40 @@ async def build_directory_merge_plan(
                 # 拆分前缀与季集标记边界 (M03)
                 boundary = split_season_episode_boundary(fname, cur_sn)
                 if not boundary:
-                    # season.nfo、海报等季级附件不含 SxxEyy，不能当作错命名视频。
-                    # 不覆盖规范目录已有资料，原名保全到有来源标识的目录。
+                    # season.nfo、海报等标准季级刮削文件：目标季缺失则补齐，已存在则作为冗余刮削安全清理，绝不生成「合并保留」子目录
                     if not is_video_file(fname) and not is_subtitle_file(fname):
-                        dest_dir = f"{target_season_dir}/合并保留/{posixpath.basename(old_src_show)}"
-                        assets_to_preserve.append({"source_path": fpath, "file_name": fname,
-                            "target_dir": dest_dir, "target_path": f"{dest_dir}/{fname}",
-                            "source_snapshot": build_file_fingerprints([f]).get(fpath),
-                            "description": "保全季级附件（保留原名，不覆盖已有资料）"})
+                        t_names_cf = {k.casefold() for k in t_file_map} | {k.casefold() for k in planned_names}
+                        if is_standard_scrape_asset(fname) or is_disposable_legacy_aux_file(fname):
+                            if is_standard_scrape_asset(fname) and fname.casefold() not in t_names_cf:
+                                planned_names.add(fname)
+                                assets_to_preserve.append({
+                                    "source_path": fpath,
+                                    "file_name": fname,
+                                    "target_dir": target_season_dir,
+                                    "target_path": f"{target_season_dir}/{fname}",
+                                    "source_snapshot": build_file_fingerprints([f]).get(fpath),
+                                    "description": "迁入目标季补齐刮削元数据",
+                                })
+                            else:
+                                redundant_scrape_to_clean.append({
+                                    "source_path": fpath,
+                                    "file_name": fname,
+                                    "source_snapshot": build_file_fingerprints([f]).get(fpath),
+                                    "reason": f"目标季已存在或无需重复保留刮削文件 [{fname}]，清理冗余副本",
+                                })
+                            continue
+                        # 未知非刮削附件：显式隔离由人工确认，不建合并保留目录
+                        isolated_conflicts.append({
+                            "season_number": cur_sn,
+                            "source_path": fpath,
+                            "filename": fname,
+                            "reason": f"季内存在未知非刮削附件 [{fname}]，已局部隔离",
+                        })
+                        season_has_blocked = True
+                        show_has_isolated_or_deferred = True
+                        if not all_seasons:
+                            can_execute = False
+                            block_reasons.append(f"季内存在未知非刮削附件: {fname}")
                         continue
                     if all_seasons:
                         isolated_conflicts.append({
@@ -981,7 +1104,7 @@ async def build_directory_merge_plan(
                 new_filename = f"{s_chosen_prefix}{orig_suffix}"
                 dest_season_dir = target_season_dir
 
-                # 冲突检测与智能防覆盖处置 (M07, G09)
+                # 冲突检测与智能防覆盖处置 (M07, G09 · 扁平共存零子目录)
                 is_conflict = False
                 conflict_reason = ""
                 collision_resolution = ""
@@ -1017,15 +1140,14 @@ async def build_directory_merge_plan(
                                 "reason": f"与目标目录同名文件 [{existing_f['name']}] 为同内容等价副本，转入副本清理",
                             })
                             continue
-                        # 不同内容或无法证明等价 -> 优先保留原区分前缀，仍碰撞则放入保留子目录 (G09)
+                        # 不同内容或无法证明等价 -> 优先保留原区分前缀；若仍重名则在同季目录内附加安全区分标签扁平存放（供后续批量冗余清理识别选优，绝不创建合并保留子目录）
                         if fname not in t_file_map and fname not in planned_names:
                             new_filename = fname
                             collision_resolution = "keep_original_prefix"
                         else:
-                            old_dir_tag = posixpath.basename(old_src_show)
-                            dest_season_dir = f"{target_season_dir}/合并保留/{old_dir_tag}"
-                            new_filename = fname
-                            collision_resolution = "preserve_in_subdir"
+                            occupied_cf = {k.casefold() for k in t_file_map} | {k.casefold() for k in planned_names}
+                            new_filename = _make_flat_noncolliding_name(fname, old_dir_tag, occupied_cf)
+                            collision_resolution = "flat_disambiguated_name"
                     else:
                         is_conflict = True
                         conflict_reason = (
@@ -1080,7 +1202,7 @@ async def build_directory_merge_plan(
         and not files_to_move
         and not collision_dedup_items
         and not assets_to_preserve
-        and bool(directories_to_clean or junk_files_to_clean)
+        and bool(directories_to_clean or junk_files_to_clean or redundant_scrape_to_clean)
         and not remaining_seasons
         and not isolated_conflicts
         and not deferred_active_downloads
@@ -1092,6 +1214,7 @@ async def build_directory_merge_plan(
         or assets_to_preserve
         or directories_to_clean
         or junk_files_to_clean
+        or redundant_scrape_to_clean
         or align_only
     )
     if can_execute and not has_any_action:
@@ -1175,6 +1298,7 @@ async def build_directory_merge_plan(
         "isolated_conflicts": isolated_conflicts,
         "deferred_active_downloads": deferred_active_downloads,
         "assets_to_preserve": assets_to_preserve,
+        "redundant_scrape_to_clean": redundant_scrape_to_clean,
         "junk_files_to_clean": junk_files_to_clean,
         "is_empty_shell_cleanup": is_empty_shell_cleanup,
         "directories_to_clean": directories_to_clean,
@@ -1216,9 +1340,37 @@ async def execute_directory_merge(
 
     grp_ev = json.loads(group.evidence_json or "{}") if getattr(group, "evidence_json", None) else {}
     plan = grp_ev.get("latest_merge_plan") or {}
+    last_receipt = grp_ev.get("last_merge_receipt") or {}
 
     if not plan or (plan_id and plan.get("plan_id") != plan_id):
         raise ValueError("未找到匹配且有效的合并执行计划，请重新生成预览")
+
+    # M12 幂等返回：同一 plan_id 已完整确认执行过时，直接返回已完成回执（若有待重试刷新则仅补刷目录）
+    if getattr(group, "status", None) == "confirmed" and last_receipt.get("plan_id") and last_receipt.get("plan_id") == plan.get("plan_id"):
+        cd2_idem = cd2_client or CloudDrive2Client()
+        still_failed: list[str] = []
+        for rf_item in last_receipt.get("refresh_failed") or []:
+            rf_dir = str(rf_item).split(": ", 1)[0].strip()
+            if rf_dir:
+                try:
+                    await cd2_idem.list_files(rf_dir, force_refresh=True)
+                except Exception as e:
+                    still_failed.append(f"{rf_dir}: {e}")
+        return {
+            "ok": True,
+            "idempotent": True,
+            "group_id": group.id,
+            "plan_id": plan.get("plan_id"),
+            "affected_seasons": last_receipt.get("affected_seasons") or [],
+            "summary": {},
+            "moved_count": len(last_receipt.get("moved_files") or []),
+            "renamed_count": len(last_receipt.get("renamed_files") or []),
+            "dedup_cleaned_count": len(last_receipt.get("dedup_cleaned_files") or []),
+            "cleaned_dirs": last_receipt.get("cleaned_dirs") or [],
+            "preserved_assets": last_receipt.get("preserved_assets") or [],
+            "refresh_failed": still_failed,
+            "message": "该合并计划已完成，幂等返回已完成回执",
+        }
 
     if not plan.get("can_execute"):
         reasons = "; ".join(plan.get("block_reasons") or ["存在阻止合并的冲突"])
@@ -1234,6 +1386,7 @@ async def execute_directory_merge(
     files_to_move = plan.get("files_to_move") or []
     collision_dedup_items = plan.get("collision_dedup_items") or []
     assets_to_preserve = plan.get("assets_to_preserve") or []
+    redundant_scrape_to_clean = plan.get("redundant_scrape_to_clean") or []
     junk_files_to_clean = plan.get("junk_files_to_clean") or []
     directories_to_clean = sorted(
         list(dict.fromkeys(plan.get("directories_to_clean") or [])),
@@ -1285,6 +1438,13 @@ async def execute_directory_merge(
         if not junk.get("source_snapshot"):
             raise RuntimeError("系统垃圾文件计划缺少文件指纹，请更新归并预览")
         await verify_snapshot(junk["source_path"], junk["source_snapshot"], source_check_cache)
+    for sc in redundant_scrape_to_clean:
+        sc_name = sc.get("file_name") or ""
+        if not (is_standard_scrape_asset(sc_name) or is_disposable_legacy_aux_file(sc_name)):
+            raise RuntimeError(f"安全拦截：禁止将非刮削元数据纳入冗余清理: {sc_name}")
+        if not sc.get("source_snapshot"):
+            raise RuntimeError("冗余刮削清理计划缺少文件指纹，请更新归并预览")
+        await verify_snapshot(sc["source_path"], sc["source_snapshot"], source_check_cache)
 
     prepared_dirs: dict[str, set[str]] = {}
     moved_files: list[str] = []
@@ -1372,9 +1532,26 @@ async def execute_directory_merge(
         if item["new_filename"] not in checked_dirs_cache[t_dir]:
             raise RuntimeError(f"双端后验失败：目标目录 {t_dir} 未见合并文件 {item['new_filename']}")
 
-    # 3B. 安全清理已核验指纹的操作系统隐藏垃圾文件 (.DS_Store / Thumbs.db / desktop.ini)
+    # 3B. 安全清理已核验指纹的冗余同名刮削元数据与操作系统/刮削器隐藏垃圾文件（绝不创建合并保留）
     deleted_children_by_parent: dict[str, set[str]] = {}
     cleaned_junk_files: list[str] = []
+    for sc in redundant_scrape_to_clean:
+        sc_path = sc["source_path"]
+        sc_name = sc["file_name"]
+        try:
+            await verify_snapshot(sc_path, sc["source_snapshot"])
+            if os.path.exists(sc_path):
+                os.remove(sc_path)
+            elif cd2 is not None:
+                res_sc = await cd2.delete_file(sc_path)
+                if not (isinstance(res_sc, dict) and res_sc.get("success") is True):
+                    raise RuntimeError("云盘删除冗余刮削元数据未确认成功")
+            cleaned_junk_files.append(sc_name)
+            parent_key = normalize_dir_path(_path_dirname(sc_path))
+            deleted_children_by_parent.setdefault(parent_key, set()).add(sc_name.casefold())
+        except Exception as e:
+            raise RuntimeError(f"清理冗余刮削元数据失败，已暂停空目录收尾: {sc_path}") from e
+
     for junk in junk_files_to_clean:
         j_path = junk["source_path"]
         j_name = junk["file_name"]

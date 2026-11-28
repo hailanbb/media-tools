@@ -90,30 +90,30 @@ class CleanupRegression(unittest.TestCase):
         self.assertNotIn(SRC, disk.deleted)
         self.assertEqual(self.rec.status, 'already_archived')
 
-    def test_pure_auxiliary_tree_is_preserved_then_season_deleted(self):
+    def test_pure_auxiliary_tree_is_cleaned_in_place_then_season_deleted(self):
         disk = Cloud()
         result = self.run_cleanup(disk)
         self.assertTrue(result.ok, result.message)
-        self.assertEqual(disk.deleted, [SRC])
-        self.assertIn(DST + '/合并保留/旧目录', disk.tree)
-        self.assertEqual(disk.tree[DST + '/合并保留/旧目录'][0]['name'], 'season.nfo')
+        self.assertIn(SRC, disk.deleted)
+        self.assertNotIn(AUX, disk.tree)
+        self.assertNotIn(DST + '/合并保留', disk.tree)
+        self.assertEqual(disk.moves, [])
         self.assertEqual(self.rec.status, 'cleaned_redundant')
-        self.assertIn('1 个附件', self.rec.status_detail)
+        self.assertIn('1 个冗余刮削文件', self.rec.status_detail)
         logs = self.session.query(f.OperationLog).all()
         receipt = json.loads(logs[0].detail_json)['preserved_auxiliary_folders'][0]
-        self.assertEqual(receipt['target_path'], DST + '/合并保留')
+        self.assertTrue(receipt['cleaned_in_place'])
+        self.assertEqual(receipt['target_path'], '')
         self.assertTrue(all(force for _, force in disk.reads))
 
     def test_existing_archive_folder_and_same_name_assets_are_not_overwritten(self):
         disk = Cloud()
-        kept = DST + '/合并保留'
-        disk.tree[DST].append(folder(kept))
-        disk.tree[kept] = [item(kept + '/season.nfo', 999)]
+        disk.tree[DST].append(item(DST + '/season.nfo', 999))
         result = self.run_cleanup(disk)
         self.assertTrue(result.ok, result.message)
-        self.assertEqual(disk.tree[kept][0]['size'], 999)
-        self.assertTrue(disk.moves[0][1].startswith(kept + '/清源-'))
-        self.assertTrue(disk.moves[0][2])
+        self.assertEqual([x['size'] for x in disk.tree[DST] if x['name'] == 'season.nfo'], [999])
+        self.assertNotIn(DST + '/合并保留', disk.tree)
+        self.assertEqual(disk.moves, [])
 
     def test_empty_preservation_folder_can_be_cleaned(self):
         disk = Cloud(); disk.tree[AUX] = []
@@ -161,83 +161,119 @@ class CleanupRegression(unittest.TestCase):
         self.assertEqual(disk.moves, [])
 
     def test_move_failure_is_not_cleanup_success(self):
-        disk = Cloud(); disk.move_result = {'success': False}
+        disk = Cloud()
+        disk.tree[SRC].append(item(SRC + '/Show.S01E01.srt'))
+        disk.move_result = {'success': False}
         self.assert_blocked(self.run_cleanup(disk), disk)
 
-    def test_false_positive_move_ack_does_not_allow_delete(self):
+    def test_false_positive_delete_ack_on_aux_does_not_allow_season_delete(self):
         disk = Cloud()
-        async def noop(*args, **kwargs):
-            return {'success': True}
-        disk.move_file = noop
+        original = disk.delete_file
+        async def fake_del(path):
+            return {'success': True} if path.startswith(AUX) else await original(path)
+        disk.delete_file = fake_del
         self.assert_blocked(self.run_cleanup(disk), disk)
 
     def test_destination_missing_attachment_blocks_deletion(self):
-        disk = Cloud(); original = disk.move_file
-        async def move(*args, **kwargs):
-            result = await original(*args, **kwargs)
-            disk.tree[DST + '/合并保留/旧目录'] = []
-            return result
-        disk.move_file = move
-        self.assert_blocked(self.run_cleanup(disk), disk)
-        # 原附件目录已移走也不能在下一次重试绕过失败的保全后验。
+        disk = Cloud()
+        disk.tree[SRC] = [item(SRC + '/Show.S01E01.mkv')]
+        kept = DST + '/合并保留'
+        disk.tree[DST].append(folder(kept))
+        disk.tree[kept] = []
+        legacy_ev = {
+            'source_cleanup_auxiliary': {
+                'source_path': AUX,
+                'target_path': kept,
+                'inventory': {'旧目录/season.nfo': item(AUX + '/旧目录/season.nfo')},
+                'state': 'pending',
+            }
+        }
+        self.rec = self.season(
+            status='already_archived', archive_target_path=DST,
+            duplicate_episodes_json='[]', evidence_json=json.dumps(legacy_ev)
+        )
         self.assert_blocked(self.run_cleanup(disk, new=False), disk)
-        self.assertEqual(len(disk.moves), 1)
 
     def test_destination_size_mismatch_blocks_deletion(self):
-        disk = Cloud(); original = disk.move_file
-        async def move(*args, **kwargs):
-            result = await original(*args, **kwargs)
-            disk.tree[DST + '/合并保留/旧目录'][0]['size'] = 1
-            return result
-        disk.move_file = move
-        self.assert_blocked(self.run_cleanup(disk), disk)
+        disk = Cloud()
+        disk.tree[SRC] = [item(SRC + '/Show.S01E01.mkv')]
+        kept = DST + '/合并保留'
+        disk.tree[DST].append(folder(kept))
+        disk.tree[kept] = [folder(kept + '/旧目录')]
+        disk.tree[kept + '/旧目录'] = [item(kept + '/旧目录/season.nfo', 1)]
+        legacy_ev = {
+            'source_cleanup_auxiliary': {
+                'source_path': AUX,
+                'target_path': kept,
+                'inventory': {
+                    '旧目录': folder(AUX + '/旧目录'),
+                    '旧目录/season.nfo': item(AUX + '/旧目录/season.nfo', 100),
+                },
+                'state': 'pending',
+            }
+        }
+        self.rec = self.season(
+            status='already_archived', archive_target_path=DST,
+            duplicate_episodes_json='[]', evidence_json=json.dumps(legacy_ev)
+        )
+        self.assert_blocked(self.run_cleanup(disk, new=False), disk)
 
     def test_archive_coverage_must_be_complete_before_any_move(self):
         disk = Cloud(); disk.tree[DST] = []
         self.assert_blocked(self.run_cleanup(disk), disk)
+        self.assertIn(AUX, disk.tree)
         self.assertEqual(disk.moves, [])
 
-    def test_archive_video_changes_during_move_prevent_cleanup(self):
-        disk = Cloud(); original = disk.move_file
-        async def move(*args, **kwargs):
-            result = await original(*args, **kwargs)
-            disk.tree[DST][0]['size'] += 1
-            return result
-        disk.move_file = move
+    def test_archive_video_changes_during_aux_cleanup_prevent_season_delete(self):
+        disk = Cloud(); original = disk.delete_file
+        async def delete_and_mutate(path):
+            res = await original(path)
+            if path == AUX:
+                disk.tree[DST][0]['size'] += 1
+            return res
+        disk.delete_file = delete_and_mutate
         self.assert_blocked(self.run_cleanup(disk), disk)
 
     def test_failed_delete_receipt_and_retry_do_not_duplicate_preservation(self):
-        disk = Cloud(); disk.delete_result = {'success': False}
+        disk = Cloud(); original = disk.delete_file
+        fail_src = True
+        async def delete_season_guard(path):
+            if path == SRC and fail_src:
+                return {'success': False}
+            return await original(path)
+        disk.delete_file = delete_season_guard
         self.assert_blocked(self.run_cleanup(disk), disk)
         self.assertEqual(json.loads(self.rec.evidence_json)['source_cleanup_auxiliary']['state'], 'pending')
-        self.assertEqual(len(disk.moves), 1)
-        disk.delete_result = {'success': True}
+        self.assertNotIn(AUX, disk.tree)
+        fail_src = False
         result = self.run_cleanup(disk, new=False)
         self.assertTrue(result.ok, result.message)
-        self.assertEqual(len(disk.moves), 1)
         self.assertEqual(json.loads(self.rec.evidence_json)['source_cleanup_auxiliary']['state'], 'completed')
 
     def test_source_receives_new_video_during_final_attachment_verification(self):
-        disk = Cloud(); original = disk.list_files; reads = []
-        async def read(path, **kwargs):
-            if path == DST + '/合并保留':
-                reads.append(path)
-                if len(reads) == 2:
-                    disk.tree[SRC].append(item(SRC + '/Show.S01E02.mkv'))
-            return await original(path, **kwargs)
-        disk.list_files = read
+        disk = Cloud(); original = disk.delete_file
+        async def delete_and_inject(path):
+            res = await original(path)
+            if path == AUX:
+                disk.tree[SRC].append(item(SRC + '/Show.S01E02.mkv'))
+            return res
+        disk.delete_file = delete_and_inject
         self.assert_blocked(self.run_cleanup(disk), disk)
 
-    def test_persisted_plan_survives_move_ack_failure_after_real_move(self):
-        disk = Cloud(); original = disk.move_file
-        async def move(*args, **kwargs):
-            await original(*args, **kwargs)
-            raise OSError('connection lost after remote move')
-        disk.move_file = move
+    def test_persisted_plan_survives_delete_ack_failure_after_real_aux_delete(self):
+        disk = Cloud(); original = disk.delete_file
+        fail_once = True
+        async def delete_lost_ack(path):
+            nonlocal fail_once
+            res = await original(path)
+            if path == AUX and fail_once:
+                fail_once = False
+                raise OSError('connection lost after remote aux delete')
+            return res
+        disk.delete_file = delete_lost_ack
         self.assert_blocked(self.run_cleanup(disk), disk)
         self.assertIn('source_cleanup_auxiliary', json.loads(self.rec.evidence_json))
         self.assertTrue(self.run_cleanup(disk, new=False).ok)
-        self.assertEqual(len(disk.moves), 1)
 
     def test_delete_success_but_source_still_visible_is_not_counted(self):
         disk = Cloud(); disk.keep_deleted = True

@@ -6272,6 +6272,7 @@
         const groups = Array.isArray(res.merge_items) ? res.merge_items : [];
         const dupItems = Array.isArray(res.clean_items) ? res.clean_items : [];
         const srcItems = Array.isArray(res.redundant_source_items) ? res.redundant_source_items : [];
+        const hbItems = Array.isArray(res.legacy_hebing_items) ? res.legacy_hebing_items : [];
         const skipped = Array.isArray(res.skipped_items) ? res.skipped_items : [];
         const skippedGroupedCount = groupRecommendedSkipped(skipped).length;
 
@@ -6289,7 +6290,7 @@
                 <div class="text-base font-black text-emerald-700 dark:text-emerald-300">${emptyShellCnt} 组</div>
               </div>
               <div class="p-2.5 rounded-xl bg-indigo-50 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-800">
-                <div class="text-[10px] text-indigo-600 dark:text-indigo-400">拟迁移/保全文件</div>
+                <div class="text-[10px] text-indigo-600 dark:text-indigo-400">拟迁移/补齐文件</div>
                 <div class="text-base font-black text-indigo-700 dark:text-indigo-300">${moveFileCnt} 个</div>
               </div>
               <div class="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700">
@@ -6307,13 +6308,13 @@
                 <div class="text-[10px] text-purple-600 dark:text-purple-400">已归档源端清理</div>
                 <div class="text-base font-black text-purple-700 dark:text-purple-300">${c.redundant_source_count || srcItems.length || 0} 季</div>
               </div>
+              <div class="p-2.5 rounded-xl bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-800">
+                <div class="text-[10px] text-rose-600 dark:text-rose-400">遗留「合并保留」清理</div>
+                <div class="text-base font-black text-rose-700 dark:text-rose-300">${c.legacy_hebing_count || hbItems.length || 0} 处</div>
+              </div>
               <div class="p-2.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800">
                 <div class="text-[10px] text-emerald-600 dark:text-emerald-400">预计释放空间</div>
-                <div class="text-base font-black text-emerald-700 dark:text-emerald-300">${escapeHtml(c.reclaimable_display || '0 B')}</div>
-              </div>
-              <div class="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700">
-                <div class="text-[10px] text-slate-500">预览暂未纳入</div>
-                <div class="text-base font-black text-slate-700 dark:text-slate-200">${skippedGroupedCount} 项</div>
+                <div class="text-base font-black text-emerald-700 dark:text-emerald-300">${escapeHtml(c.reclaimable_display || '0 B')}${skippedGroupedCount > 0 ? ` · 暂缓 ${skippedGroupedCount}` : ''}</div>
               </div>
             `;
           } else {
@@ -6327,8 +6328,8 @@
                 <div class="text-base font-black text-indigo-700 dark:text-indigo-300">${c.clean_count || dupItems.length || 0} 季</div>
               </div>
               <div class="p-2.5 rounded-xl bg-purple-50 dark:bg-purple-950/30 border border-purple-200 dark:border-purple-800">
-                <div class="text-[10px] text-purple-600 dark:text-purple-400">已归档源端清理</div>
-                <div class="text-base font-black text-purple-700 dark:text-purple-300">${c.redundant_source_count || srcItems.length || 0} 季</div>
+                <div class="text-[10px] text-purple-600 dark:text-purple-400">清源与遗留目录</div>
+                <div class="text-base font-black text-purple-700 dark:text-purple-300">${(c.redundant_source_count || srcItems.length || 0) + (c.legacy_hebing_count || hbItems.length || 0)} 项</div>
               </div>
               <div class="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700">
                 <div class="text-[10px] text-slate-500">预览暂未纳入</div>
@@ -6338,7 +6339,7 @@
           }
         }
 
-        const totalExec = groups.length + dupItems.length + srcItems.length;
+        const totalExec = groups.length + dupItems.length + srcItems.length + hbItems.length;
 
         const parts = [];
         if (groups.length > 0) {
@@ -6350,7 +6351,7 @@
                   ? '核验并对齐目录记录'
                   : (g.is_empty_shell_cleanup
                     ? `纯空壳安全回收（${g.empty_dir_count || 0} 个空目录${g.junk_file_count ? ` · ${g.junk_file_count} 个系统垃圾` : ''}）`
-                    : `移动 ${g.file_count || 0} · 去重 ${g.dedup_count || 0} · 附件保全 ${g.asset_count || 0} · 空目录核验 ${g.empty_dir_count || 0}`);
+                    : `移动 ${g.file_count || 0} · 去重 ${g.dedup_count || 0} · 补齐刮削 ${g.asset_count || 0} · 空目录核验 ${g.empty_dir_count || 0}`);
                 return `<div class="text-[11px] flex justify-between items-center gap-2 border-t border-amber-100 dark:border-amber-900/40 pt-1">
                   <span class="font-semibold flex items-center gap-1.5">${escapeHtml(g.canonical_dir_name || g.title || g.group_id)}${g.is_empty_shell_cleanup ? '<span class="px-1.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-900/60 text-emerald-700 dark:text-emerald-300 text-[10px] font-bold">空壳回收</span>' : ''}</span>
                   <span class="font-mono text-slate-500">${escapeHtml(detailTxt)}</span>
@@ -6381,6 +6382,18 @@
             </div>
           `);
         }
+        if (hbItems.length > 0) {
+          parts.push(`
+            <div class="p-3 rounded-xl bg-rose-50/50 dark:bg-rose-950/20 border border-rose-200 dark:border-rose-800/60 space-y-1.5">
+              <div class="font-bold text-rose-800 dark:text-rose-300">${effMode === 'redundant_clean' ? '③ ' : '④ '}历史遗留「合并保留」冗余刮削目录清理（${hbItems.length} 处）</div>
+              <div class="text-[11px] text-slate-500">已递归核验仅含冗余刮削图/NFO 或临时垃圾（0 视频/字幕），原地彻底清除，防止 Emby 误识为异常季。</div>
+              ${hbItems.map(h => `<div class="text-[11px] flex justify-between items-center gap-2 border-t border-rose-100 dark:border-rose-900/40 pt-1">
+                <span class="font-semibold">${escapeHtml(h.show_name)} · <span class="text-slate-500">${escapeHtml(h.scope_label)}</span></span>
+                <span class="font-mono text-rose-600 dark:text-rose-300">清理冗余刮削 ${h.file_count || 0} 个并移除目录</span>
+              </div>`).join('')}
+            </div>
+          `);
+        }
         if (skipped.length > 0) parts.push(renderRecommendedSkipped(skipped));
         if (parts.length === 0) {
           parts.push(`<div class="p-6 text-center text-slate-400">${escapeHtml(meta.emptyText)}</div>`);
@@ -6388,7 +6401,7 @@
         if (bodyEl) bodyEl.innerHTML = parts.join('');
         if (footEl) {
           footEl.textContent = effMode === 'merge_directory'
-            ? `计划编号 ${res.plan_id || '-'} · 全季覆盖与空壳安全核验 · 绝不覆盖同名有效媒体`
+            ? `计划编号 ${res.plan_id || '-'} · 全季覆盖与空壳安全核验 · 绝不生成「合并保留」目录`
             : `计划编号 ${res.plan_id || '-'} · 预计释放 ${c.reclaimable_display || '0 B'} · 自动校验文件指纹`;
         }
         if (execBtn) {
@@ -6414,9 +6427,10 @@
       const pct = Math.min(100, Math.round((done / total) * 100));
       const phaseLabels = {
         fingerprint_check: '步骤 0 · 并发校验文件指纹',
-        merge: '步骤 1/3 · 同作品目录规范化归并',
-        clean: '步骤 2/3 · 同季重复版本清理',
-        redundant: '步骤 3/3 · 已归档源端清理',
+        merge: '步骤 · 同作品目录规范化归并',
+        clean: '步骤 · 同季重复版本清理',
+        redundant: '步骤 · 已归档源端清理',
+        legacy_hebing: '步骤 · 清理历史遗留「合并保留」冗余目录',
         recalc: '收尾 · 重算任务汇总与五模块状态',
       };
       const phaseTitle = phaseLabels[snap?.phase] || '正在执行推荐处理';

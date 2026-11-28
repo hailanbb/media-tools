@@ -24,8 +24,11 @@ from app.core.episode_parser import companion_matches_video, classify_content_un
 from app.core.inspector import _parse_season_number, _verified_video, diagnose_season
 from app.core.segments import segment_number
 from app.core.source_cleanup_assets import (
-    checked_listing, read_auxiliary_tree, preserve_auxiliary_folder, verify_preserved_folder,
-    preserve_source_show_shell,
+    checked_listing,
+    clean_legacy_auxiliary_folder,
+    read_auxiliary_tree,
+    sync_missing_root_assets_and_clean_shell,
+    verify_preserved_folder,
 )
 from app.services.source_presence import source_entry, record_source_absent
 from app.core import batch_journal
@@ -165,7 +168,7 @@ async def _inspect_and_cleanup_source_show_dir(
         parent = posixpath.dirname(norm_show)
         siblings = checked_listing(await cd2.list_files(parent, force_refresh=True), parent)
         if not any(f["path"] == norm_show for f in siblings):
-            if previous_receipt:
+            if previous_receipt and not previous_receipt.get("cleaned_in_place"):
                 expected_shelf = str(target_parent or "") + "/合并保留/"
                 receipt_target = previous_receipt.get("target_path", "")
                 if (previous_receipt.get("source_path") != norm_show
@@ -225,12 +228,12 @@ async def _inspect_and_cleanup_source_show_dir(
                     or norm_show == target_parent or norm_show.startswith(target_parent + "/")
                     or target_parent.startswith(norm_show + "/")):
                 raise ValueError("剧根保全路径不在隔离的受控源库与归档库内")
-            receipt = await preserve_source_show_shell(
+            receipt = await sync_missing_root_assets_and_clean_shell(
                 cd2, show_path, target_parent,
                 extensions=KNOWN_PUBLIC_ASSET_EXTS | {".txt"}, before_move=before_move)
-            return dict(cleaned=True, status="cleaned", reason="剧根附件已保全，源剧集外层目录已移除",
-                        retained_items=[], migrated_assets=list(receipt["inventory"]),
-                        preserved_root={k: v for k, v in receipt.items() if k != "inventory"})
+            return dict(cleaned=True, status="cleaned", reason="缺失公共刮削已补齐至归档剧根，源剧集外层及冗余目录已移除",
+                        retained_items=[], migrated_assets=list(receipt.get("migrated_assets") or []),
+                        preserved_root=receipt)
         except Exception as e:
             return dict(cleaned=False, status="cleanup_failed", reason=f"剧根附件保全未完成：{e}",
                         retained_items=[f["name"] for f in source_items], migrated_assets=[])
@@ -1574,7 +1577,33 @@ async def execute_archive(
                                     season_results.append(_make_receipt(rec, "blocked", err_msg, next_step="goto_anomaly"))
                                     continue
 
-                        # 7. 所有前置门禁 100% 通过后，开始执行写入：先智能分流先导特辑至 Season 0
+                        # 7. 所有前置门禁 100% 通过后，开始执行写入：
+                        # 7.0 若源季内含旧版遗留的纯刮削「合并保留」目录，先原地安全核验清理，防止随整季迁入污染归档库
+                        legacy_hb_dirs = [
+                            d for d in contents if d.get("isDirectory") and d.get("name") == "合并保留"
+                        ]
+                        if legacy_hb_dirs:
+                            hb_block_err = ""
+                            for hb_d in legacy_hb_dirs:
+                                hb_p = hb_d.get("path") or f"{source_season_path}/合并保留"
+                                try:
+                                    hb_inv = await read_auxiliary_tree(cd2, hb_p)
+                                    await clean_legacy_auxiliary_folder(cd2, hb_p, hb_inv)
+                                except Exception as hb_exc:
+                                    hb_block_err = f"{rec.show_name} S{rec.season_number:02d}: 源季内遗留「合并保留」目录核验未通过 ({hb_exc})，安全暂停归档"
+                                    break
+                            if hb_block_err:
+                                errors.append(hb_block_err)
+                                rec.status = "review_needed"
+                                rec.status_detail = hb_block_err
+                                affected_tasks.add(rec.task_id)
+                                season_results.append(_make_receipt(rec, "blocked", hb_block_err, next_step="goto_review"))
+                                continue
+                            contents = [
+                                d for d in contents if not (d.get("isDirectory") and d.get("name") == "合并保留")
+                            ]
+
+                        # 7.1 智能分流先导特辑至 Season 0
                         moved_specials: list[str] = []
                         if special_files_to_move:
                             contents, moved_specials = await _migrate_specials_to_season_0(
@@ -3100,14 +3129,17 @@ async def _clean_source_redundant_impl(
                 preserved_auxiliary = []
                 previous_auxiliary = cleanup_evidence.get("source_cleanup_auxiliary")
                 if previous_auxiliary and not any(f["path"] == previous_auxiliary.get("source_path") for f in src_files):
-                    previous_target = previous_auxiliary.get("target_path", "")
-                    if (previous_auxiliary.get("source_path") != norm_src + "/合并保留"
-                            or not (previous_target == norm_target + "/合并保留"
-                                    or previous_target.startswith(norm_target + "/合并保留/"))
-                            or posixpath.normpath(previous_target) != previous_target):
-                        raise ValueError("既有附件保全回执与本季路径不一致")
-                    await verify_preserved_folder(cd2, previous_auxiliary)
-                    preserved_auxiliary.append(previous_auxiliary)
+                    if previous_auxiliary.get("cleaned_in_place"):
+                        preserved_auxiliary.append(previous_auxiliary)
+                    else:
+                        previous_target = previous_auxiliary.get("target_path", "")
+                        if (previous_auxiliary.get("source_path") != norm_src + "/合并保留"
+                                or not (previous_target == norm_target + "/合并保留"
+                                        or previous_target.startswith(norm_target + "/合并保留/"))
+                                or posixpath.normpath(previous_target) != previous_target):
+                            raise ValueError("既有附件保全回执与本季路径不一致")
+                        await verify_preserved_folder(cd2, previous_auxiliary)
+                        preserved_auxiliary.append(previous_auxiliary)
                 src_unique_content_videos: list[tuple[dict, tuple]] = []
                 unrecognized_videos: list[dict] = []
                 for sf in src_files:
@@ -3214,15 +3246,15 @@ async def _clean_source_redundant_impl(
                         except Exception as sub_mv_err:
                             raise ValueError(f"迁移字幕 {s_name} 失败") from sub_mv_err
                 moved_names = {s["name"] for s in src_subs if s["name"].casefold() not in target_sub_sizes} | preserved_unique_names
-                # 与识别流程同步：已核实纯附件的合并保留目录先保全，再继续同一次清源。
-                # 整体迁入，遇到归档端同名目录使用独立保全位置，绝不覆盖既有附件。
-                async def persist_auxiliary_intent(receipt):
-                    cleanup_evidence["source_cleanup_auxiliary"] = dict(receipt, state="pending")
+                # v2.5.85：对已强读确认 100% 纯冗余刮削的历史遗留「合并保留」目录原地安全清理，绝不再迁入归档库造成污染。
+                for folder_path, inventory in auxiliary_folders:
+                    cleanup_evidence["source_cleanup_auxiliary"] = dict(
+                        source_path=folder_path, target_path="", cleaned_in_place=True,
+                        file_count=sum(not f["isDirectory"] for f in inventory.values()), state="pending"
+                    )
                     rec.evidence_json = json.dumps(cleanup_evidence, ensure_ascii=False)
                     await db.commit()
-                for folder_path, inventory in auxiliary_folders:
-                    preserved_auxiliary.append(await preserve_auxiliary_folder(
-                        cd2, folder_path, archive_target, inventory, before_move=persist_auxiliary_intent))
+                    preserved_auxiliary.append(await clean_legacy_auxiliary_folder(cd2, folder_path, inventory))
                     moved_names.add(posixpath.basename(folder_path))
                 def signature(files):
                     return sorted((f["path"], f.get("size"), f.get("modified"), f.get("isDirectory"), str(f.get("id", "")))
@@ -3314,7 +3346,7 @@ async def _clean_source_redundant_impl(
                     rec.evidence_json = json.dumps(cleanup_evidence, ensure_ascii=False)
                 preserved_note = f"（已先保全 {len(preserved_unique_names)} 个独有内容至归档）" if preserved_unique_names else ""
                 if preserved_auxiliary:
-                    preserved_note += f"（已先保全合并保留目录内 {sum(r['file_count'] for r in preserved_auxiliary)} 个附件）"
+                    preserved_note += f"（已原地清理遗留合并保留目录内 {sum(r['file_count'] for r in preserved_auxiliary)} 个冗余刮削文件）"
                 root_note = "剧集外层已移除" if shell_cleaned else "剧集外层保留：" + str(cleanup_info.get("reason", ""))
                 rec.status_detail = f"本季已清理，{root_note}；归档已保留{preserved_note}"
                 cleanup_notes.append(f"{rec.show_name} S{rec.season_number:02d}: {root_note}")
@@ -4024,6 +4056,7 @@ async def build_recommended_batch_plan(
     merge_items: list[dict[str, Any]] = []
     clean_items: list[dict[str, Any]] = []
     redundant_source_items: list[dict[str, Any]] = []
+    legacy_hebing_items: list[dict[str, Any]] = []
     skipped_items: list[dict[str, Any]] = []
 
     cd2 = CloudDrive2Client()
@@ -4233,6 +4266,74 @@ async def build_recommended_batch_plan(
                     "title": f"{w.get('show_name')} S{int(w.get('season_number') or 1):02d}",
                     "reason": c_plan.get("reason") or "尚无可安全执行的清理动作",
                     "reason_type": "deferred" if c_plan.get("deferred_files") else "inventory_blocked"})
+
+        # 2B. 扫描并清理任务内各活动剧集根与季目录下的历史遗留「合并保留」冗余刮削目录 (v2.5.85)
+        if include_clean:
+            redundant_season_paths = {normalize_dir_path(r["season_path"]) for r in redundant_source_items if r.get("season_path")}
+            merge_covered_paths = {
+                normalize_dir_path(p)
+                for m in merge_items
+                for p in [m.get("source_target_show_path"), *(m.get("merge_from_show_paths") or [])]
+                if p
+            }
+            candidate_containers: dict[str, tuple[str, str]] = {}
+            for r in rows:
+                if body.season_record_ids and r.id not in set(body.season_record_ids):
+                    continue
+                sh_p = normalize_dir_path(r.show_path or "")
+                sn_p = normalize_dir_path(r.season_path or "")
+                sh_title = r.show_name or posixpath.basename(sh_p)
+                if sh_p and sh_p not in merge_covered_paths:
+                    candidate_containers.setdefault(sh_p, (sh_title, "剧集根目录"))
+                if sn_p and sn_p != sh_p and sn_p not in redundant_season_paths and sh_p not in merge_covered_paths:
+                    candidate_containers.setdefault(sn_p, (sh_title, f"S{int(r.season_number or 1):02d} 季目录"))
+
+            async def _probe_legacy_hebing(container_path: str, show_title: str, scope_label: str):
+                async with sem:
+                    try:
+                        entries_c = await asyncio.wait_for(cd2.list_files(container_path, force_refresh=False), timeout=10.0)
+                    except Exception:
+                        return None
+                    if not isinstance(entries_c, list):
+                        return None
+                    hb_entry = next((e for e in entries_c if isinstance(e, dict) and e.get("isDirectory") and e.get("name") == "合并保留"), None)
+                    if not hb_entry:
+                        return None
+                    hb_path = normalize_dir_path(hb_entry.get("path") or f"{container_path}/合并保留")
+                    try:
+                        inv = await asyncio.wait_for(read_auxiliary_tree(cd2, hb_path), timeout=15.0)
+                        f_cnt = sum(1 for v in inv.values() if not v.get("isDirectory"))
+                        return ("ok", {
+                            "folder_path": hb_path,
+                            "parent_path": container_path,
+                            "show_name": show_title,
+                            "scope_label": scope_label,
+                            "file_count": f_cnt,
+                            "inventory": inv,
+                        })
+                    except Exception as hb_err:
+                        return ("skip", {
+                            "kind": "clean_legacy_hebing",
+                            "title": f"{show_title} ({scope_label})",
+                            "paths": [hb_path],
+                            "reason": f"遗留「合并保留」目录包含待人工核对文件：{hb_err}",
+                            "reason_type": "file_conflict",
+                            "next_action": "人工核查该目录内非刮削文件",
+                        })
+
+            if candidate_containers:
+                hb_results = await asyncio.gather(*(
+                    _probe_legacy_hebing(cp, info[0], info[1])
+                    for cp, info in candidate_containers.items()
+                ))
+                for hb_res in hb_results:
+                    if not hb_res:
+                        continue
+                    tag, payload = hb_res
+                    if tag == "ok":
+                        legacy_hebing_items.append(payload)
+                    else:
+                        skipped_items.append(payload)
     finally:
         await cd2.close()
 
@@ -4249,6 +4350,7 @@ async def build_recommended_batch_plan(
     total_files_affected = (
         sum(m["file_count"] + m["dedup_count"] + m.get("asset_count", 0) for m in merge_items)
         + sum(c["delete_count"] for c in clean_items)
+        + sum(h["file_count"] for h in legacy_hebing_items)
     )
     total_reclaimable_bytes = sum(c["reclaimable_bytes"] for c in clean_items)
 
@@ -4313,10 +4415,12 @@ async def build_recommended_batch_plan(
             "merge_count": len(merge_items),
             "clean_count": len(clean_items),
             "redundant_source_count": len(redundant_source_items),
+            "legacy_hebing_count": len(legacy_hebing_items),
         },
         "merge_items": merge_items,
         "clean_items": clean_items,
         "redundant_source_items": redundant_source_items,
+        "legacy_hebing_items": legacy_hebing_items,
         "skipped_items": skipped_items,
         "step_receipts": {},
         "scope_record_ids": scope_record_ids,
@@ -4371,6 +4475,15 @@ async def build_recommended_batch_plan(
                 "predicted_next_label": r["predicted_next_label"],
             }
             for r in redundant_source_items
+        ],
+        "legacy_hebing_items": [
+            {
+                "folder_path": h["folder_path"],
+                "show_name": h["show_name"],
+                "scope_label": h["scope_label"],
+                "file_count": h["file_count"],
+            }
+            for h in legacy_hebing_items
         ],
         "skipped_items": skipped_items,
     }
@@ -4445,7 +4558,8 @@ async def _run_recommended_batch_plan_locked(
     merge_items = plan.get("merge_items") or []
     clean_items = plan.get("clean_items") or []
     redundant_items = plan.get("redundant_source_items") or []
-    total_steps = len(merge_items) + len(clean_items) + len(redundant_items)
+    legacy_hebing_items = plan.get("legacy_hebing_items") or []
+    total_steps = len(merge_items) + len(clean_items) + len(redundant_items) + len(legacy_hebing_items)
 
     # G24: 并发对所有待删清理项做局部文件指纹复核（Semaphore=10），发现真正新增或变化视频则阻断并提示重新预览
     pending_clean_checks = [
@@ -4500,6 +4614,7 @@ async def _run_recommended_batch_plan_locked(
     executed_merges: list[dict[str, Any]] = []
     executed_cleans: list[dict[str, Any]] = []
     executed_redundant: list[dict[str, Any]] = []
+    executed_hebing: list[dict[str, Any]] = []
     failed_steps: list[dict[str, Any]] = []
     touched_record_ids: set[str] = set()
     merged_show_paths_norm: set[str] = set()
@@ -4703,6 +4818,41 @@ async def _run_recommended_batch_plan_locked(
             plan.pop("inflight_step", None)
             batch_journal.save(body.plan_id, plan)
             done_steps += 1
+
+        # 3B. 原地安全清理任务内遗留的纯刮削「合并保留」目录 (v2.5.85)
+        for idx, h_item in enumerate(legacy_hebing_items, start=1):
+            hb_path = h_item["folder_path"]
+            label = f"{h_item['show_name']} ({h_item['scope_label']})"
+            _emit("legacy_hebing", f"正在清理遗留合并保留目录 ({idx}/{len(legacy_hebing_items)})：{label}", done_steps, total_steps, label)
+            step_key = f"hebing:{hb_path}"
+            if step_receipts.get(step_key, {}).get("status") == "completed":
+                executed_hebing.append(step_receipts[step_key])
+                done_steps += 1
+                continue
+            if plan.get("stop_requested"):
+                break
+            plan["inflight_step"] = step_key
+            batch_journal.save(body.plan_id, plan)
+            try:
+                hb_res = await clean_legacy_auxiliary_folder(cd2_exec, hb_path, h_item.get("inventory"))
+                try:
+                    await cd2_exec.list_files(h_item["parent_path"], force_refresh=True)
+                except Exception:
+                    pass
+                rec_obj = {
+                    "status": "completed",
+                    "folder_path": hb_path,
+                    "show_name": h_item["show_name"],
+                    "scope_label": h_item["scope_label"],
+                    "deleted_files": hb_res.get("file_count", 0),
+                }
+                step_receipts[step_key] = rec_obj
+                executed_hebing.append(rec_obj)
+            except Exception as e:
+                failed_steps.append({"step": step_key, "kind": "clean_legacy_hebing", "title": label, "error": str(e)})
+            plan.pop("inflight_step", None)
+            batch_journal.save(body.plan_id, plan)
+            done_steps += 1
     finally:
         await cd2_exec.close()
 
@@ -4766,12 +4916,13 @@ async def _run_recommended_batch_plan_locked(
 
     unresolved_count = len(outcomes["remaining_review"]) + len(outcomes["remaining_anomalies"]) + len(outcomes["skipped_items"])
     fully_resolved = not failed_steps and unresolved_count == 0 and not plan.get("stop_requested")
-    progress_made = bool(executed_merges or executed_cleans or executed_redundant)
+    progress_made = bool(executed_merges or executed_cleans or executed_redundant or executed_hebing)
     no_progress = not fully_resolved and not progress_made and not plan.get("stop_requested")
     if failed_steps:
         plan["requires_repreview"] = True
     batch_journal.save(body.plan_id, plan)
     plan_mode = str(plan.get("mode") or "all")
+    hb_msg_part = f"、遗留合并保留清理 {len(executed_hebing)} 处" if executed_hebing else ""
     if plan_mode == "merge_directory":
         final_msg = (
             f"批量处理多目录完成：目录归并 {len(executed_merges)} 组"
@@ -4779,12 +4930,12 @@ async def _run_recommended_batch_plan_locked(
         )
     elif plan_mode == "redundant_clean":
         final_msg = (
-            f"批量冗余清理完成：副本清理 {len(executed_cleans)} 季、源端清源 {len(executed_redundant)} 季"
+            f"批量冗余清理完成：副本清理 {len(executed_cleans)} 季、源端清源 {len(executed_redundant)} 季{hb_msg_part}"
             f"；待复核剩余 {len(outcomes['remaining_review'])} 季、待核实异常 {len(outcomes['remaining_anomalies'])} 季、失败 {len(failed_steps)} 项"
         )
     else:
         final_msg = (
-            f"本轮执行结束：目录归并 {len(executed_merges)} 组、副本清理 {len(executed_cleans)} 季、源端清源 {len(executed_redundant)} 季"
+            f"本轮执行结束：目录归并 {len(executed_merges)} 组、副本清理 {len(executed_cleans)} 季、源端清源 {len(executed_redundant)} 季{hb_msg_part}"
             + f"；待复核清理剩余 {len(outcomes['remaining_review'])} 季、待核实异常 {len(outcomes['remaining_anomalies'])} 季、失败 {len(failed_steps)} 项"
         )
     return {
@@ -4795,11 +4946,12 @@ async def _run_recommended_batch_plan_locked(
         "can_refresh_remaining": bool(not fully_resolved and (progress_made or plan.get("stop_requested"))),
         "stopped": bool(plan.get("stop_requested")),
         "unresolved_count": unresolved_count,
-        "partial_success": bool(failed_steps and (executed_merges or executed_cleans or executed_redundant)),
+        "partial_success": bool(failed_steps and (executed_merges or executed_cleans or executed_redundant or executed_hebing)),
         "plan_id": body.plan_id,
         "executed_merges": executed_merges,
         "executed_cleans": executed_cleans,
         "executed_redundant": executed_redundant,
+        "executed_hebing": executed_hebing,
         "failed_steps": failed_steps,
         "outcomes": outcomes,
         "summary": summary,

@@ -19,7 +19,7 @@ def cloud():
     d = Cloud()
     d.tree['/src'] = [folder(SHOW)]
     d.tree[TARGET] = [folder(DST), item(TARGET + '/poster.jpg', 999)]
-    d.tree[SHOW] += [folder(ROOT_AUX), item(SHOW + '/poster.jpg')]
+    d.tree[SHOW] += [folder(ROOT_AUX), item(SHOW + '/poster.jpg'), item(SHOW + '/clearlogo.png', 256)]
     d.tree[ROOT_AUX] = [item(ROOT_AUX + '/season.nfo')]
     return d
 
@@ -55,11 +55,15 @@ class RootCleanup(unittest.TestCase):
         self.assertTrue(result.ok, result.message)
         self.assertEqual(disk.tree['/src'], [])
         self.assertEqual([x['size'] for x in disk.tree[TARGET] if x['name'] == 'poster.jpg'], [999])
+        self.assertEqual([x['size'] for x in disk.tree[TARGET] if x['name'] == 'clearlogo.png'], [256])
         ev = json.loads(self.rec.evidence_json)
         target = ev['source_root_preservation']['target_path']
+        self.assertEqual(target, TARGET)
         self.assertEqual(ev['source_root_preservation']['state'], 'completed')
+        self.assertTrue(ev['source_root_preservation']['cleaned_in_place'])
         self.assertTrue(ev['source_root_cleanup']['cleaned'])
-        self.assertIn(target + '/合并保留', disk.tree)
+        self.assertNotIn(TARGET + '/合并保留', disk.tree)
+        self.assertNotIn(ROOT_AUX, disk.tree)
         self.assertIn('剧集外层已移除', result.message)
         self.assertEqual(disk.deleted.count(SRC), 1)
 
@@ -69,6 +73,7 @@ class RootCleanup(unittest.TestCase):
         self.assertTrue(result.ok, result.message)
         self.assertNotIn(SRC, disk.deleted)
         self.assertEqual(disk.tree['/src'], [])
+        self.assertNotIn(TARGET + '/合并保留', disk.tree)
 
     def test_another_season_is_retained_and_explained(self):
         disk = cloud(); disk.tree[SHOW].append(folder(SHOW + '/Season 2'))
@@ -102,7 +107,7 @@ class RootCleanup(unittest.TestCase):
     def test_root_move_failure_can_resume_without_redeleting_season(self):
         disk = cloud(); original = disk.move_file
         async def move(src, parent, **kw):
-            return {'success': False} if src == SHOW else await original(src, parent, **kw)
+            return {'success': False} if src == SHOW + '/clearlogo.png' else await original(src, parent, **kw)
         disk.move_file = move
         self.assertFalse(self.run_cleanup(disk).ok)
         self.assertEqual(self.rec.status, 'already_archived')
@@ -115,23 +120,40 @@ class RootCleanup(unittest.TestCase):
         disk = cloud(); original = disk.move_file
         async def move(src, parent, **kw):
             result = await original(src, parent, **kw)
-            if src == SHOW:
+            if src == SHOW + '/clearlogo.png':
                 raise OSError('lost response')
             return result
         disk.move_file = move
         self.assertFalse(self.run_cleanup(disk).ok)
         self.assertTrue(self.run_cleanup(disk, new=False).ok)
-        self.assertEqual(sum(src == SHOW for src, _, _ in disk.moves), 1)
+        self.assertEqual(sum(src == SHOW + '/clearlogo.png' for src, _, _ in disk.moves), 1)
 
     def test_missing_root_attachment_after_move_cannot_be_bypassed_on_retry(self):
         disk = cloud(); original = disk.move_file
         async def move(src, parent, **kw):
             result = await original(src, parent, **kw)
-            if src == SHOW:
-                disk.tree[parent + '/Show/合并保留'] = []
+            if src == SHOW + '/clearlogo.png':
+                disk.tree[TARGET] = [x for x in disk.tree[TARGET] if x['name'] != 'clearlogo.png']
             return result
         disk.move_file = move
         self.assertFalse(self.run_cleanup(disk).ok)
+        self.assertEqual(self.rec.status, 'already_archived')
+        # 兼容旧版未完成外层保全回执：若目标附件缺失，源剧根消失后重试依然拒绝闭环
+        disk.tree['/src'] = []
+        disk.tree.pop(SHOW, None)
+        shelf = TARGET + '/合并保留/清源-legacy'
+        disk.tree[TARGET].append(folder(TARGET + '/合并保留'))
+        disk.tree[TARGET + '/合并保留'] = [folder(shelf)]
+        disk.tree[shelf] = []
+        ev = json.loads(self.rec.evidence_json)
+        ev['source_root_preservation'] = {
+            'source_path': SHOW,
+            'target_path': shelf,
+            'inventory': {'poster.jpg': item(SHOW + '/poster.jpg')},
+            'state': 'pending',
+        }
+        self.rec.evidence_json = json.dumps(ev)
+        self.session.commit()
         self.assertFalse(self.run_cleanup(disk, new=False).ok)
         self.assertEqual(self.rec.status, 'already_archived')
 

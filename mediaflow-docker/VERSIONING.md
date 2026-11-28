@@ -1,5 +1,20 @@
 # MediaFlow 版本管理
 
+## v2.5.85（2026-11-28，已同步 GitHub）
+
+- **全链路彻底废除生成「合并保留」目录，并支持历史遗留「合并保留」安全检测与一键原地清理**：
+  - **问题根因与三大衍生隐患彻底根治**：
+    - 旧版在同 TMDB 多目录归并（M09）或归档清源（v2.5.59–60）遇到同名刮削资产（`tvshow.nfo`、`poster.jpg`、`season.nfo`）或未纳入白名单的刮削图（`backdrop.jpg`、`season04-poster.jpg`）时，会新建 `{剧根或季}/合并保留/{旧剧名}` 甚至迁入归档库 `nas.finish/.../合并保留/清源-xxx`。
+    - 现网取证证实该目录存在严重副作用：① Emby / Jellyfin 会将剧根下的 `合并保留` 误识别为独立季度并主动写入 `合并保留/season.nfo` 污染媒体库；② 刮削器残留的隐藏原子写临时文件（如 `.tvshow.nfo.6TlXQz`）因非标准扩展名触发旧版“待核对文件”拦截导致清源永久死锁；③ 将源端冗余刮削垃圾扩散进纯净归档库。
+  - **识别底座补全标准刮削资产与临时文件分类（`app/core/auxiliary_inventory.py`）**：
+    - 新增 `is_ignorable_junk_or_scrape_temp`（识别 `.DS_Store / Thumbs.db / desktop.ini / ._*` 及 `.tvshow.nfo.6TlXQz` 等隐藏刮削原子写临时文件）、`is_standard_scrape_asset`（覆盖 `tvshow.nfo / season*.nfo / poster / backdrop / fanart / banner / clearlogo / logo / clearart / landscape / thumb / folder / disc / seasonXX-poster` 等）与 `is_disposable_legacy_aux_file`。
+  - **多目录归并、常规归档与源端收尾 100% 零新建「合并保留」（`app/core/directory_merge.py`、`app/core/source_cleanup_assets.py`、`app/api/archive.py`）**：
+    - 多目录归并：目标缺失的标准刮削文件直接补齐至目标剧根／季目录；目标已存在同名的冗余刮削文件纳入 `redundant_scrape_to_clean`（经指纹复核后原地清理，绝不覆盖目标已有资产）；隐藏临时垃圾纳入 `junk_files_to_clean`；同名异内容视频或 `Season 0` 特辑改为在同季／`Season 0` 内附加扁平防撞后缀 `{stem} [源-{tag}]{ext}`，不再创建任何子目录；未知非刮削文件直接标记冲突交人工确认。
+    - 常规归档与清源收尾：归档执行前置步骤 `7.0` 自动强读核验并原地清理源季遗留 `合并保留`，杜绝随整季搬入归档库；源端清源与剧集外层收尾升级为 `clean_legacy_auxiliary_folder` 与 `sync_missing_root_assets_and_clean_shell`（仅补齐归档剧根缺失的公共刮削文件，冗余刮削与遗留 `合并保留` 原地自底向上销毁，并保留旧版历史回执只读后验兼容）。
+  - **「批量冗余清理」自动发现并一键清理存量遗留「合并保留」（`app/api/archive.py`、`frontend/index.html`）**：
+    - `POST /api/archive/recommended-plan` 在 `mode="redundant_clean"`（及 `"all"`）下并发扫描全任务活跃剧根与季目录中的历史遗留 `合并保留`：纯刮削／临时垃圾目录纳入 `legacy_hebing_items`（前端弹窗独立展示「遗留『合并保留』清理 (N 处)」统计卡片与执行进度），内含视频／字幕／未知文件的异常目录自动拦入「预览暂未纳入」保护。
+  - **新增专项回归测试并升级历史套件**：新增 `tests/test_v2585_eliminate_hebing_baoliu.py`（覆盖 TMDB 127635 零合并保留归并、批量扫描清理存量 `合并保留` 与异常视频拦截、清源零污染归档库），同步升级 `test_v2539_directory_merge.py`、`test_v2559_source_cleanup.py` 与 `test_v2560_source_root.py`。
+
 ## v2.5.84（2026-11-28，已同步 GitHub）
 
 - **「齐全可归档」分类准入统一、受阻精准模块导航与「人工复核无误 · 强制归档」安全闭环**：

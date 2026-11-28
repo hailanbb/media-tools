@@ -265,13 +265,15 @@ class TestV2539DirectoryMerge(unittest.IsolatedAsyncioTestCase):
         self.assertIn("谎言 - S01E02 - Episode.02.1080p.WEB-DL.mkv", new_names)
         self.assertIn("谎言 - S01E01 - Episode.01.1080p.WEB-DL.zh-Hans.srt", new_names)
 
-        # 校验资产保全 (M09)
+        # 校验资产补齐与同名冗余刮削清理 (M09 · v2.5.85 废除生成合并保留)
         preserve_list = plan["assets_to_preserve"]
         preserve_names = [p["file_name"] for p in preserve_list]
-        self.assertIn("tvshow.nfo", preserve_names)
-        # 目标已存在同名 tvshow.nfo，因此应保全至合并保留子目录
-        nfo_preserve = next(p for p in preserve_list if p["file_name"] == "tvshow.nfo")
-        self.assertIn("合并保留", nfo_preserve["target_dir"])
+        self.assertIn("poster.jpg", preserve_names)
+        poster_preserve = next(p for p in preserve_list if p["file_name"] == "poster.jpg")
+        self.assertEqual(poster_preserve["target_dir"], target_show_path)
+        # 目标已存在同名 tvshow.nfo，不覆盖目标且不制造「合并保留」目录，旧副本纳入冗余刮削清理
+        redundant_scrape_names = [s["file_name"] for s in plan.get("redundant_scrape_to_clean", [])]
+        self.assertIn("tvshow.nfo", redundant_scrape_names)
 
         # ------------------------------------------------------------------
         # 阶段 3: 执行合并闭环 (M01, M05, M09, M11, M13)
@@ -285,7 +287,7 @@ class TestV2539DirectoryMerge(unittest.IsolatedAsyncioTestCase):
             exec_data = resp_exec.json()
             self.assertTrue(exec_data["ok"])
             self.assertIn("已合并到谎言", exec_data["message"])
-            self.assertIn("旧目录已清理", exec_data["message"])
+            self.assertIn("实际空目录", exec_data["message"])
 
         # 物理验证：目标季目录应包含 E01–E05 全 5 集视频及外挂字幕
         expected_tgt_e1 = f"{target_s1}/谎言 - S01E01 - Episode.01.1080p.WEB-DL.mkv"
@@ -303,9 +305,10 @@ class TestV2539DirectoryMerge(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(os.path.exists(old_s1), "旧 Season 1 目录应已被安全清理")
         self.assertFalse(os.path.exists(old_show_path), "旧剧根空壳应已被安全清理")
 
-        # 保全附件已存在
-        preserved_nfo_path = f"{target_show_path}/合并保留/完美的谎言 (2026) [tmdbid=307478]/tvshow.nfo"
-        self.assertTrue(os.path.exists(preserved_nfo_path))
+        # 缺失海报已补齐至目标剧根，目标原有 tvshow.nfo 未被覆盖，且绝不产生「合并保留」目录
+        self.assertTrue(os.path.exists(f"{target_show_path}/poster.jpg"))
+        self.assertEqual(Path(f_tgt_root_nfo).read_text(encoding="utf-8"), "target-nfo-content")
+        self.assertFalse(os.path.exists(f"{target_show_path}/合并保留"))
 
         # ------------------------------------------------------------------
         # 阶段 4: 数据库与分类回流验证 (M13)
